@@ -1,12 +1,63 @@
-# IDE settings
-.vscode/
-
-# Project Data (Kafka, Zookeeper, QuestDB storage)
+# ==========================================
+# 1. TÀI NGUYÊN HỆ THỐNG (INFRASTRUCTURE)
+# ==========================================
 data/
 
-# Python cache
+# ==========================================
+# 2. PYTHON (DATA PIPELINE)
+# ==========================================
 __pycache__/
 *.pyc
 
-# Environment variables
+# ==========================================
+# 3. NODE.JS / TYPESCRIPT (BACKEND & FRONTEND)
+# ==========================================
+node_modules/
+dist/
+build/
+
+# Tests
+coverage/
+.nyc_output/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temp & Runtime data
+.temp
+.tmp
+pids
+*.pid
+*.seed
+*.pid.lock
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# ==========================================
+# 4. MÔI TRƯỜNG (ENVIRONMENT VARIABLES)
+# ==========================================
 .env
+.env.*
+!.env.example
+
+# ==========================================
+# 5. IDE VÀ HỆ ĐIỀU HÀNH
+# ==========================================
+# OS
+.DS_Store
+
+# IDEs
+.idea/
+.project
+.classpath
+.settings/
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
