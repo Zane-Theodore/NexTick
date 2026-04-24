@@ -1,0 +1,12 @@
+# IDE settings
+.vscode/
+
+# Project Data (Kafka, Zookeeper, QuestDB storage)
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
