@@ -14,6 +14,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private pool: Pool;
 
   async onModuleInit() {
+    this.logger.log('[DB_INIT] Initializing database connection...');
+
     this.pool = new Pool({
         user: this.configService.get('QUESTDB_USER'),
         host: this.configService.get('QUESTDB_HOST'),
@@ -24,19 +26,35 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.pool.query('SELECT 1');
-      this.logger.log('Database connection established successfully.');
+      this.logger.log('[DB_INIT_SUCCESS] Database connection established successfully.');
     } catch (error) {
-      this.logger.error('Failed to establish database connection.');
+      this.logger.error('[DB_INIT_ERROR] Failed to establish database connection.');
       throw error;
     }
   }
 
   async onModuleDestroy() {
     await this.pool.end();
-    this.logger.log('Database connection closed.');
+    this.logger.log('[DB_DESTROY] Database connection closed.');
   }
 
   async query(sqlText: string, params?: any[]) {
-    return this.pool.query(sqlText, params);
+    this.logger.debug('[DB_QUERY] Executing query', {
+      sql: sqlText,
+      params,
+    });
+
+    try {
+      const result = await this.pool.query(sqlText, params);
+
+      this.logger.debug('[DB_QUERY_SUCCESS] Query executed successfully', {
+        rowCount: result.rowCount,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('[DB_QUERY_ERROR] Query execution failed');
+      throw error;
+    }
   }
 }
