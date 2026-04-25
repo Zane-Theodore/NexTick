@@ -1,18 +1,25 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { 
+  Injectable, 
+  Logger, 
+  OnModuleInit, 
+  OnModuleDestroy } from '@nestjs/common';
 import { Pool } from 'pg';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
+  constructor(private readonly configService: ConfigService) {}
+
   private readonly logger = new Logger(DatabaseService.name);
   private pool: Pool;
 
   async onModuleInit() {
     this.pool = new Pool({
-        user: 'admin',
-        host: 'localhost',
-        database: 'qdb',
-        password: 'quest',
-        port: 8812,
+        user: this.configService.get('QUESTDB_USER'),
+        host: this.configService.get('QUESTDB_HOST'),
+        database: this.configService.get('QUESTDB_DB_NAME'),
+        password: this.configService.get('QUESTDB_PASSWORD'),
+        port: this.configService.get('QUESTDB_PORT'),
     });
 
     try {
