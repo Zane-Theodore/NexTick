@@ -22,6 +22,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         database: this.configService.get('QUESTDB_DB_NAME'),
         password: this.configService.get('QUESTDB_PASSWORD'),
         port: this.configService.get('QUESTDB_PORT'),
+        max: this.configService.get('QUESTDB_POOL_MAX'),
+        connectionTimeoutMillis: this.configService.get('QUESTDB_POOL_TIMEOUT'),
+        idleTimeoutMillis: this.configService.get('QUESTDB_POOL_IDLE_TIMEOUT'),
     });
 
     try {
@@ -34,8 +37,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    await this.pool.end();
-    this.logger.log('[DB_DESTROY] Database connection closed.');
+    if (this.pool) {
+      await this.pool.end();
+      this.logger.log('[DB_DESTROY] Database connection closed.');
+    }
   }
 
   async query(sqlText: string, params?: any[]) {
