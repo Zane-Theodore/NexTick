@@ -39,4 +39,13 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
     this.logger.debug('[WS_EVENT] Emitting candle.created event to clients', { candleData });
     this.server.emit('candle.created', candleData);
   }
+
+  @OnEvent('trade.raw')
+  handleRawTradeEvent(tradeData: any) {
+    this.logger.debug('[WS_EVENT] Emitting trade.raw event to clients', { 
+      price: tradeData.price, 
+      volume: tradeData.volume 
+    });
+    this.server.emit('trade.raw', tradeData);
+  }
 }
