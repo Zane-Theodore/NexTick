@@ -9,7 +9,16 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Logger } from '@nestjs/common';
 
 @WebSocketGateway({
-  cors: { origin: '*' },
+  cors: { 
+    origin: [
+      'http://localhost:3000',
+      'http://localhost:5173',
+    ],
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  transports: ['websocket', 'polling'],
+  allowEIO3: true,
 })
 export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() 
