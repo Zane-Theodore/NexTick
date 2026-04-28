@@ -57,7 +57,10 @@ export default function TradingChart() {
 
     fetchHistory();
 
-    const socket = io('http://localhost:3000');
+    const socket = io('http://localhost:3000', {
+      transports: ['websocket', 'polling'],
+      withCredentials: true
+    });
 
     socket.on('candle.created', (newCandleData: any) => {
       candlestickSeries.update(formatCandle(newCandleData));
