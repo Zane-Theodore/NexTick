@@ -13,6 +13,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   private kafka: Kafka;
   private candleConsumer: Consumer;
   private tradeConsumer: Consumer;
+  private updatingCandleConsumer: Consumer;
 
   constructor(
     private readonly configService: ConfigService,
@@ -27,11 +28,11 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       brokers: this.configService.get<string>('KAFKA_BROKER').split(','),
     });
 
-    // Consumer cho completed candles (1 phút)
+    // Consumer cho completed candles (1 minute)
     await this.initCandleConsumer();
-    
-    // Consumer cho raw trades (real-time)
-    await this.initTradeConsumer();
+
+    // Consumer cho updating candles (500ms)
+    await this.initUpdatingCandleConsumer();
 
     this.logger.log('[KAFKA_INIT_SUCCESS] All Kafka consumers initialized and running.');
   }
@@ -74,43 +75,57 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async initTradeConsumer() {
-    this.tradeConsumer = this.kafka.consumer({ 
-      groupId: `${this.configService.get<string>('KAFKA_GROUP_ID')}-trades` 
+  private async initUpdatingCandleConsumer() {
+    this.updatingCandleConsumer = this.kafka.consumer({ 
+      groupId: `${this.configService.get<string>('KAFKA_GROUP_ID')}-updating-candles` 
     });
 
     try {
-      await this.tradeConsumer.connect();
-      await this.tradeConsumer.subscribe({ 
-        topic: this.configService.get<string>('KAFKA_TOPIC_RAW_TRADES') || 'raw-trades', 
+      await this.updatingCandleConsumer.connect();
+      await this.updatingCandleConsumer.subscribe({ 
+        topic: this.configService.get<string>('KAFKA_TOPIC_UPDATING_CANDLES') || 'updating-candles', 
         fromBeginning: false 
       });
 
-      await this.tradeConsumer.run({
+      await this.updatingCandleConsumer.run({
         eachMessage: async ({ message }) => {
           const rawValue = message.value?.toString();
           if (!rawValue) {
-            this.logger.warn('[TRADE_MESSAGE_WARNING] Received message with empty value.');
+            this.logger.warn('[UPDATING_CANDLE_MESSAGE_WARNING] Received message with empty value.');
             return;
           }
 
           try {
-            const tradeData = JSON.parse(rawValue);
-            this.logger.debug('[TRADE_MESSAGE_RECEIVED] Raw trade received', { 
-              price: tradeData.price, 
-              volume: tradeData.volume 
+            const updatingCandleData = JSON.parse(rawValue);
+            
+            if (!updatingCandleData.open || !updatingCandleData.high || !updatingCandleData.low || !updatingCandleData.close) {
+              this.logger.error('[UPDATING_CANDLE_VALIDATION_ERROR] Invalid candle data received', { 
+                symbol: updatingCandleData.symbol,
+                open: updatingCandleData.open,
+                high: updatingCandleData.high,
+                low: updatingCandleData.low,
+                close: updatingCandleData.close,
+                volume: updatingCandleData.volume
+              });
+              return;
+            }
+            
+            this.logger.debug('[UPDATING_CANDLE_MESSAGE_RECEIVED] Updating candle received', { 
+              symbol: updatingCandleData.symbol,
+              close: updatingCandleData.close,
+              volume: updatingCandleData.volume
             });
 
-            this.eventEmitter.emit('trade.raw', tradeData);
+            this.eventEmitter.emit('candle.updating', updatingCandleData);
           } catch (error) {
-            this.logger.error('[TRADE_MESSAGE_ERROR] Failed to parse trade message.', { error, rawValue });
+            this.logger.error('[UPDATING_CANDLE_MESSAGE_ERROR] Failed to parse message value.', { error, rawValue });
           }
         },
       });
 
-      this.logger.log('[TRADE_CONSUMER_INIT_SUCCESS] Trade consumer initialized.');
+      this.logger.log('[UPDATING_CANDLE_CONSUMER_INIT_SUCCESS] Updating candle consumer initialized.');
     } catch (error) {
-      this.logger.error('[TRADE_CONSUMER_INIT_ERROR] Failed to initialize trade consumer.');
+      this.logger.error('[UPDATING_CANDLE_CONSUMER_INIT_ERROR] Failed to initialize updating candle consumer.');
       throw error;
     }
   }
@@ -122,6 +137,9 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     }
     if (this.tradeConsumer) {
       await this.tradeConsumer.disconnect();
+    }
+    if (this.updatingCandleConsumer) {
+      await this.updatingCandleConsumer.disconnect();
     }
     this.logger.log('[KAFKA_DESTROY_SUCCESS] All Kafka consumers disconnected.');
   }
