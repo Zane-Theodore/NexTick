@@ -30,6 +30,7 @@ export default function TradingChart() {
       timeScale: { 
         timeVisible: true, 
         secondsVisible: false, 
+        rightOffset: 10,
       },
       localization: {
         priceFormatter: (price: number) => {

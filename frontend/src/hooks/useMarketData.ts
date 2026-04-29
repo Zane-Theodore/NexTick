@@ -23,8 +23,6 @@ export const useMarketData = (
           return;
         }
 
-        console.log('Dữ liệu API:', rawCandles[0]);
-
         const formattedData = rawCandles
           .map(formatCandle)
           .filter((candle: ReturnType<typeof formatCandle>): candle is Exclude<ReturnType<typeof formatCandle>, null> => candle !== null);
@@ -37,10 +35,14 @@ export const useMarketData = (
         candlestickSeries.setData(formattedData);
 
         const totalCandles = formattedData.length;
+        const OFFSET_RIGHT = 10;
+        const VISIBLE_CANDLES = 30;
+
         chart.timeScale().setVisibleLogicalRange({
-          from: Math.max(0, totalCandles - 50),
-          to: totalCandles,
+          from: Math.max(0, totalCandles + OFFSET_RIGHT - VISIBLE_CANDLES),
+          to: totalCandles + OFFSET_RIGHT,
         });
+        
       } catch (error) {
         console.error('Error fetching historical data:', error);
       }
