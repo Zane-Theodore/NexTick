@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 import type { ISeriesApi, IChartApi } from 'lightweight-charts';
 
-import { useMarketData } from '../hooks/useMarketData';
+import { useMarketData } from '../../hooks/useMarketData';
 
 export default function TradingChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -63,9 +63,6 @@ export default function TradingChart() {
 
   return (
     <div className="min-h-screen bg-[#131722] pt-5">
-      <h2 className="text-[#d1d4dc] text-center font-sans mb-5 text-2xl font-bold">
-        NexTick - BTC/USDT Live Chart
-      </h2>
       <div 
         ref={chartContainerRef} 
         className="w-full border-y border-[#2B2B43]"
