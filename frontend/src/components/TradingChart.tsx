@@ -14,10 +14,11 @@ export default function TradingChart() {
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
-      height: 500,
+      height: 900,
       layout: {
         background: { type: ColorType.Solid, color: '#131722' },
         textColor: '#d1d4dc',
+        attributionLogo: false,
       },
       grid: {
         vertLines: { color: '#2B2B43' },
@@ -46,9 +47,8 @@ export default function TradingChart() {
     const formatCandle = (candle: any) => {
       const utcSeconds = Math.floor(new Date(candle.timestamp).getTime() / 1000);
       
-      // Validate dữ liệu candle
       if (!candle.open || !candle.high || !candle.low || !candle.close) {
-        console.error('❌ Invalid candle data:', { 
+        console.error('✗ Invalid candle data:', { 
           open: candle.open, 
           high: candle.high, 
           low: candle.low, 
@@ -70,6 +70,7 @@ export default function TradingChart() {
       try {
         const { data } = await axios.get('http://localhost:3000/candles?symbol=BTCUSDT&limit=1000');
         candlestickSeries.setData(data.data.map(formatCandle));
+        chart.timeScale().fitContent(); 
       } catch (error) {
         console.error('API Error:', error);
       }
@@ -82,7 +83,6 @@ export default function TradingChart() {
       withCredentials: true,
     });
 
-    // Lắng nghe candle.updating từ server (được tính từ Python processor)
     socket.on('candle.updating', (updatingCandleData: any) => {
       const formattedCandle = formatCandle(updatingCandleData);
       if (formattedCandle) {
@@ -93,12 +93,11 @@ export default function TradingChart() {
       }
     });
 
-    // Lắng nghe candle.created để nhận nến chốt phút
     socket.on('candle.created', (newCandleData: any) => {
       const formattedCandle = formatCandle(newCandleData);
       if (formattedCandle) {
         candlestickSeries.update(formattedCandle);
-        console.log('✅ Final candle:', formattedCandle);
+        console.log('✓ Final candle:', formattedCandle);
       } else {
         console.warn('⚠️ Received invalid candle.created data:', newCandleData);
       }
@@ -116,20 +115,28 @@ export default function TradingChart() {
       console.error('✗ WebSocket error:', error);
     });
 
+    const resizeObserver = new ResizeObserver((entries) => {
+      if (entries.length === 0 || entries[0].target !== chartContainerRef.current) return;
+      const newRect = entries[0].contentRect;
+      chart.applyOptions({ width: newRect.width });
+    });
+    resizeObserver.observe(chartContainerRef.current);
+
     return () => {
+      resizeObserver.disconnect();
       socket.disconnect();
       chart.remove();
     };
   }, []);
 
   return (
-    <div style={{ padding: '20px', backgroundColor: '#000', minHeight: '100vh' }}>
-      <h2 style={{ color: 'white', textAlign: 'center', fontFamily: 'sans-serif', marginBottom: '20px' }}>
+    <div className="min-h-screen bg-[#131722] pt-5">
+      <h2 className="text-[#d1d4dc] text-center font-sans mb-5 text-2xl font-bold">
         NexTick - BTC/USDT Live Chart
       </h2>
       <div 
         ref={chartContainerRef} 
-        style={{ width: '100%', maxWidth: '1000px', margin: '0 auto', border: '1px solid #2B2B43' }} 
+        className="w-full border-y border-[#2B2B43]"
       />
     </div>
   );
