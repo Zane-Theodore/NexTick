@@ -1,8 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 import type { IChartApi } from 'lightweight-charts';
-import axios from 'axios';
-import { io } from 'socket.io-client';
 
 import { formatCandle } from '../utils/formatters';
 
@@ -54,8 +52,8 @@ export default function TradingChart() {
 
     const fetchHistory = async () => {
       try {
-        const { data } = await axios.get('http://localhost:3000/candles?symbol=BTCUSDT&limit=1000');
-        candlestickSeries.setData(data.data.map(formatCandle));
+        const rawCandles = await getHistoricalCandles('BTCUSDT', 1000);
+        candlestickSeries.setData(rawCandles.map(formatCandle));
         chart.timeScale().fitContent(); 
       } catch (error) {
         console.error('API Error:', error);
