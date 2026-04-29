@@ -142,25 +142,34 @@ class CandleProcessor:
              candle['low'], candle['close'], candle['volume'])
         )
 
-    def broadcast_to_kafka(self, candle):
-        """Đẩy dữ liệu nến lên trạm Kafka cho NestJS"""
-        kafka_candle = candle.copy()
-
-        kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
-        self.producer.send(config.TOPIC_PROCESSED_CANDLES, value=kafka_candle)
-
-    def broadcast_updating_candle(self, candle_data):
-        """Đẩy dữ liệu nến tạm thời (updating) lên Kafka"""
-        kafka_updating = candle_data.copy()
-        kafka_updating['is_final'] = False
-        kafka_updating['timestamp'] = kafka_updating['timestamp'].isoformat()
+    def broadcast_to_kline_stream(self, candle_data, is_final=True):
+        """
+        Unified method to broadcast all candles (both completed and updating) to single Kafka topic.
+        This is the Single Source of Truth for candle stream.
         
-        print(f" -  Gửi candle.updating {self.symbol.upper()} | "
+        Args:
+            candle_data: Candle dictionary with OHLCV data
+            is_final: Boolean flag - True for completed candles, False for in-progress candles
+        """
+        kafka_candle = candle_data.copy()
+        kafka_candle['is_final'] = is_final
+        kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
+        
+        status = "FINAL" if is_final else "UPDATING"
+        print(f" - Gửi kline {status} | {self.symbol.upper()} | "
               f"O: {candle_data['open']:,.2f} | H: {candle_data['high']:,.2f} | "
               f"L: {candle_data['low']:,.2f} | C: {candle_data['close']:,.2f} | "
-              f"V: {candle_data['volume']:,.0f} | Trades: {len(self.trades_buffer)}")
+              f"V: {candle_data['volume']:,.0f}")
         
-        self.producer.send(config.TOPIC_UPDATING_CANDLES, value=kafka_updating)
+        self.producer.send(config.TOPIC_KLINE_STREAM, value=kafka_candle)
+
+    def broadcast_to_kafka(self, candle):
+        """Legacy method - delegates to unified kline stream broadcaster"""
+        self.broadcast_to_kline_stream(candle, is_final=True)
+
+    def broadcast_updating_candle(self, candle_data):
+        """Legacy method - delegates to unified kline stream broadcaster"""
+        self.broadcast_to_kline_stream(candle_data, is_final=False)
 
     def _emit_500ms_update(self):
         """Emit candle.updating mỗi 500ms từ trades_buffer"""
@@ -218,9 +227,8 @@ class CandleProcessor:
         
         self.save_to_db(candle)
         
-        candle_final = candle.copy()
-        candle_final['is_final'] = True
-        self.broadcast_to_kafka(candle_final)
+        # Broadcast final candle through unified kline stream
+        self.broadcast_to_kline_stream(candle, is_final=True)
         
         print(f" - Đã lưu & phát sóng nến {self.symbol.upper()} lúc {candle['timestamp'].strftime('%H:%M')} | "
               f"O: {candle['open']:,.2f} | H: {candle['high']:,.2f} | "
@@ -276,10 +284,8 @@ class CandleProcessor:
                                 }
                                 self.save_to_db(flat_candle)
                                 
-                                flat_candle_kafka = flat_candle.copy()
-                                flat_candle_kafka['is_final'] = True
-                                flat_candle_kafka['timestamp'] = flat_candle_kafka['timestamp'].isoformat()
-                                self.producer.send(config.TOPIC_PROCESSED_CANDLES, value=flat_candle_kafka)
+                                # Broadcast flat candle through unified kline stream
+                                self.broadcast_to_kline_stream(flat_candle, is_final=True)
                                 print(f" - Đã tự động điền nến phẳng cho phút {missing_minute.strftime('%H:%M')}")
 
                         with self.lock:
