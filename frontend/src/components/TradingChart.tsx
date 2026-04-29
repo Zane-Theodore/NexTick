@@ -1,22 +1,23 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
-import type { IChartApi } from 'lightweight-charts';
+import type { ISeriesApi, IChartApi } from 'lightweight-charts';
 
-import { formatCandle } from '../utils/formatters';
-import { socket } from '../services/socket';
-import { getHistoricalCandles } from '../services/api';
+import { useMarketData } from '../hooks/useMarketData';
 
 export default function TradingChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const candlestickSeriesRef = useRef<any>(null);
+  
+  const [chartInstance, setChartInstance] = useState<IChartApi | null>(null);
+  const [series, setSeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
+
+  useMarketData(chartInstance, series, 'BTCUSDT');
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
-      height: 900,
+      height: 800,
       layout: {
         background: { type: ColorType.Solid, color: '#131722' },
         textColor: '#d1d4dc',
@@ -26,10 +27,7 @@ export default function TradingChart() {
         vertLines: { color: '#2B2B43' },
         horzLines: { color: '#2B2B43' },
       },
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-      },
+      timeScale: { timeVisible: true, secondsVisible: false },
       localization: {
         priceFormatter: (price: number) => {
           return new Intl.NumberFormat('vi-VN', {
@@ -40,8 +38,6 @@ export default function TradingChart() {
       },
     });
 
-    chartRef.current = chart;
-
     const candlestickSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#26a69a',
       downColor: '#ef5350',
@@ -50,62 +46,17 @@ export default function TradingChart() {
       wickDownColor: '#ef5350',
     });
 
-    candlestickSeriesRef.current = candlestickSeries;
-
-    const fetchHistory = async () => {
-      try {
-        const rawCandles = await getHistoricalCandles('BTCUSDT', 1000);
-        candlestickSeries.setData(rawCandles.map(formatCandle));
-        chart.timeScale().fitContent(); 
-      } catch (error) {
-        console.error('API Error:', error);
-      }
-    };
-
-    fetchHistory();
-
-    socket.on('candle.updating', (updatingCandleData: any) => {
-      const formattedCandle = formatCandle(updatingCandleData);
-      if (formattedCandle) {
-        candlestickSeries.update(formattedCandle);
-        console.log('📊 Updated candle:', formattedCandle);
-      } else {
-        console.warn('⚠️ Received invalid candle.updating data:', updatingCandleData);
-      }
-    });
-
-    socket.on('candle.created', (newCandleData: any) => {
-      const formattedCandle = formatCandle(newCandleData);
-      if (formattedCandle) {
-        candlestickSeries.update(formattedCandle);
-        console.log('✓ Final candle:', formattedCandle);
-      } else {
-        console.warn('⚠️ Received invalid candle.created data:', newCandleData);
-      }
-    });
-
-    socket.on('connect', () => {
-      console.log('✓ WebSocket connected');
-    });
-
-    socket.on('disconnect', () => {
-      console.log('✗ WebSocket disconnected');
-    });
-
-    socket.on('error', (error: any) => {
-      console.error('✗ WebSocket error:', error);
-    });
+    setChartInstance(chart);
+    setSeries(candlestickSeries);
 
     const resizeObserver = new ResizeObserver((entries) => {
       if (entries.length === 0 || entries[0].target !== chartContainerRef.current) return;
-      const newRect = entries[0].contentRect;
-      chart.applyOptions({ width: newRect.width });
+      chart.applyOptions({ width: entries[0].contentRect.width });
     });
     resizeObserver.observe(chartContainerRef.current);
 
     return () => {
       resizeObserver.disconnect();
-      socket.disconnect();
       chart.remove();
     };
   }, []);
