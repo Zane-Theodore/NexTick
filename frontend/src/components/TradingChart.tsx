@@ -3,6 +3,8 @@ import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 import type { IChartApi } from 'lightweight-charts';
 
 import { formatCandle } from '../utils/formatters';
+import { socket } from '../services/socket';
+import { getHistoricalCandles } from '../services/api';
 
 export default function TradingChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -61,11 +63,6 @@ export default function TradingChart() {
     };
 
     fetchHistory();
-
-    const socket = io('http://localhost:3000', {
-      transports: ['websocket', 'polling'],
-      withCredentials: true,
-    });
 
     socket.on('candle.updating', (updatingCandleData: any) => {
       const formattedCandle = formatCandle(updatingCandleData);
