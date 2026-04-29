@@ -23,6 +23,15 @@ export default function TradingChart() {
         textColor: '#d1d4dc',
         attributionLogo: false,
       },
+      rightPriceScale: {
+        autoScale: true,
+        alignLabels: true,
+        borderVisible: false,
+        scaleMargins: {
+          top: 0.1,
+          bottom: 0.1,
+        },
+      },
       grid: {
         vertLines: { color: '#2B2B43' },
         horzLines: { color: '#2B2B43' },
