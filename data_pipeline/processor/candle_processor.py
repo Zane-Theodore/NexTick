@@ -2,6 +2,8 @@ import json
 from datetime import datetime
 import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
+import threading
+import time
 
 from data_pipeline import config
 
@@ -30,6 +32,11 @@ class CandleProcessor:
         
         self.current_minute = None
         self.trades_buffer = []
+        self.update_timer = None
+        self.lock = threading.Lock()  # Lock để thread safety
+        self.running = True  # Flag để menghentikan timer
+        self.first_trade_price_of_minute = None  # Lưu giá trade đầu tiên của phút
+        
         print(f" - Khởi tạo thành công! Bắt đầu lắng nghe dữ liệu từ '{config.TOPIC_RAW_TRADES}'...")
 
     def _connect_db(self):
@@ -94,11 +101,67 @@ class CandleProcessor:
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
         self.producer.send(config.TOPIC_PROCESSED_CANDLES, value=kafka_candle)
 
+    def broadcast_updating_candle(self, candle_data):
+        """Đẩy dữ liệu nến tạm thời (updating) lên Kafka"""
+        kafka_updating = candle_data.copy()
+        kafka_updating['is_final'] = False
+        kafka_updating['timestamp'] = kafka_updating['timestamp'].isoformat()
+        
+        print(f" -  Gửi candle.updating {self.symbol.upper()} | "
+              f"O: {candle_data['open']:,.2f} | H: {candle_data['high']:,.2f} | "
+              f"L: {candle_data['low']:,.2f} | C: {candle_data['close']:,.2f} | "
+              f"V: {candle_data['volume']:,.0f} | Trades: {len(self.trades_buffer)}")
+        
+        self.producer.send(config.TOPIC_UPDATING_CANDLES, value=kafka_updating)
+
+    def _emit_500ms_update(self):
+        """Emit candle.updating mỗi 500ms từ trades_buffer"""
+        if not self.running:
+            return
+            
+        with self.lock:
+            if self.trades_buffer and self.current_minute is not None and self.first_trade_price_of_minute is not None:
+                prices = [t['price'] for t in self.trades_buffer]
+                volumes = [t['volume'] for t in self.trades_buffer]
+                
+                updating_candle = {
+                    'symbol': self.symbol.upper(),
+                    'timestamp': self.current_minute,
+                    'open': self.first_trade_price_of_minute,
+                    'high': max(prices),
+                    'low': min(prices),
+                    'close': prices[-1],
+                    'volume': sum(volumes)
+                }
+                
+                if updating_candle['open'] == 0 or updating_candle['high'] == 0 or updating_candle['low'] == 0 or updating_candle['close'] == 0:
+                    print(f" - ⚠️  WARNING: Zero price detected! Candle: {updating_candle}")
+                    print(f"   Trades buffer size: {len(self.trades_buffer)}, first_trade_price: {self.first_trade_price_of_minute}")
+                
+                self.broadcast_updating_candle(updating_candle)
+            elif not self.trades_buffer:
+                print(f" - ⚠️  trades_buffer is empty at {self.current_minute}")
+
+        if self.running:
+            self.update_timer = threading.Timer(0.5, self._emit_500ms_update)
+            self.update_timer.daemon = True
+            self.update_timer.start()
+
+    def _schedule_next_update(self):
+        """Lên lịch emit candle.updating tiếp theo"""
+        if self.running and not self.update_timer:
+            self.update_timer = threading.Timer(0.5, self._emit_500ms_update)
+            self.update_timer.daemon = True
+            self.update_timer.start()
+
     def process_candle(self):
         """Quy trình nguyên tử: Đúc -> Lưu -> Phát dữ liệu nến"""
         candle = self.calculate_ohlc()
         self.save_to_db(candle)
-        self.broadcast_to_kafka(candle)
+        
+        candle_final = candle.copy()
+        candle_final['is_final'] = True
+        self.broadcast_to_kafka(candle_final)
         
         print(f" - Đã lưu & phát sóng nến {self.symbol.upper()} lúc {candle['timestamp'].strftime('%H:%M')} | "
               f"O: {candle['open']:,.2f} | H: {candle['high']:,.2f} | "
@@ -116,12 +179,16 @@ class CandleProcessor:
 
                 if self.current_minute is None:
                     self.current_minute = trade_minute
+                    self.first_trade_price_of_minute = trade['price']
+                    self.trades_buffer = [trade]
+                    self._schedule_next_update()
 
                 if trade_minute > self.current_minute:
                     if self.trades_buffer:
                         self.process_candle()
 
                     self.current_minute = trade_minute
+                    self.first_trade_price_of_minute = trade['price']
                     self.trades_buffer = [trade]
                 else:
                     self.trades_buffer.append(trade)
@@ -133,6 +200,10 @@ class CandleProcessor:
 
     def shutdown(self):
         """Giải phóng tài nguyên khi dừng chương trình"""
+        self.running = False
+        if self.update_timer:
+            self.update_timer.cancel()
+        
         self.consumer.close()
         self.producer.close()
         if hasattr(self, 'cursor'):
