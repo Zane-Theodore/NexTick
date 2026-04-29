@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { createChart, CandlestickSeries, ColorType, type Time } from 'lightweight-charts';
+import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 import type { IChartApi } from 'lightweight-charts';
 import axios from 'axios';
 import { io } from 'socket.io-client';
@@ -8,9 +8,6 @@ export default function TradingChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candlestickSeriesRef = useRef<any>(null);
-  const currentCandleRef = useRef<any>(null);
-  const tradesBufferRef = useRef<any[]>([]);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -48,6 +45,18 @@ export default function TradingChart() {
 
     const formatCandle = (candle: any) => {
       const utcSeconds = Math.floor(new Date(candle.timestamp).getTime() / 1000);
+      
+      // Validate dữ liệu candle
+      if (!candle.open || !candle.high || !candle.low || !candle.close) {
+        console.error('❌ Invalid candle data:', { 
+          open: candle.open, 
+          high: candle.high, 
+          low: candle.low, 
+          close: candle.close 
+        });
+        return null;
+      }
+      
       return {
         time: (utcSeconds - timezoneOffsetSeconds) as any,
         open: candle.open,
@@ -68,81 +77,31 @@ export default function TradingChart() {
 
     fetchHistory();
 
-    const updateCandleFromBuffer = () => {
-      if (tradesBufferRef.current.length === 0) {
-        return;
-      }
-
-      const trades = tradesBufferRef.current;
-      const firstTrade = trades[0];
-      const lastTrade = trades[trades.length - 1];
-
-      const tradeTime = new Date(firstTrade.timestamp);
-      
-      const tradeMinute = new Date(
-        tradeTime.getFullYear(),
-        tradeTime.getMonth(),
-        tradeTime.getDate(),
-        tradeTime.getHours(),
-        tradeTime.getMinutes(),
-        0,
-        0
-      );
-      
-      const utcSeconds = Math.floor(tradeMinute.getTime() / 1000);
-
-      const candleTime = utcSeconds - timezoneOffsetSeconds;
-
-      const prices = trades.map((t: any) => parseFloat(t.price));
-      const volumes = trades.map((t: any) => parseFloat(t.volume));
-
-      if (!currentCandleRef.current || currentCandleRef.current.time !== candleTime) {
-        if (currentCandleRef.current) {
-          console.log(' - Saving previous candle:', currentCandleRef.current);
-          candlestickSeries.update(currentCandleRef.current);
-        }
-
-        const newCandle = {
-          time: candleTime as Time,
-          open: parseFloat(firstTrade.price),
-          high: Math.max(...prices),
-          low: Math.min(...prices),
-          close: parseFloat(lastTrade.price),
-          volume: volumes.reduce((a: number, b: number) => a + b, 0),
-        };
-
-        console.log('🆕 Creating new candle:', newCandle);
-        currentCandleRef.current = newCandle;
-        candlestickSeries.update(newCandle);
-      } else {
-        const updatedCandle = {
-          ...currentCandleRef.current,
-          high: Math.max(currentCandleRef.current.high, ...prices),
-          low: Math.min(currentCandleRef.current.low, ...prices),
-          close: parseFloat(lastTrade.price),
-          volume: currentCandleRef.current.volume + volumes.reduce((a: number, b: number) => a + b, 0),
-        };
-
-        currentCandleRef.current = updatedCandle;
-        candlestickSeries.update(updatedCandle);
-      }
-
-      tradesBufferRef.current = [];
-    };
-
     const socket = io('http://localhost:3000', {
       transports: ['websocket', 'polling'],
       withCredentials: true,
     });
 
-    socket.on('candle.created', (newCandleData: any) => {
-      candlestickSeries.update(formatCandle(newCandleData));
-      currentCandleRef.current = null;
-      tradesBufferRef.current = [];
+    // Lắng nghe candle.updating từ server (được tính từ Python processor)
+    socket.on('candle.updating', (updatingCandleData: any) => {
+      const formattedCandle = formatCandle(updatingCandleData);
+      if (formattedCandle) {
+        candlestickSeries.update(formattedCandle);
+        console.log('📊 Updated candle:', formattedCandle);
+      } else {
+        console.warn('⚠️ Received invalid candle.updating data:', updatingCandleData);
+      }
     });
 
-    socket.on('trade.raw', (trade: any) => {
-      tradesBufferRef.current.push(trade);
+    // Lắng nghe candle.created để nhận nến chốt phút
+    socket.on('candle.created', (newCandleData: any) => {
+      const formattedCandle = formatCandle(newCandleData);
+      if (formattedCandle) {
+        candlestickSeries.update(formattedCandle);
+        console.log('✅ Final candle:', formattedCandle);
+      } else {
+        console.warn('⚠️ Received invalid candle.created data:', newCandleData);
+      }
     });
 
     socket.on('connect', () => {
@@ -157,15 +116,8 @@ export default function TradingChart() {
       console.error('✗ WebSocket error:', error);
     });
 
-    intervalRef.current = setInterval(() => {
-      updateCandleFromBuffer();
-    }, 500);
-
     return () => {
       socket.disconnect();
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
       chart.remove();
     };
   }, []);
