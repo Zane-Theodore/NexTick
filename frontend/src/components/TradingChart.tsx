@@ -28,6 +28,14 @@ export default function TradingChart() {
         timeVisible: true,
         secondsVisible: false,
       },
+      localization: {
+        priceFormatter: (price: number) => {
+          return new Intl.NumberFormat('vi-VN', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          }).format(price);
+        },
+      },
     });
 
     chartRef.current = chart;
