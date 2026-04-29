@@ -40,6 +40,8 @@ export default function TradingChart() {
         timeVisible: true, 
         secondsVisible: false, 
         rightOffset: 10,
+        minBarSpacing: 10,
+        maxBarSpacing: 50,
       },
       localization: {
         priceFormatter: (price: number) => {
