@@ -3,6 +3,7 @@ from datetime import datetime
 import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
 import threading
+import datetime as dt
 import time
 
 from data_pipeline import config
@@ -33,9 +34,9 @@ class CandleProcessor:
         self.current_minute = None
         self.trades_buffer = []
         self.update_timer = None
-        self.lock = threading.Lock()  # Lock để thread safety
-        self.running = True  # Flag để menghentikan timer
-        self.first_trade_price_of_minute = None  # Lưu giá trade đầu tiên của phút
+        self.lock = threading.Lock()
+        self.running = True
+        self.first_trade_price_of_minute = None
         
         print(f" - Khởi tạo thành công! Bắt đầu lắng nghe dữ liệu từ '{config.TOPIC_RAW_TRADES}'...")
 
@@ -70,19 +71,66 @@ class CandleProcessor:
         """
         self.cursor.execute(query)
 
+    def _validate_trade(self, trade):
+        """Validate dữ liệu trade từ Kafka"""
+        try:
+            if not trade or not isinstance(trade, dict):
+                return False
+            
+            required_fields = ['timestamp', 'price', 'volume']
+            for field in required_fields:
+                if field not in trade:
+                    return False
+            
+            price = trade.get('price')
+            volume = trade.get('volume')
+            
+            if not isinstance(price, (int, float)) or not isinstance(volume, (int, float)):
+                return False
+            
+            if price <= 0 or volume < 0:
+                print(f" - ⚠️  Lỗi: Trade có giá không hợp lệ: price={price}, volume={volume}")
+                return False
+            
+            if price != price or volume != volume:
+                return False
+                
+            return True
+        except Exception as e:
+            print(f" - ⚠️  Lỗi validate trade: {e}")
+            return False
+
     def calculate_ohlc(self):
         """Trích xuất giá trị Open, High, Low, Close, Volume"""
+        if not self.trades_buffer:
+            print(f" - ⚠️  Lỗi: trades_buffer rỗng khi tính OHLC")
+            return None
+            
         prices = [t['price'] for t in self.trades_buffer]
         volumes = [t['volume'] for t in self.trades_buffer]
+        
+        if not prices or not volumes:
+            print(f" - ⚠️  Lỗi: Không có dữ liệu giá hoặc volume")
+            return None
+        
+        open_price = prices[0]
+        high_price = max(prices)
+        low_price = min(prices)
+        close_price = prices[-1]
+        total_volume = sum(volumes)
+        
+        if open_price <= 0 or high_price <= 0 or low_price <= 0 or close_price <= 0:
+            print(f" - ⚠️  Lỗi: Giá tính toán không hợp lệ: O={open_price}, H={high_price}, L={low_price}, C={close_price}")
+            return None
         
         return {
             'symbol': self.symbol.upper(),
             'timestamp': self.current_minute,
-            'open': prices[0],
-            'high': max(prices),
-            'low': min(prices),
-            'close': prices[-1],
-            'volume': sum(volumes)
+            'open': open_price,
+            'high': high_price,
+            'low': low_price,
+            'close': close_price,
+            'volume': total_volume
         }
 
     def save_to_db(self, candle):
@@ -124,6 +172,10 @@ class CandleProcessor:
                 prices = [t['price'] for t in self.trades_buffer]
                 volumes = [t['volume'] for t in self.trades_buffer]
                 
+                if not prices or not volumes:
+                    print(f" - ⚠️  Lỗi: Không có dữ liệu giá hoặc volume để emit update")
+                    return
+                
                 updating_candle = {
                     'symbol': self.symbol.upper(),
                     'timestamp': self.current_minute,
@@ -133,10 +185,12 @@ class CandleProcessor:
                     'close': prices[-1],
                     'volume': sum(volumes)
                 }
-                
-                if updating_candle['open'] == 0 or updating_candle['high'] == 0 or updating_candle['low'] == 0 or updating_candle['close'] == 0:
-                    print(f" - ⚠️  WARNING: Zero price detected! Candle: {updating_candle}")
-                    print(f"   Trades buffer size: {len(self.trades_buffer)}, first_trade_price: {self.first_trade_price_of_minute}")
+
+                if (updating_candle['open'] <= 0 or updating_candle['high'] <= 0 or 
+                    updating_candle['low'] <= 0 or updating_candle['close'] <= 0):
+                    print(f" - ⚠️  SKIP: Nến có giá không hợp lệ - O:{updating_candle['open']}, H:{updating_candle['high']}, L:{updating_candle['low']}, C:{updating_candle['close']}")
+                    print(f"   Trades: {len(self.trades_buffer)}, first_price: {self.first_trade_price_of_minute}")
+                    return
                 
                 self.broadcast_updating_candle(updating_candle)
             elif not self.trades_buffer:
@@ -157,6 +211,11 @@ class CandleProcessor:
     def process_candle(self):
         """Quy trình nguyên tử: Đúc -> Lưu -> Phát dữ liệu nến"""
         candle = self.calculate_ohlc()
+        
+        if candle is None:
+            print(f" - ⚠️  SKIP: Không xử lý nến có dữ liệu không hợp lệ")
+            return
+        
         self.save_to_db(candle)
         
         candle_final = candle.copy()
@@ -172,26 +231,69 @@ class CandleProcessor:
         """Hàm chính chạy vòng lặp vô tận để xử lý dữ liệu trade thành nến 1 phút"""
         try:
             for message in self.consumer:
-                trade = message.value
+                try:
+                    trade = message.value
+                    
+                    if not self._validate_trade(trade):
+                        print(f" - ⚠️  SKIP: Trade không hợp lệ: {trade}")
+                        continue
+                    
+                    trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000.0)
+                    trade_minute = trade_time.replace(second=0, microsecond=0)
+
+                    if self.current_minute is None:
+                        self.current_minute = trade_minute
+                        self.first_trade_price_of_minute = trade['price']
+                        self.trades_buffer = [trade]
+                        self._schedule_next_update()
+                        continue
+
+                    if trade_minute > self.current_minute:
+                        
+                        minute_diff = int((trade_minute - self.current_minute).total_seconds() / 60)
+                        
+                        if self.trades_buffer:
+                            self.process_candle()
+                            last_close_price = self.trades_buffer[-1]['price']
+                        else:
+                            last_close_price = self.first_trade_price_of_minute
+
+                        if last_close_price <= 0:
+                            print(f" - ⚠️  SKIP: Không thể tạo flat candles với giá không hợp lệ: {last_close_price}")
+                        elif minute_diff > 1:
+                            print(f" - ⚠️ Phát hiện lỡ {minute_diff - 1} phút. Đang tự động điền nến phẳng...")
+                            
+                            for i in range(1, minute_diff):
+                                missing_minute = self.current_minute + dt.timedelta(minutes=i)
+                                flat_candle = {
+                                    'symbol': self.symbol.upper(),
+                                    'timestamp': missing_minute,
+                                    'open': last_close_price,
+                                    'high': last_close_price,
+                                    'low': last_close_price,
+                                    'close': last_close_price,
+                                    'volume': 0.0
+                                }
+                                self.save_to_db(flat_candle)
+                                
+                                flat_candle_kafka = flat_candle.copy()
+                                flat_candle_kafka['is_final'] = True
+                                flat_candle_kafka['timestamp'] = flat_candle_kafka['timestamp'].isoformat()
+                                self.producer.send(config.TOPIC_PROCESSED_CANDLES, value=flat_candle_kafka)
+                                print(f" - Đã tự động điền nến phẳng cho phút {missing_minute.strftime('%H:%M')}")
+
+                        with self.lock:
+                            self.current_minute = trade_minute
+                            self.first_trade_price_of_minute = trade['price']
+                            self.trades_buffer = [trade]
+                            
+                    else:
+                        with self.lock:
+                            self.trades_buffer.append(trade)
                 
-                trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000.0)
-                trade_minute = trade_time.replace(second=0, microsecond=0)
-
-                if self.current_minute is None:
-                    self.current_minute = trade_minute
-                    self.first_trade_price_of_minute = trade['price']
-                    self.trades_buffer = [trade]
-                    self._schedule_next_update()
-
-                if trade_minute > self.current_minute:
-                    if self.trades_buffer:
-                        self.process_candle()
-
-                    self.current_minute = trade_minute
-                    self.first_trade_price_of_minute = trade['price']
-                    self.trades_buffer = [trade]
-                else:
-                    self.trades_buffer.append(trade)
+                except Exception as e:
+                    print(f" - ⚠️  Lỗi xử lý trade: {e}")
+                    continue
                     
         except KeyboardInterrupt:
             print("\n - Nhận lệnh dừng. Đang đóng hệ thống ...")
