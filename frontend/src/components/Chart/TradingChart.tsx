@@ -23,6 +23,12 @@ export default function TradingChart() {
         textColor: '#d1d4dc',
         attributionLogo: false,
       },
+      handleScale: {
+        axisPressedMouseMove: {
+          time: true,
+          price: false,
+        },
+      },
       rightPriceScale: {
         autoScale: true,
         alignLabels: true,
