@@ -34,19 +34,20 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
     this.logger.log(`[WS_DISCONNECT] Client disconnected: ${client.id}`);
   }
 
-  @OnEvent('candle.created')
-  handleCandleCreatedEvent(candleData: any) {
-    this.logger.debug('[WS_EVENT] Emitting candle.created event to clients', { candleData });
-    this.server.emit('candle.created', candleData);
-  }
-
-  @OnEvent('candle.updating')
-  handleCandleUpdatingEvent(updatingCandleData: any) {
-    this.logger.debug('[WS_EVENT] Emitting candle.updating event to clients', { 
-      symbol: updatingCandleData.symbol,
-      close: updatingCandleData.close,
-      volume: updatingCandleData.volume
+  @OnEvent('candle.update')
+  handleCandleUpdateEvent(candleData: any) {
+    const isFinal = candleData.is_final === true;
+    const logLevel = isFinal ? 'log' : 'debug';
+    
+    this.logger[logLevel]('[WS_EVENT] Emitting candle.update event to clients', { 
+      symbol: candleData.symbol,
+      timestamp: candleData.timestamp,
+      is_final: candleData.is_final,
+      close: candleData.close,
+      volume: candleData.volume
     });
-    this.server.emit('candle.updating', updatingCandleData);
+    
+    // Emit unified event to all connected clients
+    this.server.emit('candle.update', candleData);
   }
 }
