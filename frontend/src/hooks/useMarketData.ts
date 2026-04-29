@@ -50,21 +50,28 @@ export const useMarketData = (
 
     fetchHistory();
 
-    const handleUpdate = (data: any) => {
+    const handleCandleUpdate = (data: any) => {
       const formatted = formatCandle(data);
       if (formatted) {
+        // Lightweight-charts automatically handles:
+        // - If timestamp matches existing candle: updates the body
+        // - If timestamp is new: creates a new candle
         candlestickSeries.update(formatted);
+        
+        // Log for debugging (only for final candles)
+        if (data.is_final) {
+          console.log(`[Candle FINAL] ${data.symbol} @ ${data.timestamp} - O:${data.open}, C:${data.close}, V:${data.volume}`);
+        }
       } else {
-        console.warn('Skipped invalid candle data from socket update');
+        console.warn('Skipped invalid candle data from socket update', data);
       }
     };
 
-    socket.on('candle.updating', handleUpdate);
-    socket.on('candle.created', handleUpdate);
+    // Single unified event listener for all candle updates (both final and updating)
+    socket.on('candle.update', handleCandleUpdate);
 
     return () => {
-      socket.off('candle.updating', handleUpdate);
-      socket.off('candle.created', handleUpdate);
+      socket.off('candle.update', handleCandleUpdate);
     };
   }, [chart, candlestickSeries, symbol]);
 };
