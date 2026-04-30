@@ -23,8 +23,6 @@ def get_env_or_raise(var_name: str) -> str:
 KAFKA_SERVER = get_env_or_raise('KAFKA_BROKER')
 TOPIC_RAW_TRADES = get_env_or_raise('KAFKA_TOPIC_RAW_TRADES')
 TOPIC_KLINE_STREAM = get_env_or_raise('KAFKA_TOPIC_KLINE_STREAM')
-TOPIC_PROCESSED_CANDLES = get_env_or_raise('KAFKA_TOPIC_PROCESSED_CANDLES')
-TOPIC_UPDATING_CANDLES = get_env_or_raise('KAFKA_TOPIC_UPDATING_CANDLES')
 
 # ==========================================
 # QUESTDB
