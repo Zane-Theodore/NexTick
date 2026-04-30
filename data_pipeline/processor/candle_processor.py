@@ -7,14 +7,17 @@ import datetime as dt
 import time
 
 from data_pipeline import config
+from data_pipeline.logger_config import get_logger
+
+logger = get_logger(__name__)
 
 class CandleProcessor:
     def __init__(self, symbol="btcusdt"):
-        """Khởi tạo Processor"""
+        """Initialize Candle Processor"""
         self.symbol = symbol.lower()
         self.table_name = f"{self.symbol}_1m_candles"
         
-        print(f" - Khởi tạo Trạm xử lý nến cho cặp {self.symbol.upper()}...")
+        logger.info(f"Initializing candle processor for symbol: {self.symbol.upper()}")
         
         self.consumer = KafkaConsumer(
             config.TOPIC_RAW_TRADES,
@@ -38,10 +41,10 @@ class CandleProcessor:
         self.running = True
         self.first_trade_price_of_minute = None
         
-        print(f" - Khởi tạo thành công! Bắt đầu lắng nghe dữ liệu từ '{config.TOPIC_RAW_TRADES}'...")
+        logger.info(f"Successfully initialized candle processor. Starting to listen for data from topic: {config.TOPIC_RAW_TRADES}")
 
     def _connect_db(self):
-        """Hàm nội bộ kết nối QuestDB"""
+        """Internal method to connect to QuestDB"""
         try:
             self.db_conn = psycopg2.connect(
                 host=config.QUESTDB_HOST,
@@ -52,13 +55,13 @@ class CandleProcessor:
             )
             self.db_conn.autocommit = True
             self.cursor = self.db_conn.cursor()
-            print(" - Đã kết nối thành công với QuestDB!")
+            logger.info("Successfully connected to QuestDB")
         except Exception as e:
-            print(f" - Lỗi kết nối QuestDB: {e}")
+            logger.error(f"Database connection error: {e}")
             exit()
 
     def _setup_database(self):
-        """Khởi tạo bảng tối ưu cho Time-series nếu chưa có"""
+        """Initialize time-series optimized table if not exists"""
         query = f"""
         CREATE TABLE IF NOT EXISTS {self.table_name} (
             timestamp TIMESTAMP,
@@ -72,7 +75,7 @@ class CandleProcessor:
         self.cursor.execute(query)
 
     def _validate_trade(self, trade):
-        """Validate dữ liệu trade từ Kafka"""
+        """Validate trade data from Kafka"""
         try:
             if not trade or not isinstance(trade, dict):
                 return False
@@ -89,7 +92,7 @@ class CandleProcessor:
                 return False
             
             if price <= 0 or volume < 0:
-                print(f" - ⚠️  Lỗi: Trade có giá không hợp lệ: price={price}, volume={volume}")
+                logger.warning(f"Invalid trade price or volume: price={price}, volume={volume}")
                 return False
             
             if price != price or volume != volume:
@@ -97,20 +100,20 @@ class CandleProcessor:
                 
             return True
         except Exception as e:
-            print(f" - ⚠️  Lỗi validate trade: {e}")
+            logger.warning(f"Trade validation error: {e}")
             return False
 
     def calculate_ohlc(self):
-        """Trích xuất giá trị Open, High, Low, Close, Volume"""
+        """Extract Open, High, Low, Close, Volume values"""
         if not self.trades_buffer:
-            print(f" - ⚠️  Lỗi: trades_buffer rỗng khi tính OHLC")
+            logger.warning("Empty trades buffer when calculating OHLC")
             return None
             
         prices = [t['price'] for t in self.trades_buffer]
         volumes = [t['volume'] for t in self.trades_buffer]
         
         if not prices or not volumes:
-            print(f" - ⚠️  Lỗi: Không có dữ liệu giá hoặc volume")
+            logger.warning("No price or volume data available")
             return None
         
         open_price = prices[0]
@@ -120,7 +123,7 @@ class CandleProcessor:
         total_volume = sum(volumes)
         
         if open_price <= 0 or high_price <= 0 or low_price <= 0 or close_price <= 0:
-            print(f" - ⚠️  Lỗi: Giá tính toán không hợp lệ: O={open_price}, H={high_price}, L={low_price}, C={close_price}")
+            logger.warning(f"Invalid calculated prices: Open={open_price}, High={high_price}, Low={low_price}, Close={close_price}")
             return None
         
         return {
@@ -156,10 +159,10 @@ class CandleProcessor:
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
         
         status = "FINAL" if is_final else "UPDATING"
-        print(f" - Gửi kline {status} | {self.symbol.upper()} | "
-              f"O: {candle_data['open']:,.2f} | H: {candle_data['high']:,.2f} | "
-              f"L: {candle_data['low']:,.2f} | C: {candle_data['close']:,.2f} | "
-              f"V: {candle_data['volume']:,.0f}")
+        logger.info(f"Broadcasting {status} candle - Symbol: {self.symbol.upper()} | "
+                   f"Open: {candle_data['open']:,.2f} | High: {candle_data['high']:,.2f} | "
+                   f"Low: {candle_data['low']:,.2f} | Close: {candle_data['close']:,.2f} | "
+                   f"Volume: {candle_data['volume']:,.0f}")
         
         self.producer.send(config.TOPIC_KLINE_STREAM, value=kafka_candle)
 
@@ -172,7 +175,7 @@ class CandleProcessor:
         self.broadcast_to_kline_stream(candle_data, is_final=False)
 
     def _emit_500ms_update(self):
-        """Emit candle.updating mỗi 500ms từ trades_buffer"""
+        """Emit candle update every 500ms from trades buffer"""
         if not self.running:
             return
             
@@ -182,7 +185,7 @@ class CandleProcessor:
                 volumes = [t['volume'] for t in self.trades_buffer]
                 
                 if not prices or not volumes:
-                    print(f" - ⚠️  Lỗi: Không có dữ liệu giá hoặc volume để emit update")
+                    logger.warning("No price or volume data available for update emit")
                     return
                 
                 updating_candle = {
@@ -197,13 +200,13 @@ class CandleProcessor:
 
                 if (updating_candle['open'] <= 0 or updating_candle['high'] <= 0 or 
                     updating_candle['low'] <= 0 or updating_candle['close'] <= 0):
-                    print(f" - ⚠️  SKIP: Nến có giá không hợp lệ - O:{updating_candle['open']}, H:{updating_candle['high']}, L:{updating_candle['low']}, C:{updating_candle['close']}")
-                    print(f"   Trades: {len(self.trades_buffer)}, first_price: {self.first_trade_price_of_minute}")
+                    logger.debug(f"Skipped candle with invalid prices - Open: {updating_candle['open']}, High: {updating_candle['high']}, Low: {updating_candle['low']}, Close: {updating_candle['close']}")
+                    logger.debug(f"Trades count: {len(self.trades_buffer)}, First trade price: {self.first_trade_price_of_minute}")
                     return
                 
                 self.broadcast_updating_candle(updating_candle)
             elif not self.trades_buffer:
-                print(f" - ⚠️  trades_buffer is empty at {self.current_minute}")
+                logger.debug(f"Trades buffer is empty at minute: {self.current_minute}")
 
         if self.running:
             self.update_timer = threading.Timer(0.5, self._emit_500ms_update)
@@ -211,18 +214,18 @@ class CandleProcessor:
             self.update_timer.start()
 
     def _schedule_next_update(self):
-        """Lên lịch emit candle.updating tiếp theo"""
+        """Schedule next candle update emit"""
         if self.running and not self.update_timer:
             self.update_timer = threading.Timer(0.5, self._emit_500ms_update)
             self.update_timer.daemon = True
             self.update_timer.start()
 
     def process_candle(self):
-        """Quy trình nguyên tử: Đúc -> Lưu -> Phát dữ liệu nến"""
+        """Atomic process: Calculate -> Save -> Broadcast candle"""
         candle = self.calculate_ohlc()
         
         if candle is None:
-            print(f" - ⚠️  SKIP: Không xử lý nến có dữ liệu không hợp lệ")
+            logger.debug("Skipped processing candle with invalid data")
             return
         
         self.save_to_db(candle)
@@ -230,20 +233,21 @@ class CandleProcessor:
         # Broadcast final candle through unified kline stream
         self.broadcast_to_kline_stream(candle, is_final=True)
         
-        print(f" - Đã lưu & phát sóng nến {self.symbol.upper()} lúc {candle['timestamp'].strftime('%H:%M')} | "
-              f"O: {candle['open']:,.2f} | H: {candle['high']:,.2f} | "
-              f"L: {candle['low']:,.2f} | C: {candle['close']:,.2f} | "
-              f"Trades: {len(self.trades_buffer)}")
+        logger.info(f"Saved and broadcasted candle - Symbol: {self.symbol.upper()} | "
+                   f"Time: {candle['timestamp'].strftime('%H:%M')} | "
+                   f"Open: {candle['open']:,.2f} | High: {candle['high']:,.2f} | "
+                   f"Low: {candle['low']:,.2f} | Close: {candle['close']:,.2f} | "
+                   f"Trades count: {len(self.trades_buffer)}")
 
     def run(self):
-        """Hàm chính chạy vòng lặp vô tận để xử lý dữ liệu trade thành nến 1 phút"""
+        """Main loop to process trade data into 1-minute candles"""
         try:
             for message in self.consumer:
                 try:
                     trade = message.value
                     
                     if not self._validate_trade(trade):
-                        print(f" - ⚠️  SKIP: Trade không hợp lệ: {trade}")
+                        logger.debug(f"Skipped invalid trade: {trade}")
                         continue
                     
                     trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000.0)
@@ -267,9 +271,9 @@ class CandleProcessor:
                             last_close_price = self.first_trade_price_of_minute
 
                         if last_close_price <= 0:
-                            print(f" - ⚠️  SKIP: Không thể tạo flat candles với giá không hợp lệ: {last_close_price}")
+                            logger.warning(f"Cannot create flat candles with invalid price: {last_close_price}")
                         elif minute_diff > 1:
-                            print(f" - ⚠️ Phát hiện lỡ {minute_diff - 1} phút. Đang tự động điền nến phẳng...")
+                            logger.info(f"Detected missing {minute_diff - 1} minutes. Auto-filling with flat candles...")
                             
                             for i in range(1, minute_diff):
                                 missing_minute = self.current_minute + dt.timedelta(minutes=i)
@@ -286,7 +290,7 @@ class CandleProcessor:
                                 
                                 # Broadcast flat candle through unified kline stream
                                 self.broadcast_to_kline_stream(flat_candle, is_final=True)
-                                print(f" - Đã tự động điền nến phẳng cho phút {missing_minute.strftime('%H:%M')}")
+                                logger.debug(f"Auto-filled flat candle for minute: {missing_minute.strftime('%H:%M')}")
 
                         with self.lock:
                             self.current_minute = trade_minute
@@ -298,16 +302,16 @@ class CandleProcessor:
                             self.trades_buffer.append(trade)
                 
                 except Exception as e:
-                    print(f" - ⚠️  Lỗi xử lý trade: {e}")
+                    logger.error(f"Error processing trade: {e}")
                     continue
                     
         except KeyboardInterrupt:
-            print("\n - Nhận lệnh dừng. Đang đóng hệ thống ...")
+            logger.info("Shutdown signal received. Closing system...")
         finally:
             self.shutdown()
 
     def shutdown(self):
-        """Giải phóng tài nguyên khi dừng chương trình"""
+        """Release all resources when stopping the program"""
         self.running = False
         if self.update_timer:
             self.update_timer.cancel()
@@ -318,10 +322,10 @@ class CandleProcessor:
             self.cursor.close()
         if hasattr(self, 'db_conn'):
             self.db_conn.close()
-        print(" - Đã giải phóng toàn bộ tài nguyên.")
+        logger.info("All resources released successfully")
 
 # ==========================================
-# KHỞI CHẠY CHƯƠNG TRÌNH
+# PROGRAM STARTUP
 # ==========================================
 if __name__ == "__main__":
     app = CandleProcessor(symbol="btcusdt")

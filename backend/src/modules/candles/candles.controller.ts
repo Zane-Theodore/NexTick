@@ -9,7 +9,8 @@ import { CandlesService } from './candles.service';
 
 @Controller('candles')
 export class CandlesController {
-  private readonly logger = new Logger(CandlesController.name);
+  private readonly logger = new Logger();
+  private readonly moduleName = CandlesController.name;
 
   constructor(private readonly candlesService: CandlesService) {}
 
@@ -17,7 +18,7 @@ export class CandlesController {
   async getCandles(
   @Query('symbol') symbol: string,
   @Query('limit') limit: string,) {
-    this.logger.log(`[GET_CANDLES] Received request for candles with symbol: ${symbol} and limit: ${limit}`);
+    this.logger.log(`[INFO] [${this.moduleName}] Received request for candles with symbol: ${symbol} and limit: ${limit}`);
 
     if (!symbol) {
       throw new BadRequestException('Missing required query parameter: symbol (e.g., ?symbol=BTCUSDT)');

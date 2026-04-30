@@ -4,14 +4,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+from data_pipeline.logger_config import get_logger
+
+logger = get_logger(__name__)
 
 def get_env_or_raise(var_name: str) -> str:
     value = os.getenv(var_name)
     
     if value is None or value.strip() == '':
-        logger.error(f"Missing required environment variable: '{var_name}'")
-        raise ValueError(f"Environment variable '{var_name}' is not set or is empty")
+        logger.error(f"Missing required environment variable: {var_name}")
+        raise ValueError(f"Environment variable {var_name} is not set or is empty")
     
     return value
 

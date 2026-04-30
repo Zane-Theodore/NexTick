@@ -1,3 +1,6 @@
+import { Logger } from './logger';
+
+const logger = new Logger('Formatters');
 const timezoneOffsetSeconds = new Date().getTimezoneOffset() * 60;
 
 export const formatCandle = (candle: any) => {
@@ -10,7 +13,7 @@ export const formatCandle = (candle: any) => {
   if (typeof open !== 'number' || typeof high !== 'number' || 
       typeof low !== 'number' || typeof close !== 'number' ||
       isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close)) {
-    console.error('✗ Invalid candle data:', { open, high, low, close, timestamp });
+    logger.error(`Invalid candle data received`, { open, high, low, close, timestamp });
     return null;
   }
   

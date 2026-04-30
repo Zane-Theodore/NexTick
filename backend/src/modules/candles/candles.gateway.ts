@@ -24,14 +24,15 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
   @WebSocketServer() 
   server: Server;
 
-  private readonly logger = new Logger(CandlesGateway.name);
+  private readonly logger = new Logger();
+  private readonly moduleName = CandlesGateway.name;
 
   handleConnection(client: Socket) {
-    this.logger.log(`[WS_CONNECT] Client connected: ${client.id}`);
+    this.logger.log(`[INFO] [${this.moduleName}] Client connected: ${client.id}`);
   }
 
   handleDisconnect(client: Socket) {
-    this.logger.log(`[WS_DISCONNECT] Client disconnected: ${client.id}`);
+    this.logger.log(`[INFO] [${this.moduleName}] Client disconnected: ${client.id}`);
   }
 
   @OnEvent('candle.update')
@@ -39,7 +40,10 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
     const isFinal = candleData.is_final === true;
     const logLevel = isFinal ? 'log' : 'debug';
     
-    this.logger[logLevel]('[WS_EVENT] Emitting candle.update event to clients', { 
+    const logMessage = isFinal
+      ? `[INFO] [${this.moduleName}] Emitting candle update event to clients`
+      : `[DEBUG] [${this.moduleName}] Emitting candle update event to clients`;
+    this.logger[logLevel](logMessage, { 
       symbol: candleData.symbol,
       timestamp: candleData.timestamp,
       is_final: candleData.is_final,

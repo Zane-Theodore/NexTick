@@ -3,12 +3,15 @@ import websocket
 from kafka import KafkaProducer
 
 from data_pipeline import config
+from data_pipeline.logger_config import get_logger
+
+logger = get_logger(__name__)
 
 class BinanceProducer:
     def __init__(self, symbol="btcusdt"):
-        """Khởi tạo producer với cặp coin mặc định là BTC/USDT"""
+        """Initialize producer with default trading pair"""
         self.symbol = symbol.lower()
-        print(f"⚙️ Khởi tạo producer cho cặp {self.symbol.upper()}...")
+        logger.info(f"Initializing producer for trading pair: {self.symbol.upper()}")
         
         self.producer = KafkaProducer(
             bootstrap_servers=[config.KAFKA_SERVER],
@@ -16,7 +19,7 @@ class BinanceProducer:
         )
 
     def on_message(self, ws, message):
-        """Xử lý khi có tin nhắn từ Binance rót về"""
+        """Handle incoming message from Binance"""
         raw_message = json.loads(message)
         
         if 'result' in raw_message:
@@ -34,12 +37,12 @@ class BinanceProducer:
             
             self.producer.send(config.TOPIC_RAW_TRADES, value=clean_record)
             
-            action = "🔴 BÁN" if clean_record["is_sell_pressure"] else "🟢 MUA"
-            print(f" - Đã đẩy vào Kafka: {action} | Giá: {clean_record['price']:,.2f}")
+            action = "SELL" if clean_record["is_sell_pressure"] else "BUY"
+            logger.debug(f"Pushed to Kafka: {action} | Price: {clean_record['price']:,.2f}")
 
     def on_open(self, ws):
-        """Kích hoạt khi mở kết nối thành công"""
-        print(f" - Đã kết nối Binance. Bắt đầu bơm {self.symbol.upper()} vào topic: {config.TOPIC_RAW_TRADES}...")
+        """Callback when WebSocket connection is successfully opened"""
+        logger.info(f"Connected to Binance. Starting to push {self.symbol.upper()} data to topic: {config.TOPIC_RAW_TRADES}")
         
         subscribe_payload = {
             "method": "SUBSCRIBE",
@@ -49,16 +52,16 @@ class BinanceProducer:
         ws.send(json.dumps(subscribe_payload))
 
     def on_close(self, ws, close_status_code, close_msg):
-        """Xử lý khi đóng kết nối"""
-        print(f" - Đã ngắt kết nối với Binance ({self.symbol.upper()}). Đóng Kafka Producer.")
+        """Handle connection closed"""
+        logger.info(f"Disconnected from Binance ({self.symbol.upper()}). Closing Kafka Producer")
         self.producer.close()
 
     def on_error(self, ws, error):
-        """Xử lý khi có lỗi mạng"""
-        print(f" - Lỗi WebSocket: {error}")
+        """Handle network error"""
+        logger.error(f"WebSocket error: {error}")
 
     def run(self):
-        """Khởi chạy WebSocket và bắt đầu nhận dữ liệu"""
+        """Start WebSocket and begin receiving data"""
         ws = websocket.WebSocketApp(
             config.BINANCE_SOCKET_URL,
             on_open=self.on_open,
@@ -69,7 +72,7 @@ class BinanceProducer:
         ws.run_forever()
 
 # ==========================================
-# KHỞI CHẠY CHƯƠNG TRÌNH
+# PROGRAM STARTUP
 # ==========================================
 if __name__ == "__main__":
     app = BinanceProducer(symbol="btcusdt")

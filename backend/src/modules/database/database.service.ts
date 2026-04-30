@@ -10,11 +10,12 @@ import { Pool } from 'pg';
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly configService: ConfigService) {}
 
-  private readonly logger = new Logger(DatabaseService.name);
+  private readonly logger = new Logger();
+  private readonly moduleName = DatabaseService.name;
   private pool: Pool;
 
   async onModuleInit() {
-    this.logger.log('[DB_INIT] Initializing database connection...');
+    this.logger.log(`[INFO] [${this.moduleName}] Initializing database connection...`);
 
     this.pool = new Pool({
         user: this.configService.get('QUESTDB_USER'),
@@ -29,9 +30,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.pool.query('SELECT 1');
-      this.logger.log('[DB_INIT_SUCCESS] Database connection established successfully.');
+      this.logger.log(`[INFO] [${this.moduleName}] Database connection established successfully.`);
     } catch (error) {
-      this.logger.error('[DB_INIT_ERROR] Failed to establish database connection.');
+      this.logger.error(`[ERROR] [${this.moduleName}] Failed to establish database connection.`);
       throw error;
     }
   }
@@ -39,12 +40,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     if (this.pool) {
       await this.pool.end();
-      this.logger.log('[DB_DESTROY] Database connection closed.');
+      this.logger.log(`[INFO] [${this.moduleName}] Database connection closed.`);
     }
   }
 
   async query(sqlText: string, params?: any[]) {
-    this.logger.debug('[DB_QUERY] Executing query', {
+    this.logger.debug(`[DEBUG] [${this.moduleName}] Executing query`, {
       sql: sqlText,
       params,
     });
@@ -52,13 +53,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     try {
       const result = await this.pool.query(sqlText, params);
 
-      this.logger.debug('[DB_QUERY_SUCCESS] Query executed successfully', {
+      this.logger.debug(`[DEBUG] [${this.moduleName}] Query executed successfully`, {
         rowCount: result.rowCount,
       });
 
       return result;
     } catch (error) {
-      this.logger.error('[DB_QUERY_ERROR] Query execution failed');
+      this.logger.error(`[ERROR] [${this.moduleName}] Query execution failed`);
       throw error;
     }
   }

@@ -2,7 +2,10 @@ import { useEffect } from 'react';
 import { formatCandle } from '../utils/formatters';
 import { socket } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
+import { Logger } from '../utils/logger';
 import type { ISeriesApi, IChartApi } from 'lightweight-charts';
+
+const logger = new Logger('MarketData');
 
 export const useMarketData = (
   chart: IChartApi | null,
@@ -19,7 +22,7 @@ export const useMarketData = (
         const rawCandles = await getHistoricalCandles(symbol, 1000);
 
         if (!rawCandles || rawCandles.length === 0) {
-          console.warn('No candle data received from API');
+          logger.warn(`No candle data received from API for symbol: ${symbol}`);
           return;
         }
 
@@ -28,11 +31,12 @@ export const useMarketData = (
           .filter((candle: ReturnType<typeof formatCandle>): candle is Exclude<ReturnType<typeof formatCandle>, null> => candle !== null);
         
         if (formattedData.length === 0) {
-          console.warn('No valid candle data after formatting');
+          logger.warn(`No valid candle data after formatting for symbol: ${symbol}`);
           return;
         }
 
         candlestickSeries.setData(formattedData);
+        logger.info(`Successfully loaded ${formattedData.length} candles for symbol: ${symbol}`);
 
         const totalCandles = formattedData.length;
         const OFFSET_RIGHT = 10;
@@ -44,7 +48,7 @@ export const useMarketData = (
         });
         
       } catch (error) {
-        console.error('Error fetching historical data:', error);
+        logger.error(`Failed to fetch historical data for symbol: ${symbol}`, error);
       }
     };
 
@@ -60,10 +64,10 @@ export const useMarketData = (
         
         // Log for debugging (only for final candles)
         if (data.is_final) {
-          console.log(`[Candle FINAL] ${data.symbol} @ ${data.timestamp} - O:${data.open}, C:${data.close}, V:${data.volume}`);
+          logger.info(`Final candle received for ${data.symbol}: Open=${data.open}, Close=${data.close}, Volume=${data.volume}`);
         }
       } else {
-        console.warn('Skipped invalid candle data from socket update', data);
+        logger.warn(`Invalid candle data received from socket update`, data);
       }
     };
 
