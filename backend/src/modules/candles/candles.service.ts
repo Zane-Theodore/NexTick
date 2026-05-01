@@ -8,18 +8,36 @@ export class CandlesService {
 
   constructor(private readonly databaseService: DatabaseService) {}
 
-  async getHistoricalCandles(symbol: string = 'BTCUSDT', limit: number = 100) {
-    this.logger.log(`[INFO] [${this.moduleName}] Fetching historical candles for symbol: ${symbol} with limit: ${limit}`);
+  async getHistoricalCandles(symbol: string = 'BTCUSDT', limit: number = 100, interval: string = '1m') {
+    this.logger.log(`[INFO] [${this.moduleName}] Fetching historical candles for symbol: ${symbol} with limit: ${limit} and interval: ${interval}`);
 
     try {
       const safeSymbol = symbol.toLowerCase().replace(/[^a-z0-9]/g, '');
       const tableName = `${safeSymbol}_1m_candles`;
 
-      const query = `
-        SELECT * FROM ${tableName} 
-        ORDER BY timestamp DESC 
-        LIMIT $1;
-      `;
+      let query = '';
+
+      if (interval === '1m') {
+        query = `
+          SELECT * FROM ${tableName} 
+          ORDER BY timestamp DESC 
+          LIMIT $1;
+        `;
+      } else {
+        query = `
+          SELECT 
+              timestamp,
+              first(open) as open, 
+              max(high) as high, 
+              min(low) as low, 
+              last(close) as close, 
+              sum(volume) as volume
+          FROM ${tableName}
+          SAMPLE BY ${interval} ALIGN TO CALENDAR FILL(NONE)
+          ORDER BY timestamp DESC
+          LIMIT $1;
+        `;
+      }
       
       const parameters = [limit];
       
