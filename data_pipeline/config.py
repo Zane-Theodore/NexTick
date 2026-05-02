@@ -37,3 +37,19 @@ QUESTDB_DATABASE = get_env_or_raise('QUESTDB_DB_NAME')
 # BINANCE
 # ==========================================
 BINANCE_SOCKET_URL = get_env_or_raise('BINANCE_SOCKET_URL')
+
+# ==========================================
+# DATA PIPELINE CONFIG
+# ==========================================
+# List of trading symbols to process (can be set via environment variable)
+# Format: comma-separated, e.g., "BTCUSDT,ETHUSDT,BNBUSDT"
+TRADING_SYMBOLS = os.getenv('TRADING_SYMBOLS', 'BTCUSDT').split(',')
+TRADING_SYMBOLS = [s.strip().lower() for s in TRADING_SYMBOLS]
+
+# List of candle intervals to generate from raw trade data
+# Format: list of interval strings
+CANDLE_INTERVALS = os.getenv('CANDLE_INTERVALS', '1m,5m').split(',')
+CANDLE_INTERVALS = [s.strip() for s in CANDLE_INTERVALS]
+
+# Interval in milliseconds for broadcasting updating candles to frontend
+CANDLE_UPDATE_INTERVAL_MS = int(os.getenv('CANDLE_UPDATE_INTERVAL_MS', '500'))
