@@ -41,10 +41,11 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
     const logLevel = isFinal ? 'log' : 'debug';
     
     const logMessage = isFinal
-      ? `[INFO] [${this.moduleName}] Emitting candle update event to clients`
-      : `[DEBUG] [${this.moduleName}] Emitting candle update event to clients`;
+      ? `[INFO] [${this.moduleName}] Emitting candle update: ${candleData.symbol} [${candleData.interval}]`
+      : `[DEBUG] [${this.moduleName}] Emitting candle update: ${candleData.symbol} [${candleData.interval}]`;
     this.logger[logLevel](logMessage, { 
       symbol: candleData.symbol,
+      interval: candleData.interval,
       timestamp: candleData.timestamp,
       is_final: candleData.is_final,
       close: candleData.close,
@@ -53,5 +54,9 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
     
     // Emit unified event to all connected clients
     this.server.emit('candle.update', candleData);
+    
+    // Also emit interval-specific event for targeted subscriptions
+    const intervalKey = `candle.update.${candleData.symbol}.${candleData.interval}`;
+    this.server.emit(intervalKey, candleData);
   }
 }

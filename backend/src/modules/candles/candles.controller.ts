@@ -16,9 +16,11 @@ export class CandlesController {
 
   @Get()
   async getCandles(
-  @Query('symbol') symbol: string,
-  @Query('limit') limit: string,) {
-    this.logger.log(`[INFO] [${this.moduleName}] Received request for candles with symbol: ${symbol} and limit: ${limit}`);
+    @Query('symbol') symbol: string,
+    @Query('limit') limit: string,
+    @Query('interval') interval: string,
+  ) {
+    this.logger.log(`[INFO] [${this.moduleName}] Received request for candles: symbol=${symbol}, interval=${interval}, limit=${limit}`);
 
     if (!symbol) {
       throw new BadRequestException('Missing required query parameter: symbol (e.g., ?symbol=BTCUSDT)');
@@ -33,10 +35,14 @@ export class CandlesController {
       }
     }
 
-    const data = await this.candlesService.getHistoricalCandles(targetSymbol, targetLimit);
+    const targetInterval = interval || '1m';
+
+    const data = await this.candlesService.getHistoricalCandles(targetSymbol, targetLimit, targetInterval);
     
     return {
       success: true,
+      symbol: targetSymbol,
+      interval: targetInterval,
       count: data.length,
       data: data,
     };

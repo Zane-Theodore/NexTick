@@ -9,47 +9,39 @@ export class CandlesService {
   constructor(private readonly databaseService: DatabaseService) {}
 
   async getHistoricalCandles(symbol: string = 'BTCUSDT', limit: number = 100, interval: string = '1m') {
-    this.logger.log(`[INFO] [${this.moduleName}] Fetching historical candles for symbol: ${symbol} with limit: ${limit} and interval: ${interval}`);
+    this.logger.log(`[INFO] [${this.moduleName}] Fetching historical candles for symbol: ${symbol}, interval: ${interval}, limit: ${limit}`);
 
     try {
-      const safeSymbol = symbol.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const tableName = `${safeSymbol}_1m_candles`;
+      const safeSymbol = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-      let query = '';
-
-      if (interval === '1m') {
-        query = `
-          SELECT * FROM ${tableName} 
-          ORDER BY timestamp DESC 
-          LIMIT $1;
-        `;
-      } else {
-        query = `
-          SELECT 
-              timestamp,
-              first(open) as open, 
-              max(high) as high, 
-              min(low) as low, 
-              last(close) as close, 
-              sum(volume) as volume
-          FROM ${tableName}
-          SAMPLE BY ${interval} ALIGN TO CALENDAR FILL(NONE)
-          ORDER BY timestamp DESC
-          LIMIT $1;
-        `;
-      }
+      // Query from unified candles table
+      const query = `
+        SELECT 
+          timestamp,
+          symbol,
+          interval,
+          open,
+          high,
+          low,
+          close,
+          volume
+        FROM candles
+        WHERE symbol = $1 AND interval = $2
+        ORDER BY timestamp DESC
+        LIMIT $3;
+      `;
       
-      const parameters = [limit];
+      const parameters = [safeSymbol, interval, limit];
       
       const result = await this.databaseService.query(query, parameters);
 
       const candles = result.rows ? result.rows.reverse() : [];
 
-      this.logger.log(`[INFO] [${this.moduleName}] Retrieved ${candles.length} candles for symbol: ${symbol}`);
+      this.logger.log(`[INFO] [${this.moduleName}] Retrieved ${candles.length} candles for ${symbol} [${interval}]`);
       return candles;
       
     } catch (error) {
-      this.logger.error(`[ERROR] [${this.moduleName}] Failed to fetch historical candles for symbol: ${symbol}.`);
+      this.logger.error(`[ERROR] [${this.moduleName}] Failed to fetch historical candles for symbol: ${symbol}, interval: ${interval}`);
       throw error;
     }
   }

@@ -57,9 +57,10 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
             const candleData = JSON.parse(rawValue);
             
             // Validate required fields
-            if (!candleData.open || !candleData.high || !candleData.low || !candleData.close) {
+            if (!candleData.symbol || !candleData.interval || !candleData.open || !candleData.high || !candleData.low || !candleData.close) {
               this.logger.error(`[ERROR] [${this.moduleName}] Invalid candle data received`, { 
                 symbol: candleData.symbol,
+                interval: candleData.interval,
                 timestamp: candleData.timestamp,
                 is_final: candleData.is_final,
                 open: candleData.open,
@@ -73,10 +74,11 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
 
             const logLevel = candleData.is_final ? 'log' : 'debug';
             const logMessage = candleData.is_final
-              ? `[INFO] [${this.moduleName}] Candle data received`
-              : `[DEBUG] [${this.moduleName}] Candle data received (updating)`;
+              ? `[INFO] [${this.moduleName}] Candle data received: ${candleData.symbol} [${candleData.interval}]`
+              : `[DEBUG] [${this.moduleName}] Candle data received (updating): ${candleData.symbol} [${candleData.interval}]`;
             this.logger[logLevel](logMessage, { 
               symbol: candleData.symbol,
+              interval: candleData.interval,
               timestamp: candleData.timestamp,
               is_final: candleData.is_final,
               close: candleData.close,
