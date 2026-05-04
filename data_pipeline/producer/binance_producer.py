@@ -1,6 +1,8 @@
 import json
 import websocket
 import threading
+import signal
+import sys
 from kafka import KafkaProducer
 
 from data_pipeline import config
@@ -151,11 +153,14 @@ class BinanceProducerManager:
         self.symbols = symbols or config.TRADING_SYMBOLS
         self.producers = {}
         self.threads = {}
+        self.is_running = False
         
         logger.info(f"Initializing Binance Producer Manager for symbols: {', '.join(s.upper() for s in self.symbols)}")
 
     def start(self):
         """Start all producers in separate threads."""
+        self.is_running = True
+        
         for symbol in self.symbols:
             try:
                 producer = BinanceProducer(symbol)
@@ -177,34 +182,62 @@ class BinanceProducerManager:
 
     def shutdown(self):
         """Gracefully shutdown all producers."""
-        logger.info("Shutting down Binance Producer Manager")
+        if not self.is_running:
+            return
+            
+        self.is_running = False
+        logger.info("Shutting down Binance Producer Manager...")
+        
+        # Signal all producers to close
         for symbol, producer in self.producers.items():
             try:
+                logger.info(f"Closing producer for {symbol.upper()}...")
                 producer.shutdown()
             except Exception as e:
                 logger.error(f"Error shutting down producer for {symbol.upper()}: {e}")
         
-        # Wait for all threads to finish
+        # Wait for all threads to finish with timeout
+        logger.info("Waiting for all producer threads to finish...")
         for symbol, thread in self.threads.items():
             thread.join(timeout=5)
-            logger.info(f"Producer thread for {symbol.upper()} finished")
+            if thread.is_alive():
+                logger.warning(f"Producer thread for {symbol.upper()} did not finish within timeout")
+            else:
+                logger.info(f"Producer thread for {symbol.upper()} finished gracefully")
+        
+        logger.info("Binance Producer Manager shut down successfully")
 
 
 # ==========================================
 # PROGRAM STARTUP
 # ==========================================
 if __name__ == "__main__":
-    # Option 1: Run specific symbols (can be overridden)
-    # manager = BinanceProducerManager(symbols=['btcusdt', 'ethusdt'])
-    
-    # Option 2: Run symbols from config (recommended)
     manager = BinanceProducerManager()
     
-    try:
-        manager.start()
-        # Keep main thread alive
-        for thread in manager.threads.values():
-            thread.join()
-    except KeyboardInterrupt:
-        logger.info("Received shutdown signal")
+    def signal_handler(sig, frame):
+        """Handle SIGINT and SIGTERM signals."""
+        logger.info(f"Received signal {sig}. Initiating graceful shutdown...")
         manager.shutdown()
+        sys.exit(0)
+    
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        logger.info("Starting Binance Producer Manager...")
+        manager.start()
+        
+        # Keep main thread alive
+        while manager.is_running:
+            for thread in manager.threads.values():
+                if not thread.is_alive():
+                    logger.error("A producer thread has died. Shutting down...")
+                    manager.shutdown()
+                    sys.exit(1)
+            threading.Event().wait(1)  # Check every 1 second
+            
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}")
+        manager.shutdown()
+        sys.exit(1)
