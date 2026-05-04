@@ -45,6 +45,7 @@ services:
     ports:
       - "9000:9000"
       - "8812:8812"
+      - "9009:9009"
     networks:
       - nextick_net
     volumes:
