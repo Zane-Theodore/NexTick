@@ -27,6 +27,7 @@ class BaseCandleManager:
         self.running = True
         self.first_trade_price = 0.0
         self.broadcast_callback = None
+        self.trade_count_since_cleanup = 0
         logger.info(f"Initialized BaseCandleManager for {self.symbol.upper()} (1m only)")
 
     def truncate_to_minute(self, timestamp: datetime) -> datetime:
