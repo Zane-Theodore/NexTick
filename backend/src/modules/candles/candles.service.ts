@@ -40,21 +40,24 @@ export class CandlesService {
         ORDER BY timestamp DESC
         LIMIT $2;
       `;
-      
+
       const parameters = [safeSymbol, limit];
 
       const result = await this.databaseService.query(query, parameters);
 
-      const candles = result.rows ? result.rows.reverse().map(row => {
-        const localDate = new Date(row.timestamp);
-        
-        const utcTime = localDate.getTime() - (localDate.getTimezoneOffset() * 60000);
-        
-        return {
-          ...row,
-          timestamp: new Date(utcTime).toISOString()
-        };
-      }) : [];
+      const candles = result.rows
+        ? result.rows.reverse().map((row) => {
+            const localDate = new Date(row.timestamp);
+
+            const utcTime =
+              localDate.getTime() - localDate.getTimezoneOffset() * 60000;
+
+            return {
+              ...row,
+              timestamp: new Date(utcTime).toISOString(),
+            };
+          })
+        : [];
 
       this.logger.log(`[INFO] [${this.moduleName}] Successfully aggregated ${candles.length} [${interval}] candles for ${symbol}`);
       return candles;
