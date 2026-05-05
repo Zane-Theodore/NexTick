@@ -87,7 +87,7 @@ class BinanceProducer:
             )
             
         except Exception as e:
-            logger.error(f"Error processing Binance message for {self.symbol.upper()}: {e}")
+            logger.error(f"Error processing Binance message for {self.symbol.upper()}: {e}", exc_info=True)
 
     def on_open(self, ws):
         """Callback when WebSocket connection is successfully opened."""
@@ -108,8 +108,8 @@ class BinanceProducer:
         self.producer.close()
 
     def on_error(self, ws, error):
-        """Handle WebSocket error."""
-        logger.error(f"WebSocket error ({self.symbol.upper()}): {error}")
+        """Handle WebSocket error and log with traceback."""
+        logger.error(f"WebSocket error ({self.symbol.upper()}): {error}", exc_info=True)
 
     def run(self):
         """Start WebSocket connection and begin streaming trade data to Kafka."""
@@ -123,7 +123,7 @@ class BinanceProducer:
             )
             self.ws.run_forever()
         except Exception as e:
-            logger.error(f"Fatal error in producer ({self.symbol.upper()}): {e}")
+            logger.error(f"Fatal error in producer ({self.symbol.upper()}): {e}", exc_info=True)
             self.producer.close()
             raise
 
@@ -178,7 +178,7 @@ class BinanceProducerManager:
                 logger.info(f"Started producer thread for {symbol.upper()}")
                 
             except Exception as e:
-                logger.error(f"Failed to start producer for {symbol.upper()}: {e}")
+                logger.error(f"Failed to start producer for {symbol.upper()}: {e}", exc_info=True)
 
     def shutdown(self):
         """Gracefully shutdown all producers."""
@@ -194,7 +194,7 @@ class BinanceProducerManager:
                 logger.info(f"Closing producer for {symbol.upper()}...")
                 producer.shutdown()
             except Exception as e:
-                logger.error(f"Error shutting down producer for {symbol.upper()}: {e}")
+                logger.error(f"Error shutting down producer for {symbol.upper()}: {e}", exc_info=True)
         
         # Wait for all threads to finish with timeout
         logger.info("Waiting for all producer threads to finish...")
@@ -238,6 +238,6 @@ if __name__ == "__main__":
             threading.Event().wait(1)  # Check every 1 second
             
     except Exception as e:
-        logger.error(f"Fatal error in main: {e}")
+        logger.error(f"Fatal error in main: {e}", exc_info=True)
         manager.shutdown()
         sys.exit(1)

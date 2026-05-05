@@ -66,6 +66,12 @@ def get_logger(name: str) -> logging.Logger:
         name: Logger name (usually __name__)
     
     Returns:
-        Logger instance
+        Logger instance with support for error logging with tracebacks
+        
+    Usage for error logging with traceback:
+        try:
+            # code
+        except Exception as e:
+            logger.error(f"Error message: {e}", exc_info=True)
     """
     return configure_logger(name)
