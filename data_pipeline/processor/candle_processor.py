@@ -27,8 +27,6 @@ class BaseCandleManager:
         self.running = True
         self.first_trade_price = 0.0
         self.broadcast_callback = None
-        self.trade_count_since_cleanup = 0 
-        
         logger.info(f"Initialized BaseCandleManager for {self.symbol.upper()} (1m only)")
 
     def truncate_to_minute(self, timestamp: datetime) -> datetime:
@@ -180,7 +178,7 @@ class CandleProcessor:
             auto_offset_reset='latest',
             enable_auto_commit=False, 
             value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-            group_id=f'candle-processor-{symbol}-v7'  # Incremented version to reset offset
+            group_id=f'candle-processor-{symbol}'
         )
         
         self.producer = KafkaProducer(
@@ -303,7 +301,6 @@ class CandleProcessor:
                                     # Advance to new minute and reset first_trade_price
                                     self.interval_manager.current_minute = trade_minute
                                     self.interval_manager.first_trade_price = trade['price']
-                                        
                                 self.interval_manager.trade_count_since_cleanup += 1
                                 if self.interval_manager.trade_count_since_cleanup > 1000:
                                     self.interval_manager.cleanup_old_trades()

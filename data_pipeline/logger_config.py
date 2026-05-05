@@ -70,7 +70,7 @@ def get_logger(name: str) -> logging.Logger:
         
     Usage for error logging with traceback:
         try:
-            # code
+            # your code here
         except Exception as e:
             logger.error(f"Error message: {e}", exc_info=True)
     """
