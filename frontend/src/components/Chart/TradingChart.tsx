@@ -73,7 +73,22 @@ export default function TradingChart() {
         secondsVisible: false, 
         rightOffset: 10,
         minBarSpacing: 10,
-        maxBarSpacing: 50,
+        maxBarSpacing: 80,
+        tickMarkFormatter: (time: any) => {
+          let date: Date;
+          
+          if (typeof time === 'number') {
+            date = new Date(time * 1000);
+          } else if (typeof time === 'string') {
+            date = new Date(time);
+          } else {
+            return '';
+          }
+          
+          const hours = date.getHours().toString().padStart(2, '0');
+          const minutes = date.getMinutes().toString().padStart(2, '0');
+          return `${hours}:${minutes}`;
+        },
       },
       localization: {
         priceFormatter: (price: number) => {
