@@ -25,10 +25,9 @@ class BaseCandleManager:
         self.lock = threading.Lock()
         self.update_timer = None
         self.running = True
-        self.first_trade_price = 0.0
         self.broadcast_callback = None
         self.trade_count_since_cleanup = 0
-        logger.info(f"Initialized BaseCandleManager for {self.symbol.upper()} (1m only)")
+        logger.info(f"Initialized BaseCandleManager for {self.symbol.upper()}")
 
     def truncate_to_minute(self, timestamp: datetime) -> datetime:
         """Truncate timestamp to minute boundary.
@@ -205,17 +204,16 @@ class CandleProcessor:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    candle['symbol'], 
-                    candle['interval'], 
-                    db_timestamp_str, 
-                    candle['open'], 
-                    candle['high'], 
-                    candle['low'], 
-                    candle['close'], 
+                    candle['symbol'],
+                    candle['interval'],
+                    db_timestamp_str,
+                    candle['open'],
+                    candle['high'],
+                    candle['low'],
+                    candle['close'],
                     candle['volume']
                 )
             )
-            # Database has persisted data, now safely commit Kafka offset
             self.consumer.commit()
             logger.info(f"[DB INSERT] Synchronously persisted 1m candle for {candle['timestamp'].strftime('%H:%M:%S')}")
             
@@ -237,9 +235,7 @@ class CandleProcessor:
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
         
         if is_final:
-            # Process waits here until database confirms successful save
             self.save_to_db(candle)
-            
         self.producer.send(config.TOPIC_KLINE_STREAM, value=kafka_candle)
 
     def run(self):
@@ -263,45 +259,31 @@ class CandleProcessor:
                         trade = message.value
                         
                         try:
-                            # Validate required fields from raw trade data
                             if not all(k in trade for k in ('timestamp', 'price', 'volume')):
                                 continue
-                                
-                            if float(trade['price']) <= 0 or float(trade['volume']) <= 0:
+                            price = float(trade['price'])
+                            volume = float(trade['volume'])
+                            if price <= 0 or volume <= 0:
                                 logger.warning(f"Rejected invalid trade data - price or volume <= 0: {trade}")
                                 continue
-                                
-                            # Parse timestamp and fix timezone to UTC to match Binance candles
                             trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000.0, tz=timezone.utc)
-                            
                             if trade_time.year < 2020:
                                 logger.warning(f"Rejected trade with invalid year (before 2020): {trade}")
                                 continue
-                            
                             with self.interval_manager.lock:
                                 trade_with_time = trade.copy()
                                 trade_with_time['datetime'] = trade_time
                                 self.interval_manager.trades_buffer.append(trade_with_time)
-                                
-                                # Initialize the first minute if not yet set
-                                if not self.interval_manager.current_minute:
+                                if self.interval_manager.current_minute is None:
                                     self.interval_manager.current_minute = self.interval_manager.truncate_to_minute(trade_time)
-                                    self.interval_manager.first_trade_price = trade['price']
                                     self.interval_manager.schedule_next_update()
                                     continue
-                                
                                 trade_minute = self.interval_manager.truncate_to_minute(trade_time)
-                                
-                                # Move to next minute: finalize current 1m candle and advance clock
                                 if trade_minute > self.interval_manager.current_minute:
                                     last_candle = self.interval_manager.calculate_ohlcv()
-                                    
                                     if last_candle:
                                         self.broadcast_candle(last_candle, is_final=True)
-                                        
-                                    # Advance to new minute and reset first_trade_price
                                     self.interval_manager.current_minute = trade_minute
-                                    self.interval_manager.first_trade_price = trade['price']
                                 self.interval_manager.trade_count_since_cleanup += 1
                                 if self.interval_manager.trade_count_since_cleanup > 1000:
                                     self.interval_manager.cleanup_old_trades()

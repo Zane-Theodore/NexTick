@@ -11,29 +11,12 @@ from data_pipeline.logger_config import get_logger
 logger = get_logger(__name__)
 
 class BinanceProducer:
-    """
-    Binance WebSocket producer for a single trading symbol.
-    
-    Design principles:
-    - Single responsibility: Each instance handles one symbol
-    - Scalable: Uses partition key (symbol) in Kafka for easy distribution across consumers
-    - Extensible: Easy to run multiple instances for different symbols in parallel
-    """
-    
+    """Binance WebSocket producer for a single trading symbol."""
+
     def __init__(self, symbol: str):
-        """
-        Initialize producer for a specific trading symbol.
-        
-        Args:
-            symbol: Trading pair symbol (e.g., 'btcusdt', 'ethusdt')
-                   Will be converted to lowercase
-        """
         self.symbol = symbol.lower()
         self.ws = None
-        
         logger.info(f"Initializing Binance producer for: {self.symbol.upper()}")
-        
-        # Kafka producer with partition key support
         self.producer = KafkaProducer(
             bootstrap_servers=[config.KAFKA_SERVER],
             value_serializer=lambda v: json.dumps(v).encode('utf-8'),
@@ -44,36 +27,21 @@ class BinanceProducer:
         logger.info(f"Kafka producer initialized for {self.symbol.upper()}")
 
     def on_message(self, ws, message):
-        """
-        Handle incoming WebSocket message from Binance.
-        
-        Each raw trade is sent to Kafka with partition key = symbol
-        This ensures:
-        - All trades for a symbol go to same partition
-        - Easy to scale by assigning partitions to different consumer threads
-        """
+        """Handle incoming Binance WebSocket message."""
         try:
             raw_message = json.loads(message)
-            
-            # Ignore subscription confirmation messages
             if 'result' in raw_message:
                 return
-            
             data = raw_message.get('data')
             if not data:
                 return
-            
-            # Extract and normalize trade data from Binance
             clean_record = {
                 "trade_id": data['t'],
-                "timestamp": data['T'],  # milliseconds
+                "timestamp": data['T'],
                 "price": float(data['p']),
                 "volume": float(data['q']),
-                "is_buyer_maker": data['m']  # True if buy, False if sell
+                "is_buyer_maker": data['m']
             }
-            
-            # Send to Kafka with symbol as partition key
-            # This ensures all trades for a symbol go to the same partition
             self.producer.send(
                 config.TOPIC_RAW_TRADES,
                 value=clean_record,
@@ -90,10 +58,8 @@ class BinanceProducer:
             logger.error(f"Error processing Binance message for {self.symbol.upper()}: {e}", exc_info=True)
 
     def on_open(self, ws):
-        """Callback when WebSocket connection is successfully opened."""
+        """Handle WebSocket open event."""
         logger.info(f"Connected to Binance WebSocket for {self.symbol.upper()}")
-        
-        # Subscribe to trades for this symbol
         subscribe_payload = {
             "method": "SUBSCRIBE",
             "params": [f"{self.symbol}@trade"],
@@ -165,8 +131,6 @@ class BinanceProducerManager:
             try:
                 producer = BinanceProducer(symbol)
                 self.producers[symbol] = producer
-                
-                # Run each producer in a separate thread
                 thread = threading.Thread(
                     target=producer.run,
                     name=f"BinanceProducer-{symbol.upper()}",
@@ -227,16 +191,12 @@ if __name__ == "__main__":
     try:
         logger.info("Starting Binance Producer Manager...")
         manager.start()
-        
-        # Keep main thread alive
         while manager.is_running:
-            for thread in manager.threads.values():
-                if not thread.is_alive():
-                    logger.error("A producer thread has died. Shutting down...")
-                    manager.shutdown()
-                    sys.exit(1)
-            threading.Event().wait(1)  # Check every 1 second
-            
+            if any(not thread.is_alive() for thread in manager.threads.values()):
+                logger.error("A producer thread has died. Shutting down...")
+                manager.shutdown()
+                sys.exit(1)
+            threading.Event().wait(1)
     except Exception as e:
         logger.error(f"Fatal error in main: {e}", exc_info=True)
         manager.shutdown()
