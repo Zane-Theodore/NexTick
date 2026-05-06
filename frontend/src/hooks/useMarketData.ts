@@ -3,7 +3,7 @@ import { formatCandle } from '../utils/formatters';
 import { subscribeToCandles } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
 import { Logger } from '../utils/logger';
-import type { ISeriesApi, IChartApi } from 'lightweight-charts';
+import type { ISeriesApi, IChartApi, CandlestickData, Time } from 'lightweight-charts';
 
 const logger = new Logger('MarketData');
 
@@ -36,7 +36,7 @@ export const useMarketData = (
           return;
         }
 
-        candlestickSeries.setData(formattedData);
+        candlestickSeries.setData(formattedData as CandlestickData<Time>[]);
         logger.info(`Successfully loaded ${formattedData.length} candles for symbol: ${symbol} [${interval}]`);
 
         const totalCandles = formattedData.length;
@@ -63,10 +63,7 @@ export const useMarketData = (
 
       const formatted = formatCandle(data);
       if (formatted) {
-        // Lightweight-charts automatically handles:
-        // - If timestamp matches existing candle: updates the body
-        // - If timestamp is new: creates a new candle
-        candlestickSeries.update(formatted);
+        candlestickSeries.update(formatted as CandlestickData<Time>);
         
         // Log for debugging (only for final candles)
         if (data.is_final) {
