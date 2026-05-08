@@ -29,7 +29,13 @@ export const useMarketData = (
 
         const formattedData = rawCandles
           .map(formatCandle)
-          .filter((candle: ReturnType<typeof formatCandle>): candle is Exclude<ReturnType<typeof formatCandle>, null> => candle !== null);
+          .filter((candle: ReturnType<typeof formatCandle>): candle is Exclude<ReturnType<typeof formatCandle>, null> => {
+            return candle !== null && 
+                   candle.open > 0 && 
+                   candle.high > 0 && 
+                   candle.low > 0 && 
+                   candle.close > 0;
+          });
         
         if (formattedData.length === 0) {
           logger.warn(`No valid candle data after formatting for symbol: ${symbol}, interval: ${interval}`);
@@ -56,25 +62,25 @@ export const useMarketData = (
     fetchHistory();
 
     const handleCandleUpdate = (data: any) => {
-      // Filter by interval to ensure we only process candles for the selected interval
       if (data.interval !== interval) {
         return;
       }
 
       const formatted = formatCandle(data);
-      if (formatted) {
+      
+      if (formatted && formatted.open > 0 && formatted.high > 0 && formatted.low > 0 && formatted.close > 0) {
         candlestickSeries.update(formatted as CandlestickData<Time>);
         
-        // Log for debugging (only for final candles)
         if (data.is_final) {
           logger.info(`Final candle received for ${data.symbol} [${data.interval}]: O=${data.open}, C=${data.close}, V=${data.volume}`);
         }
       } else {
-        logger.warn(`Invalid candle data received from socket update`, data);
+        if (formatted) {
+            logger.warn(`Zero-drop candle filtered out from socket:`, data);
+        }
       }
     };
 
-    // Subscribe to interval-specific event for this symbol and interval
     const unsubscribe = subscribeToCandles(symbol, interval, handleCandleUpdate);
 
     return () => {
