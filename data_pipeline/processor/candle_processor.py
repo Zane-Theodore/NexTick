@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
+from kafka.errors import NoBrokersAvailable
 
 from data_pipeline import config
 from data_pipeline.logger_config import get_logger
@@ -14,29 +15,27 @@ from data_pipeline.logger_config import get_logger
 logger = get_logger(__name__)
 
 
-def retry_with_backoff(operation, max_retries=3, base_delay=1.0, max_delay=10.0, operation_name='operation'):
-    """Retry an operation with exponential backoff."""
+def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0, operation_name='operation'):
     attempt = 0
     while attempt < max_retries:
         try:
             return operation()
+        except NoBrokersAvailable:
+            attempt += 1
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(f"{operation_name} failed (Kafka not ready). Retrying in {delay:.1f}s... ({attempt}/{max_retries})")
+            time.sleep(delay)
         except Exception as error:
             attempt += 1
             if attempt >= max_retries:
                 logger.error(f"{operation_name} failed after {attempt} attempts.", exc_info=True)
                 raise
             delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            logger.warning(f"{operation_name} failed on attempt {attempt}. Retrying in {delay:.1f}s...", exc_info=True)
+            logger.warning(f"{operation_name} failed on attempt {attempt}: {error}. Retrying in {delay:.1f}s...")
             time.sleep(delay)
 
 
 class BaseCandleManager:
-    """
-    Manages strictly 1m candle generation.
-    
-    Uses rollup architecture: Only keeps raw data for 2 minutes to maximize RAM efficiency.
-    Automatically cleans up old trades periodically to prevent memory buildup.
-    """
     def __init__(self, symbol: str):
         self.symbol = symbol.lower()
         self.interval = '1m'
@@ -50,25 +49,9 @@ class BaseCandleManager:
         logger.info(f"Initialized BaseCandleManager for {self.symbol.upper()}")
 
     def truncate_to_minute(self, timestamp: datetime) -> datetime:
-        """Truncate timestamp to minute boundary.
-        
-        Args:
-            timestamp: DateTime to truncate
-            
-        Returns:
-            DateTime with seconds and microseconds set to 0
-        """
         return timestamp.replace(second=0, microsecond=0)
 
     def calculate_ohlcv(self) -> dict:
-        """Calculate OHLCV (Open, High, Low, Close, Volume) for current minute.
-        
-        Processes all trades in the current minute window to compute candle data.
-        Returns None if no trades are available for the current minute.
-        
-        Returns:
-            Dictionary with OHLCV data or None if no trades in current minute
-        """
         if not self.trades_buffer or not self.current_minute: 
             return None
         
@@ -93,11 +76,6 @@ class BaseCandleManager:
         }
 
     def schedule_next_update(self):
-        """Schedule next update timer to broadcast intermediate candles.
-        
-        Sets up a timer to periodically emit updating candles to connected clients.
-        Only creates timer if not already running.
-        """
         if self.running and not self.update_timer:
             self.update_timer = threading.Timer(
                 config.CANDLE_UPDATE_INTERVAL_MS / 1000.0,
@@ -107,11 +85,6 @@ class BaseCandleManager:
             self.update_timer.start()
 
     def _emit_updating_candles(self):
-        """Emit intermediate candle updates to connected clients.
-        
-        Called periodically by timer to broadcast partial candle data
-        before minute finalization. Reschedules itself for continuous updates.
-        """
         if not self.running: return
         with self.lock:
             if self.current_minute and self.trades_buffer:
@@ -128,38 +101,23 @@ class BaseCandleManager:
             self.update_timer.start()
 
     def cleanup_old_trades(self):
-        """Clean up old trades from buffer to conserve memory.
-        
-        Only keeps trades from the most recent 2 minutes.
-        """
         if not self.trades_buffer: return
         latest_trade_time = self.trades_buffer[-1]['datetime']
         cutoff_time = latest_trade_time - timedelta(minutes=2) 
         self.trades_buffer = [t for t in self.trades_buffer if t['datetime'] >= cutoff_time]
 
     def cleanup(self):
-        """Cleanup resources on shutdown.
-        
-        Stops the manager and cancels any pending timers.
-        """
         if self.update_timer:
             self.update_timer.cancel()
 
 
 class CandleProcessor:
-    """Process raw trades into 1-minute candles.
-    
-    Consumes raw trade data from Kafka, generates 1m candles, and persists to QuestDB.
-    Uses synchronous database writes with BYPASS WAL for immediate persistence.
-    Broadcasts candles to frontend via Kafka as they're generated.
-    """
-    def __init__(self, symbol: str = "btcusdt"):
-        self.symbol = symbol.lower()
+    def __init__(self):
         self.table_name = "market_candles"
+        self.managers = {} 
         
-        logger.info(f"Initializing PURE 1M processor for {self.symbol.upper()} using psycopg2 (Synchronous).")
+        logger.info("Initializing MULTI-SYMBOL 1M processor using psycopg2 (Synchronous).")
         
-        # Configure synchronous database connection (bypass WAL delay)
         try:
             self.db_conn = psycopg2.connect(
                 host=config.QUESTDB_HOST,
@@ -168,11 +126,10 @@ class CandleProcessor:
                 user="admin",
                 password="quest"
             )
-            self.db_conn.autocommit = True  # Force immediate commit without WAL delay
+            self.db_conn.autocommit = True
             self.db_cursor = self.db_conn.cursor()
             logger.info("Connected to QuestDB via PostgreSQL wire protocol.")
 
-            # Auto-create market_candles table with BYPASS WAL if not exists
             self.db_cursor.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.table_name} (
@@ -192,35 +149,34 @@ class CandleProcessor:
             logger.error(f"Failed to connect to QuestDB: {e}", exc_info=True)
             raise
         
-        self.consumer = KafkaConsumer(
-            config.TOPIC_RAW_TRADES,
-            bootstrap_servers=[config.KAFKA_SERVER],
-            auto_offset_reset='latest',
-            enable_auto_commit=False,
-            consumer_timeout_ms=1000,
-            value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-            group_id=f'candle-processor-{symbol}'
-        )
+        def _create_consumer():
+            return KafkaConsumer(
+                config.TOPIC_RAW_TRADES,
+                bootstrap_servers=[config.KAFKA_SERVER],
+                api_version=(3, 4, 0),
+                auto_offset_reset='latest',
+                enable_auto_commit=False,
+                consumer_timeout_ms=1000,
+                value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+                group_id='candle-processor-group'
+            )
         
-        self.producer = KafkaProducer(
-            bootstrap_servers=[config.KAFKA_SERVER],
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            retries=5,
-            linger_ms=5,
-            request_timeout_ms=30000,
-        )
+        self.consumer = retry_with_backoff(_create_consumer, operation_name='Kafka consumer creation')
         
-        self.interval_manager = BaseCandleManager(self.symbol)
-        self.interval_manager.broadcast_callback = self.broadcast_candle
+        def _create_producer():
+            return KafkaProducer(
+                bootstrap_servers=[config.KAFKA_SERVER],
+                api_version=(3, 4, 0),
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                retries=5,
+                linger_ms=5,
+                request_timeout_ms=30000,
+            )
+        
+        self.producer = retry_with_backoff(_create_producer, operation_name='Kafka producer creation')
         self.running = True
 
     def save_to_db(self, candle: dict) -> bool:
-        """Synchronously save candle data to QuestDB.
-        
-        Commits candle to database with BYPASS WAL strategy for immediate persistence.
-        Updates Kafka consumer offset after successful database commit.
-        Returns True if insert succeeded.
-        """
         def _insert():
             db_timestamp_str = candle['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
             self.db_cursor.execute(
@@ -243,7 +199,7 @@ class CandleProcessor:
 
         try:
             retry_with_backoff(_insert, max_retries=3, operation_name='QuestDB insert')
-            logger.info(f"[DB INSERT] Synchronously persisted 1m candle for {candle['timestamp'].strftime('%H:%M:%S')}")
+            logger.info(f"[DB INSERT] Persisted 1m candle for {candle['symbol']} at {candle['timestamp'].strftime('%H:%M:%S')}")
             return True
         except Exception:
             logger.error(f"[DB INSERT ERROR] Failed to save candle after retries: {candle}")
@@ -251,83 +207,88 @@ class CandleProcessor:
 
     def _send_to_topic(self, topic: str, value: dict):
         def _send():
-            future = self.producer.send(topic, value=value)
+            future = self.producer.send(topic, value=value, key=value['symbol'].encode('utf-8'))
             result = future.get(timeout=15)
-            logger.debug(f"Kafka send successful: topic={topic}, partition={result.partition}, offset={result.offset}")
             return result
 
         retry_with_backoff(_send, max_retries=4, base_delay=0.5, operation_name=f'Kafka publish to {topic}')
 
     def broadcast_candle(self, candle: dict, is_final: bool = False):
-        """Broadcast candle to frontend via Kafka.
-        
-        For final candles, synchronously persists to database before sending.
-        For intermediate candles, sends updates without persistence.
-        """
         kafka_candle = candle.copy()
         kafka_candle['is_final'] = is_final
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
 
         if is_final:
             if not self.save_to_db(candle):
-                logger.warning("Skipping final candle publish because DB persistence failed.")
+                logger.warning(f"Skipping final candle publish for {candle['symbol']} because DB persistence failed.")
                 return
 
         try:
             self._send_to_topic(config.TOPIC_KLINE_STREAM, kafka_candle)
         except Exception:
-            logger.error("Failed to publish candle update to Kafka after retries.", exc_info=True)
+            logger.error(f"Failed to publish candle update for {candle['symbol']} to Kafka.", exc_info=True)
 
     def run(self):
-        """Start processing trades and generating candles.
-        
-        Main processing loop that:
-        1. Consumes raw trades from Kafka
-        2. Validates and buffers trades by minute
-        3. Generates and broadcasts candles when minute boundaries are crossed
-        4. Persists final candles to database
-        
-        Runs until interrupted or error occurs.
-        """
-        logger.info(f"Starting processor for {self.symbol.upper()}")
+        logger.info("Starting MULTI-SYMBOL processor loop...")
         try:
             while self.running:
                 raw_messages = self.consumer.poll(timeout_ms=1000)
                 
                 for topic_partition, messages in raw_messages.items():
                     for message in messages:
-                        trade = message.value
+                        raw_trade = message.value
                         
                         try:
-                            if not all(k in trade for k in ('timestamp', 'price', 'volume')):
+                            trade = raw_trade.get('data', raw_trade)
+                            symbol = trade.get('s') or trade.get('symbol')
+                            
+                            if not symbol:
+                                logger.debug(f"[DROP] Thiếu Symbol: {raw_trade}")
                                 continue
+                                
+                            if not all(k in trade for k in ('timestamp', 'price', 'volume')):
+                                logger.debug(f"[DROP] Thiếu price/volume: {raw_trade}")
+                                continue
+                            
+                            symbol = symbol.lower()
                             price = float(trade['price'])
                             volume = float(trade['volume'])
+                            
                             if price <= 0 or volume <= 0:
-                                logger.warning(f"Rejected invalid trade data - price or volume <= 0: {trade}")
                                 continue
+                                
                             trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000.0, tz=timezone.utc)
                             if trade_time.year < 2020:
-                                logger.warning(f"Rejected trade with invalid year (before 2020): {trade}")
                                 continue
-                            with self.interval_manager.lock:
+                                
+                            if symbol not in self.managers:
+                                logger.info(f"Phát hiện luồng dữ liệu mới: {symbol.upper()}. Đang khởi tạo CandleManager...")
+                                self.managers[symbol] = BaseCandleManager(symbol)
+                                self.managers[symbol].broadcast_callback = self.broadcast_candle
+                                
+                            manager = self.managers[symbol]
+                            
+                            with manager.lock:
                                 trade_with_time = trade.copy()
                                 trade_with_time['datetime'] = trade_time
-                                self.interval_manager.trades_buffer.append(trade_with_time)
-                                if self.interval_manager.current_minute is None:
-                                    self.interval_manager.current_minute = self.interval_manager.truncate_to_minute(trade_time)
-                                    self.interval_manager.schedule_next_update()
+                                manager.trades_buffer.append(trade_with_time)
+                                
+                                if manager.current_minute is None:
+                                    manager.current_minute = manager.truncate_to_minute(trade_time)
+                                    manager.schedule_next_update()
                                     continue
-                                trade_minute = self.interval_manager.truncate_to_minute(trade_time)
-                                if trade_minute > self.interval_manager.current_minute:
-                                    last_candle = self.interval_manager.calculate_ohlcv()
+                                    
+                                trade_minute = manager.truncate_to_minute(trade_time)
+                                if trade_minute > manager.current_minute:
+                                    last_candle = manager.calculate_ohlcv()
                                     if last_candle:
                                         self.broadcast_candle(last_candle, is_final=True)
-                                    self.interval_manager.current_minute = trade_minute
-                                self.interval_manager.trade_count_since_cleanup += 1
-                                if self.interval_manager.trade_count_since_cleanup > 1000:
-                                    self.interval_manager.cleanup_old_trades()
-                                    self.interval_manager.trade_count_since_cleanup = 0
+                                    manager.current_minute = trade_minute
+                                    
+                                manager.trade_count_since_cleanup += 1
+                                if manager.trade_count_since_cleanup > 1000:
+                                    manager.cleanup_old_trades()
+                                    manager.trade_count_since_cleanup = 0
                                     
                         except Exception as e:
                             logger.error(f"Error processing individual trade: {e}", exc_info=True)
@@ -340,13 +301,10 @@ class CandleProcessor:
             self.shutdown()
 
     def shutdown(self):
-        """Gracefully shutdown processor.
-        
-        Closes all connections: consumer, producer, database.
-        Ensures no resource leaks.
-        """
         self.running = False
-        self.interval_manager.cleanup()
+        
+        for manager in self.managers.values():
+            manager.cleanup()
 
         try:
             self.consumer.close()
@@ -359,7 +317,6 @@ class CandleProcessor:
         except Exception as exc:
             logger.warning(f"Failed to flush/close Kafka producer cleanly: {exc}", exc_info=True)
         
-        # Gracefully close database connection
         try:
             if hasattr(self, 'db_cursor'):
                 self.db_cursor.close()
@@ -368,10 +325,10 @@ class CandleProcessor:
         except Exception as exc:
             logger.warning(f"Failed to close QuestDB connection cleanly: {exc}", exc_info=True)
             
-        logger.info(f"Processor for {self.symbol.upper()} shut down successfully")
+        logger.info("Processor shut down successfully")
 
 if __name__ == "__main__":
-    app = CandleProcessor(symbol="btcusdt")
+    app = CandleProcessor()
 
     def _handle_signal(sig, frame):
         logger.info(f"Received signal {sig}. Initiating graceful shutdown...")
