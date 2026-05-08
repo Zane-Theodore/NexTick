@@ -50,7 +50,31 @@ services:
       - nextick_net
     volumes:
       - ./data/questdb:/var/lib/questdb
-    restart: always
+
+  data-producer:
+    build: .
+    container_name: nextick-data-producer
+    command: python -m data_pipeline.producer.binance_producer
+    env_file:
+      - .env
+    networks:
+      - nextick_net
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+  data-processor:
+    build: .
+    container_name: nextick-data-processor
+    command: python -m data_pipeline.processor.candle_processor
+    env_file:
+      - .env
+    networks:
+      - nextick_net
+    depends_on:
+      - kafka
+      - questdb
+    restart: unless-stopped
 
 networks:
   nextick_net:
