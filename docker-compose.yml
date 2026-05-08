@@ -57,6 +57,9 @@ services:
     command: python -m data_pipeline.producer.binance_producer
     env_file:
       - .env
+    environment:
+      - KAFKA_BROKER=kafka:29092
+      - KAFKA_SERVER=kafka:29092
     networks:
       - nextick_net
     depends_on:
@@ -69,6 +72,10 @@ services:
     command: python -m data_pipeline.processor.candle_processor
     env_file:
       - .env
+    environment:
+      - KAFKA_BROKER=kafka:29092
+      - KAFKA_SERVER=kafka:29092
+      - QUESTDB_HOST=questdb
     networks:
       - nextick_net
     depends_on:
