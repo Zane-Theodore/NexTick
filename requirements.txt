@@ -1,4 +1,4 @@
 kafka-python==2.0.2
 psycopg2-binary==2.9.9
 websocket-client==1.6.4
-questdb==2.6.0
+questdb==4.1.0
