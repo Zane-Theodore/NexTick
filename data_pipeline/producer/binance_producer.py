@@ -3,6 +3,7 @@ import websocket
 import threading
 import signal
 import sys
+import time
 from kafka import KafkaProducer
 
 from data_pipeline import config
@@ -10,21 +11,55 @@ from data_pipeline.logger_config import get_logger
 
 logger = get_logger(__name__)
 
+
+def retry_with_backoff(operation, max_retries=4, base_delay=0.5, max_delay=10.0, operation_name='operation'):
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            return operation()
+        except Exception as error:
+            attempt += 1
+            if attempt >= max_retries:
+                logger.error(f"{operation_name} failed after {attempt} attempts.", exc_info=True)
+                raise
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(f"{operation_name} failed on attempt {attempt}. Retrying in {delay:.1f}s...", exc_info=True)
+            time.sleep(delay)
+
+
 class BinanceProducer:
     """Binance WebSocket producer for a single trading symbol."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol.lower()
         self.ws = None
+        self.is_running = True
         logger.info(f"Initializing Binance producer for: {self.symbol.upper()}")
         self.producer = KafkaProducer(
             bootstrap_servers=[config.KAFKA_SERVER],
             value_serializer=lambda v: json.dumps(v).encode('utf-8'),
             acks='all',
-            retries=3
+            retries=5,
+            linger_ms=5,
+            request_timeout_ms=30000,
         )
         
         logger.info(f"Kafka producer initialized for {self.symbol.upper()}")
+
+    def _send_to_kafka(self, record: dict):
+        def _send():
+            future = self.producer.send(
+                config.TOPIC_RAW_TRADES,
+                value=record,
+                key=self.symbol.encode()
+            )
+            result = future.get(timeout=15)
+            logger.debug(
+                f"Kafka ack received for {self.symbol.upper()}: partition={result.partition}, offset={result.offset}"
+            )
+            return result
+
+        retry_with_backoff(_send, operation_name=f'Kafka publish for {self.symbol.upper()}')
 
     def on_message(self, ws, message):
         """Handle incoming Binance WebSocket message."""
@@ -34,7 +69,9 @@ class BinanceProducer:
                 return
             data = raw_message.get('data')
             if not data:
+                logger.warning(f"Binance message missing data payload for {self.symbol.upper()}")
                 return
+
             clean_record = {
                 "trade_id": data['t'],
                 "timestamp": data['T'],
@@ -42,18 +79,20 @@ class BinanceProducer:
                 "volume": float(data['q']),
                 "is_buyer_maker": data['m']
             }
-            self.producer.send(
-                config.TOPIC_RAW_TRADES,
-                value=clean_record,
-                key=self.symbol.encode()
-            )
-            
+
+            if clean_record['price'] <= 0 or clean_record['volume'] <= 0:
+                logger.warning(f"Dropped invalid trade record for {self.symbol.upper()}: {clean_record}")
+                return
+
+            self._send_to_kafka(clean_record)
             action = "SELL" if clean_record["is_buyer_maker"] else "BUY"
             logger.debug(
                 f"Sent to Kafka: {self.symbol.upper()} | {action} | "
                 f"Price: {clean_record['price']:,.2f} | Volume: {clean_record['volume']:,.4f}"
             )
-            
+
+        except ValueError as e:
+            logger.warning(f"Invalid Binance payload for {self.symbol.upper()}: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Error processing Binance message for {self.symbol.upper()}: {e}", exc_info=True)
 
@@ -79,26 +118,38 @@ class BinanceProducer:
 
     def run(self):
         """Start WebSocket connection and begin streaming trade data to Kafka."""
-        try:
-            self.ws = websocket.WebSocketApp(
-                config.BINANCE_SOCKET_URL,
-                on_open=self.on_open,
-                on_message=self.on_message,
-                on_error=self.on_error,
-                on_close=self.on_close
-            )
-            self.ws.run_forever()
-        except Exception as e:
-            logger.error(f"Fatal error in producer ({self.symbol.upper()}): {e}", exc_info=True)
-            self.producer.close()
-            raise
+        while self.is_running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    config.BINANCE_SOCKET_URL,
+                    on_open=self.on_open,
+                    on_message=self.on_message,
+                    on_error=self.on_error,
+                    on_close=self.on_close
+                )
+                logger.info(f"Connecting Binance WebSocket for {self.symbol.upper()}...")
+                self.ws.run_forever()
+                if self.is_running:
+                    logger.warning(f"WebSocket connection for {self.symbol.upper()} closed unexpectedly. Reconnecting in 5 seconds...")
+                    time.sleep(5)
+            except Exception as e:
+                logger.error(f"Fatal error in producer ({self.symbol.upper()}): {e}", exc_info=True)
+                time.sleep(5)
+
+        self.shutdown()
 
     def shutdown(self):
         """Gracefully shutdown the producer."""
         logger.info(f"Shutting down producer for {self.symbol.upper()}")
+        self.is_running = False
         if self.ws:
             self.ws.close()
-        self.producer.close()
+        try:
+            self.producer.flush(timeout=10)
+        except Exception as exc:
+            logger.warning(f"Failed to flush Kafka producer for {self.symbol.upper()}: {exc}", exc_info=True)
+        finally:
+            self.producer.close()
 
 
 class BinanceProducerManager:
