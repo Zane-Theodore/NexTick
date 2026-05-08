@@ -1,5 +1,8 @@
 import json
+import signal
 import threading
+import time
+import sys
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -9,6 +12,23 @@ from data_pipeline import config
 from data_pipeline.logger_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def retry_with_backoff(operation, max_retries=3, base_delay=1.0, max_delay=10.0, operation_name='operation'):
+    """Retry an operation with exponential backoff."""
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            return operation()
+        except Exception as error:
+            attempt += 1
+            if attempt >= max_retries:
+                logger.error(f"{operation_name} failed after {attempt} attempts.", exc_info=True)
+                raise
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(f"{operation_name} failed on attempt {attempt}. Retrying in {delay:.1f}s...", exc_info=True)
+            time.sleep(delay)
+
 
 class BaseCandleManager:
     """
@@ -176,27 +196,32 @@ class CandleProcessor:
             config.TOPIC_RAW_TRADES,
             bootstrap_servers=[config.KAFKA_SERVER],
             auto_offset_reset='latest',
-            enable_auto_commit=False, 
+            enable_auto_commit=False,
+            consumer_timeout_ms=1000,
             value_deserializer=lambda x: json.loads(x.decode('utf-8')),
             group_id=f'candle-processor-{symbol}'
         )
         
         self.producer = KafkaProducer(
             bootstrap_servers=[config.KAFKA_SERVER],
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            retries=5,
+            linger_ms=5,
+            request_timeout_ms=30000,
         )
         
         self.interval_manager = BaseCandleManager(self.symbol)
         self.interval_manager.broadcast_callback = self.broadcast_candle
         self.running = True
 
-    def save_to_db(self, candle: dict):
+    def save_to_db(self, candle: dict) -> bool:
         """Synchronously save candle data to QuestDB.
         
         Commits candle to database with BYPASS WAL strategy for immediate persistence.
         Updates Kafka consumer offset after successful database commit.
+        Returns True if insert succeeded.
         """
-        try:
+        def _insert():
             db_timestamp_str = candle['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
             self.db_cursor.execute(
                 f"""
@@ -215,28 +240,43 @@ class CandleProcessor:
                 )
             )
             self.consumer.commit()
+
+        try:
+            retry_with_backoff(_insert, max_retries=3, operation_name='QuestDB insert')
             logger.info(f"[DB INSERT] Synchronously persisted 1m candle for {candle['timestamp'].strftime('%H:%M:%S')}")
-            
-        except Exception as e:
-            logger.error(f"[DB INSERT ERROR] Failed to save candle: {e}", exc_info=True)
+            return True
+        except Exception:
+            logger.error(f"[DB INSERT ERROR] Failed to save candle after retries: {candle}")
+            return False
+
+    def _send_to_topic(self, topic: str, value: dict):
+        def _send():
+            future = self.producer.send(topic, value=value)
+            result = future.get(timeout=15)
+            logger.debug(f"Kafka send successful: topic={topic}, partition={result.partition}, offset={result.offset}")
+            return result
+
+        retry_with_backoff(_send, max_retries=4, base_delay=0.5, operation_name=f'Kafka publish to {topic}')
 
     def broadcast_candle(self, candle: dict, is_final: bool = False):
         """Broadcast candle to frontend via Kafka.
         
         For final candles, synchronously persists to database before sending.
         For intermediate candles, sends updates without persistence.
-        
-        Args:
-            candle: Candle OHLCV data to broadcast
-            is_final: If True, persist to DB before broadcasting
         """
         kafka_candle = candle.copy()
         kafka_candle['is_final'] = is_final
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
-        
+
         if is_final:
-            self.save_to_db(candle)
-        self.producer.send(config.TOPIC_KLINE_STREAM, value=kafka_candle)
+            if not self.save_to_db(candle):
+                logger.warning("Skipping final candle publish because DB persistence failed.")
+                return
+
+        try:
+            self._send_to_topic(config.TOPIC_KLINE_STREAM, kafka_candle)
+        except Exception:
+            logger.error("Failed to publish candle update to Kafka after retries.", exc_info=True)
 
     def run(self):
         """Start processing trades and generating candles.
@@ -305,18 +345,40 @@ class CandleProcessor:
         Closes all connections: consumer, producer, database.
         Ensures no resource leaks.
         """
+        self.running = False
         self.interval_manager.cleanup()
-        self.consumer.close()
-        self.producer.close()
+
+        try:
+            self.consumer.close()
+        except Exception as exc:
+            logger.warning(f"Failed to close Kafka consumer cleanly: {exc}", exc_info=True)
+
+        try:
+            self.producer.flush(timeout=10)
+            self.producer.close()
+        except Exception as exc:
+            logger.warning(f"Failed to flush/close Kafka producer cleanly: {exc}", exc_info=True)
         
         # Gracefully close database connection
-        if hasattr(self, 'db_cursor'):
-            self.db_cursor.close()
-        if hasattr(self, 'db_conn'):
-            self.db_conn.close()
+        try:
+            if hasattr(self, 'db_cursor'):
+                self.db_cursor.close()
+            if hasattr(self, 'db_conn'):
+                self.db_conn.close()
+        except Exception as exc:
+            logger.warning(f"Failed to close QuestDB connection cleanly: {exc}", exc_info=True)
             
         logger.info(f"Processor for {self.symbol.upper()} shut down successfully")
 
 if __name__ == "__main__":
     app = CandleProcessor(symbol="btcusdt")
+
+    def _handle_signal(sig, frame):
+        logger.info(f"Received signal {sig}. Initiating graceful shutdown...")
+        app.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
     app.run()
