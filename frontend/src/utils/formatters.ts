@@ -1,7 +1,6 @@
 import { Logger } from './logger';
 
 const logger = new Logger('Formatters');
-const timezoneOffsetSeconds = new Date().getTimezoneOffset() * 60;
 
 export interface FormattedCandle {
   time: number;
@@ -28,7 +27,7 @@ export const formatCandle = (candle: any): FormattedCandle | null => {
   const utcSeconds = Math.floor(new Date(timestamp).getTime() / 1000);
   
   return {
-    time: (utcSeconds - timezoneOffsetSeconds) as any,
+    time: utcSeconds as any,
     open,
     high,
     low,
