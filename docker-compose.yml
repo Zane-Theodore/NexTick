@@ -69,7 +69,15 @@ services:
   data-processor:
     build: .
     container_name: nextick-data-processor
-    command: python -m data_pipeline.processor.candle_processor
+    command: >
+      bash -c "
+      echo 'Waiting for QuestDB to be ready...';
+      while ! python -c 'import socket; socket.create_connection((\"questdb\", 8812))' 2>/dev/null; do
+        sleep 2;
+      done;
+      echo 'QuestDB is ready! Starting Processor...';
+      python -m data_pipeline.processor.candle_processor
+      "
     env_file:
       - .env
     environment:
