@@ -7,7 +7,19 @@ from data_pipeline.logger_config import get_logger
 
 logger = get_logger(__name__)
 
+
 def get_env_or_raise(var_name: str) -> str:
+    """Retrieve and validate a required environment variable.
+    
+    Args:
+        var_name: Environment variable name.
+        
+    Returns:
+        Trimmed value of the environment variable.
+        
+    Raises:
+        ValueError: If variable is not set or is empty after trimming.
+    """
     value = os.getenv(var_name)
     if not value or not value.strip():
         logger.error(f"Missing required environment variable: {var_name}")
@@ -16,6 +28,15 @@ def get_env_or_raise(var_name: str) -> str:
 
 
 def _split_env_list(var_name: str, default: str = "") -> list[str]:
+    """Parse a comma-separated environment variable into a list of strings.
+    
+    Args:
+        var_name: Environment variable name.
+        default: Default value if variable is not set.
+        
+    Returns:
+        List of lowercase, trimmed strings.
+    """
     return [item.strip().lower() for item in os.getenv(var_name, default).split(",") if item.strip()]
 
 # KAFKA

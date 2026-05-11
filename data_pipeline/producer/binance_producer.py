@@ -13,6 +13,21 @@ logger = get_logger(__name__)
 
 
 def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0, operation_name='operation'):
+    """Execute an operation with exponential backoff retry logic.
+    
+    Args:
+        operation: Callable to execute.
+        max_retries: Maximum number of retry attempts.
+        base_delay: Initial delay in seconds between retries.
+        max_delay: Maximum delay in seconds between retries.
+        operation_name: Descriptive name for logging.
+        
+    Returns:
+        Result of the operation.
+        
+    Raises:
+        Exception: If all retries are exhausted.
+    """
     attempt = 0
     while attempt < max_retries:
         try:
@@ -33,9 +48,18 @@ def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0
 
 
 class BinanceCombinedProducer:
-    """Binance WebSocket producer for MULTIPLE trading symbols via Combined Stream."""
+    """Binance WebSocket producer for multiple trading symbols via Combined Stream.
+    
+    Connects to Binance WebSocket, consumes trade data for multiple symbols,
+    and publishes raw trade records to Kafka for downstream processing.
+    """
 
     def __init__(self, symbols: list):
+        """Initialize Binance Combined Producer.
+        
+        Args:
+            symbols: List of trading symbols to track (e.g., ['BTCUSDT', 'ETHUSDT']).
+        """
         self.symbols = [s.lower() for s in symbols]
         self.ws = None
         self.is_running = True
@@ -60,6 +84,11 @@ class BinanceCombinedProducer:
         logger.info("Kafka producer initialized successfully.")
 
     def _send_to_kafka(self, record: dict):
+        """Publish a trade record to Kafka.
+        
+        Args:
+            record: Trade record to publish.
+        """
         def _send():
             future = self.producer.send(
                 config.TOPIC_RAW_TRADES,
@@ -72,7 +101,12 @@ class BinanceCombinedProducer:
         retry_with_backoff(_send, max_retries=3, operation_name=f"Kafka publish for {record['symbol']}")
 
     def on_message(self, ws, message):
-        """Handle incoming Binance WebSocket combined message."""
+        """Handle incoming Binance WebSocket trade message.
+        
+        Args:
+            ws: WebSocket connection object.
+            message: Raw message from WebSocket.
+        """
         try:
             raw_message = json.loads(message)
             
@@ -107,15 +141,34 @@ class BinanceCombinedProducer:
             logger.error(f"Error processing Binance message: {e}", exc_info=True)
 
     def on_open(self, ws):
+        """Handle WebSocket connection opened event.
+        
+        Args:
+            ws: WebSocket connection object.
+        """
         logger.info(f"Connected to Binance Combined WebSocket! Streaming to {config.TOPIC_RAW_TRADES}")
 
     def on_close(self, ws, close_status_code, close_msg):
+        """Handle WebSocket connection closed event.
+        
+        Args:
+            ws: WebSocket connection object.
+            close_status_code: WebSocket close status code.
+            close_msg: WebSocket close message.
+        """
         logger.info("Disconnected from Binance. Closing producer...")
 
     def on_error(self, ws, error):
+        """Handle WebSocket error event.
+        
+        Args:
+            ws: WebSocket connection object.
+            error: Error object or message.
+        """
         logger.error(f"WebSocket error: {error}", exc_info=True)
 
     def run(self):
+        """Start the WebSocket connection and run the producer loop."""
         while self.is_running:
             try:
                 self.ws = websocket.WebSocketApp(
@@ -138,7 +191,8 @@ class BinanceCombinedProducer:
         self.shutdown()
 
     def shutdown(self):
-        logger.info("Shutting down Binance Combined Producer...")
+        """Gracefully shutdown the producer and close all connections."""
+        logger.info("Shutting down Binance WebSocket producer...")
         self.is_running = False
         if self.ws:
             self.ws.close()
