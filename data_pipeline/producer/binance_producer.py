@@ -165,7 +165,21 @@ class BinanceCombinedProducer:
             ws: WebSocket connection object.
             error: Error object or message.
         """
-        logger.error(f"WebSocket error: {error}", exc_info=True)
+        error_message = str(error).lower()
+
+        network_errors = [
+            "connection to remote host was lost",
+            "connection reset by peer",
+            "timed out",
+            "broken pipe",
+            "network is unreachable"
+        ]
+
+        if isinstance(error, websocket.WebSocketConnectionClosedException) or \
+            any(net_err in error_message for net_err in network_errors):
+            logger.warning(f"Binance WebSocket dropped: {error}")
+        else:
+            logger.error(f"WebSocket error: {error}", exc_info=True)
 
     def run(self):
         """Start the WebSocket connection and run the producer loop."""
@@ -179,7 +193,10 @@ class BinanceCombinedProducer:
                     on_close=self.on_close
                 )
                 logger.info(f"Connecting to {self.ws_url} ...")
-                self.ws.run_forever()
+                self.ws.run_forever(
+                    ping_interval=60,
+                    ping_timeout=10,
+                )
                 
                 if self.is_running:
                     logger.warning("WebSocket connection closed unexpectedly. Reconnecting in 5 seconds...")
