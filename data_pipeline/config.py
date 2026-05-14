@@ -60,5 +60,24 @@ BINANCE_SOCKET_URL = get_env_or_raise('BINANCE_SOCKET_URL')
 TRADING_SYMBOLS = _split_env_list('TRADING_SYMBOLS', 'BTCUSDT')
 CANDLE_INTERVALS = [item.strip() for item in os.getenv('CANDLE_INTERVALS', '1m,5m').split(',') if item.strip()]
 
+# Mapping of interval names to milliseconds
+_INTERVAL_MS_MAP = {
+    '1m': 60 * 1000,
+    '5m': 5 * 60 * 1000,
+    '15m': 15 * 60 * 1000,
+    '30m': 30 * 60 * 1000,
+    '1h': 60 * 60 * 1000,
+    '4h': 4 * 60 * 60 * 1000,
+    '1d': 24 * 60 * 60 * 1000,
+}
+
+def get_timeframes_with_ms() -> list[tuple[str, int]]:
+    """Convert configured interval names to (interval_name, interval_ms) tuples.
+    
+    Returns:
+        List of tuples: [(interval_name, interval_ms), ...]
+    """
+    return [(interval, _INTERVAL_MS_MAP.get(interval, 60 * 1000)) for interval in CANDLE_INTERVALS]
+
 # Interval in milliseconds for broadcasting updating candles to frontend
 CANDLE_UPDATE_INTERVAL_MS = int(os.getenv('CANDLE_UPDATE_INTERVAL_MS', '500'))

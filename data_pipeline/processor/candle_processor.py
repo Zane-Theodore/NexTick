@@ -50,73 +50,169 @@ def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0
             time.sleep(delay)
 
 
-class BaseCandleManager:
-    """Manages candle aggregation for a single trading symbol.
+class SingleCandleManager:
+    """Manages candle aggregation for a single timeframe using O(1) complexity.
     
-    Maintains a buffer of trades, calculates OHLCV data per minute, and
-    handles periodic updates and cleanup operations in a thread-safe manner.
+    Maintains only the current candle state and updates OHLCV data efficiently
+    without maintaining a buffer of past trades.
     """
 
-    def __init__(self, symbol: str):
-        """Initialize candle manager for a trading symbol.
+    def __init__(self, symbol: str, interval: str, interval_ms: int):
+        """Initialize candle manager for a specific timeframe.
         
         Args:
-            symbol: Trading symbol (e.g., BTCUSDT).
+            symbol: Trading symbol (e.g., btcusdt).
+            interval: Timeframe string (e.g., '1m', '5m', '1h').
+            interval_ms: Interval duration in milliseconds.
         """
         self.symbol = symbol.lower()
-        self.interval = '1m'
-        self.current_minute = None
-        self.trades_buffer = []
+        self.interval = interval
+        self.interval_ms = interval_ms
+        self.current_candle = None
+        self.current_candle_start = None
         self.lock = threading.Lock()
-        self.update_timer = None
-        self.running = True
-        self.broadcast_callback = None
-        self.trade_count_since_cleanup = 0
-        logger.info(f"Initialized candle manager for {self.symbol.upper()}")
+        self.closed = False
 
-    def truncate_to_minute(self, timestamp: datetime) -> datetime:
-        """Truncate timestamp to the start of the minute.
+    def truncate_to_interval(self, timestamp: datetime) -> datetime:
+        """Truncate timestamp to the start of the interval.
         
         Args:
             timestamp: Datetime object to truncate.
             
         Returns:
-            Datetime truncated to minute boundary (seconds and microseconds set to 0).
+            Datetime truncated to interval boundary.
         """
-        return timestamp.replace(second=0, microsecond=0)
+        if self.interval == '1m':
+            return timestamp.replace(second=0, microsecond=0)
+        elif self.interval == '5m':
+            minutes = (timestamp.minute // 5) * 5
+            return timestamp.replace(minute=minutes, second=0, microsecond=0)
+        elif self.interval == '15m':
+            minutes = (timestamp.minute // 15) * 15
+            return timestamp.replace(minute=minutes, second=0, microsecond=0)
+        elif self.interval == '30m':
+            minutes = (timestamp.minute // 30) * 30
+            return timestamp.replace(minute=minutes, second=0, microsecond=0)
+        elif self.interval == '1h':
+            return timestamp.replace(minute=0, second=0, microsecond=0)
+        elif self.interval == '4h':
+            hour = (timestamp.hour // 4) * 4
+            return timestamp.replace(hour=hour, minute=0, second=0, microsecond=0)
+        elif self.interval == '1d':
+            return timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            return timestamp
 
-    def calculate_ohlcv(self) -> dict:
-        """Calculate OHLCV (Open, High, Low, Close, Volume) for the current minute.
+    def update_with_trade(self, trade_price: float, trade_volume: float, trade_time: datetime) -> dict:
+        """Update candle with new trade data using O(1) algorithm.
+        
+        Args:
+            trade_price: Price of the trade.
+            trade_volume: Volume of the trade.
+            trade_time: Timestamp of the trade.
+            
+        Returns:
+            Dictionary with closed candle if interval boundary crossed, None otherwise.
+        """
+        with self.lock:
+            candle_start = self.truncate_to_interval(trade_time)
+            
+            # Check if we've crossed into a new interval
+            if self.current_candle_start and candle_start > self.current_candle_start:
+                closed_candle = self.current_candle.copy() if self.current_candle else None
+                self.current_candle = None
+                self.current_candle_start = None
+            else:
+                closed_candle = None
+            
+            # Initialize new candle if needed
+            if self.current_candle is None:
+                self.current_candle = {
+                    'symbol': self.symbol.upper(),
+                    'interval': self.interval,
+                    'timestamp': candle_start,
+                    'open': float(trade_price),
+                    'high': float(trade_price),
+                    'low': float(trade_price),
+                    'close': float(trade_price),
+                    'volume': float(trade_volume)
+                }
+                self.current_candle_start = candle_start
+            else:
+                # Update current candle with O(1) operations
+                self.current_candle['high'] = max(self.current_candle['high'], float(trade_price))
+                self.current_candle['low'] = min(self.current_candle['low'], float(trade_price))
+                self.current_candle['close'] = float(trade_price)
+                self.current_candle['volume'] += float(trade_volume)
+            
+            return closed_candle
+
+    def get_current_candle(self) -> dict:
+        """Get a copy of the current candle for streaming updates.
         
         Returns:
-            Dictionary with candle data (symbol, interval, timestamp, OHLC, volume).
-            None if no trades available for the minute.
+            Current candle data or None if not initialized.
         """
-        if not self.trades_buffer or not self.current_minute: 
-            return None
+        with self.lock:
+            return self.current_candle.copy() if self.current_candle else None
+
+
+class MultiTimeframeManager:
+    """Manages multiple timeframes for a single trading symbol.
+    
+    Efficiently processes trades across multiple intervals (1m, 5m, 15m, 30m, 1h)
+    with automatic streaming of non-final candles.
+    """
+
+    def __init__(self, symbol: str, broadcast_callback):
+        """Initialize multi-timeframe manager.
         
-        interval_end = self.current_minute + timedelta(minutes=1)
-        trades_in_minute = [t for t in self.trades_buffer if self.current_minute <= t['datetime'] < interval_end]
+        Args:
+            symbol: Trading symbol (e.g., btcusdt).
+            broadcast_callback: Callback function for broadcasting candles.
+        """
+        self.symbol = symbol.lower()
+        self.broadcast_callback = broadcast_callback
+        self.lock = threading.Lock()
+        self.update_timer = None
+        self.running = True
         
-        if not trades_in_minute: 
-            return None
+        # Load timeframes from config (format: CANDLE_INTERVALS=1m,5m,15m,30m,1h)
+        self.timeframes = config.get_timeframes_with_ms()
         
-        prices = [t['price'] for t in trades_in_minute]
-        volumes = [t['volume'] for t in trades_in_minute]
+        # Initialize managers for each timeframe
+        self.managers = {}
+        for interval_name, interval_ms in self.timeframes:
+            self.managers[interval_name] = SingleCandleManager(symbol, interval_name, interval_ms)
         
-        return {
-            'symbol': self.symbol.upper(),
-            'interval': self.interval,
-            'timestamp': self.current_minute,
-            'open': float(prices[0]),
-            'high': float(max(prices)),
-            'low': float(min(prices)),
-            'close': float(prices[-1]),
-            'volume': float(sum(volumes))
-        }
+        logger.info(f"Initialized multi-timeframe manager for {self.symbol.upper()} with timeframes: {[t[0] for t in self.timeframes]}")
+        self.schedule_next_update()
+
+    def process_trade(self, trade_price: float, trade_volume: float, trade_time: datetime) -> list:
+        """Process a trade across all timeframes and emit closed candles.
+        
+        Args:
+            trade_price: Price of the trade.
+            trade_volume: Volume of the trade.
+            trade_time: Timestamp of the trade.
+            
+        Returns:
+            List of closed candles (if any interval boundary crossed).
+        """
+        closed_candles = []
+        
+        with self.lock:
+            for interval_name, manager in self.managers.items():
+                closed_candle = manager.update_with_trade(trade_price, trade_volume, trade_time)
+                if closed_candle:
+                    closed_candles.append(closed_candle)
+                    if self.broadcast_callback:
+                        self.broadcast_callback(closed_candle, is_final=True)
+        
+        return closed_candles
 
     def schedule_next_update(self):
-        """Schedule periodic emission of updating (non-final) candle data."""
+        """Schedule periodic emission of non-final candle updates."""
         if self.running and not self.update_timer:
             self.update_timer = threading.Timer(
                 config.CANDLE_UPDATE_INTERVAL_MS / 1000.0,
@@ -126,14 +222,16 @@ class BaseCandleManager:
             self.update_timer.start()
 
     def _emit_updating_candles(self):
-        """Emit non-final candle updates at regular intervals."""
-        if not self.running: return
+        """Emit non-final (updating) candles for all timeframes at regular intervals."""
+        if not self.running:
+            return
+        
         with self.lock:
-            if self.current_minute and self.trades_buffer:
-                candle = self.calculate_ohlcv()
-                if candle and self.broadcast_callback:
-                    self.broadcast_callback(candle, is_final=False)
-                    
+            for interval_name, manager in self.managers.items():
+                current_candle = manager.get_current_candle()
+                if current_candle and self.broadcast_callback:
+                    self.broadcast_callback(current_candle, is_final=False)
+        
         if self.running:
             self.update_timer = threading.Timer(
                 config.CANDLE_UPDATE_INTERVAL_MS / 1000.0,
@@ -142,15 +240,9 @@ class BaseCandleManager:
             self.update_timer.daemon = True
             self.update_timer.start()
 
-    def cleanup_old_trades(self):
-        """Remove trades older than 2 minutes from the buffer."""
-        if not self.trades_buffer: return
-        latest_trade_time = self.trades_buffer[-1]['datetime']
-        cutoff_time = latest_trade_time - timedelta(minutes=2) 
-        self.trades_buffer = [t for t in self.trades_buffer if t['datetime'] >= cutoff_time]
-
     def cleanup(self):
         """Cancel any pending update timer."""
+        self.running = False
         if self.update_timer:
             self.update_timer.cancel()
 
@@ -165,9 +257,9 @@ class CandleProcessor:
     def __init__(self):
         """Initialize the candle processor with Kafka and database connections."""
         self.table_name = "market_candles"
-        self.managers = {} 
+        self.managers = {}  # Dict[symbol] -> MultiTimeframeManager
         
-        logger.info("Starting multi-symbol 1-minute candle processor with synchronous database operations")
+        logger.info("Starting multi-symbol multi-timeframe candle processor with O(1) complexity and synchronous database operations")
         
         try:
             self.db_conn = psycopg2.connect(
@@ -279,17 +371,19 @@ class CandleProcessor:
         retry_with_backoff(_send, max_retries=4, base_delay=0.5, operation_name=f'Kafka publish to {topic}')
 
     def broadcast_candle(self, candle: dict, is_final: bool = False):
-        """Broadcast a candle to Kafka topic and persist if final.
+        """Broadcast a candle to Kafka topic and persist if final 1m candle.
         
         Args:
             candle: Candle data to broadcast.
-            is_final: Whether this is a final (closed minute) candle. If True, will persist to DB.
+            is_final: Whether this is a final (closed interval) candle. 
+                     Only 1m candles are persisted to DB when final=True.
         """
         kafka_candle = candle.copy()
         kafka_candle['is_final'] = is_final
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
 
-        if is_final:
+        # Only persist to DB for final 1m candles
+        if is_final and candle['interval'] == '1m':
             if not self.save_to_db(candle):
                 logger.warning(f"Skipping final candle publish for {candle['symbol']} because DB persistence failed.")
                 return
@@ -300,8 +394,8 @@ class CandleProcessor:
             logger.error(f"Failed to publish candle update for {candle['symbol']} to Kafka.", exc_info=True)
 
     def run(self):
-        """Start processing raw trades and generating candles."""
-        logger.info("Starting multi-symbol processor loop")
+        """Start processing raw trades and generating multi-timeframe candles."""
+        logger.info("Starting multi-timeframe processor loop")
         try:
             while self.running:
                 raw_messages = self.consumer.poll(timeout_ms=1000)
@@ -332,35 +426,15 @@ class CandleProcessor:
                             trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000.0, tz=timezone.utc)
                             if trade_time.year < 2020:
                                 continue
-                                
-                            if symbol not in self.managers:
-                                logger.info(f"Detected new trading stream for {symbol.upper()}. Initializing candle manager...")
-                                self.managers[symbol] = BaseCandleManager(symbol)
-                                self.managers[symbol].broadcast_callback = self.broadcast_candle
-                                
-                            manager = self.managers[symbol]
                             
-                            with manager.lock:
-                                trade_with_time = trade.copy()
-                                trade_with_time['datetime'] = trade_time
-                                manager.trades_buffer.append(trade_with_time)
-                                
-                                if manager.current_minute is None:
-                                    manager.current_minute = manager.truncate_to_minute(trade_time)
-                                    manager.schedule_next_update()
-                                    continue
-                                    
-                                trade_minute = manager.truncate_to_minute(trade_time)
-                                if trade_minute > manager.current_minute:
-                                    last_candle = manager.calculate_ohlcv()
-                                    if last_candle:
-                                        self.broadcast_candle(last_candle, is_final=True)
-                                    manager.current_minute = trade_minute
-                                    
-                                manager.trade_count_since_cleanup += 1
-                                if manager.trade_count_since_cleanup > 1000:
-                                    manager.cleanup_old_trades()
-                                    manager.trade_count_since_cleanup = 0
+                            # Initialize multi-timeframe manager if new symbol
+                            if symbol not in self.managers:
+                                logger.info(f"Detected new trading stream for {symbol.upper()}. Initializing multi-timeframe candle manager...")
+                                self.managers[symbol] = MultiTimeframeManager(symbol, self.broadcast_candle)
+                            
+                            # Process trade across all timeframes
+                            manager = self.managers[symbol]
+                            manager.process_trade(price, volume, trade_time)
                                     
                         except Exception as e:
                             logger.error(f"Error processing individual trade: {e}", exc_info=True)

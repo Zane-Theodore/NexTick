@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { formatCandle } from '../utils/formatters';
-import { subscribeToCandles } from '../services/socket';
+import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
 import { Logger } from '../utils/logger';
 import type { ISeriesApi, IChartApi, CandlestickData, Time } from 'lightweight-charts';
@@ -54,6 +54,10 @@ export const useMarketData = (
           to: totalCandles + OFFSET_RIGHT,
         });
         
+        // Join room to receive real-time updates after data is loaded
+        joinKlineRoom(symbol, interval);
+        logger.info(`Joined kline room: ${symbol}_${interval}`);
+        
       } catch (error) {
         logger.error(`Failed to fetch historical data for symbol: ${symbol}, interval: ${interval}`, error);
       }
@@ -62,10 +66,6 @@ export const useMarketData = (
     fetchHistory();
 
     const handleCandleUpdate = (data: any) => {
-      if (data.interval !== interval) {
-        return;
-      }
-
       const formatted = formatCandle(data);
       
       if (formatted && formatted.open > 0 && formatted.high > 0 && formatted.low > 0 && formatted.close > 0) {
@@ -81,10 +81,14 @@ export const useMarketData = (
       }
     };
 
-    const unsubscribe = subscribeToCandles(symbol, interval, handleCandleUpdate);
+    // Subscribe to kline updates via room pattern
+    const unsubscribe = subscribeToCandles(handleCandleUpdate);
 
     return () => {
       unsubscribe();
+      // Leave room when component unmounts or dependencies change
+      leaveKlineRoom(symbol, interval);
+      logger.info(`Left kline room: ${symbol}_${interval}`);
     };
   }, [chart, candlestickSeries, symbol, interval]);
 };

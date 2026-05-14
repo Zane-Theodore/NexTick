@@ -3,6 +3,9 @@ import {
   WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  SubscribeMessage,
+  MessageBody,
+  ConnectedSocket,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -35,6 +38,30 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
     this.logger.log(`[INFO] [${this.moduleName}] Client disconnected: ${client.id}`);
   }
 
+  @SubscribeMessage('join_kline_room')
+  handleJoinRoom(
+    @MessageBody() payload: { symbol: string; interval: string },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const roomName = `${payload.symbol.toUpperCase()}_${payload.interval}`;
+    client.join(roomName);
+    this.logger.log(
+      `[INFO] [${this.moduleName}] Client ${client.id} joined room: ${roomName}`,
+    );
+  }
+
+  @SubscribeMessage('leave_kline_room')
+  handleLeaveRoom(
+    @MessageBody() payload: { symbol: string; interval: string },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const roomName = `${payload.symbol.toUpperCase()}_${payload.interval}`;
+    client.leave(roomName);
+    this.logger.log(
+      `[INFO] [${this.moduleName}] Client ${client.id} left room: ${roomName}`,
+    );
+  }
+
   @OnEvent('candle.update')
   handleCandleUpdateEvent(candleData: any) {
     const isFinal = candleData.is_final === true;
@@ -52,11 +79,8 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
       volume: candleData.volume
     });
     
-    // Emit unified event to all connected clients
-    this.server.emit('candle.update', candleData);
-    
-    // Also emit interval-specific event for targeted subscriptions
-    const intervalKey = `candle.update.${candleData.symbol}.${candleData.interval}`;
-    this.server.emit(intervalKey, candleData);
+    // Emit to specific room based on symbol and interval
+    const roomName = `${candleData.symbol.toUpperCase()}_${candleData.interval}`;
+    this.server.to(roomName).emit('kline_update', candleData);
   }
 }
