@@ -63,6 +63,9 @@ class BinanceCombinedProducer:
         self.symbols = [s.lower() for s in symbols]
         self.ws = None
         self.is_running = True
+        self.reconnect_attempt = 0
+        self.max_reconnect_attempts = 10
+        self.base_reconnect_delay = 5
         
         streams = "/".join([f"{sym}@trade" for sym in self.symbols])
         self.ws_url = f"wss://stream.binance.com:9443/stream?streams={streams}"
@@ -146,6 +149,7 @@ class BinanceCombinedProducer:
         Args:
             ws: WebSocket connection object.
         """
+        self.reconnect_attempt = 0  # Reset reconnection counter on successful connection
         logger.info(f"Connected to Binance Combined WebSocket! Streaming to {config.TOPIC_RAW_TRADES}")
 
     def on_close(self, ws, close_status_code, close_msg):
@@ -166,20 +170,23 @@ class BinanceCombinedProducer:
             error: Error object or message.
         """
         error_message = str(error).lower()
+        error_type = type(error).__name__
 
         network_errors = [
             "connection to remote host was lost",
             "connection reset by peer",
             "timed out",
             "broken pipe",
-            "network is unreachable"
+            "network is unreachable",
+            "temporary failure in name resolution",
+            "errno -3"
         ]
 
         if isinstance(error, websocket.WebSocketConnectionClosedException) or \
             any(net_err in error_message for net_err in network_errors):
-            logger.warning(f"Binance WebSocket dropped: {error}")
+            logger.warning(f"Binance WebSocket dropped ({error_type}): {error}")
         else:
-            logger.error(f"WebSocket error: {error}", exc_info=True)
+            logger.error(f"WebSocket error ({error_type}): {error}", exc_info=True)
 
     def run(self):
         """Start the WebSocket connection and run the producer loop."""
@@ -195,17 +202,34 @@ class BinanceCombinedProducer:
                 logger.info(f"Connecting to {self.ws_url} ...")
                 self.ws.run_forever(
                     ping_interval=60,
-                    ping_timeout=10,
+                    ping_timeout=30,
                 )
                 
                 if self.is_running:
-                    logger.warning("WebSocket connection closed unexpectedly. Reconnecting in 5 seconds...")
-                    time.sleep(5)
+                    self._handle_reconnect("WebSocket connection closed unexpectedly")
             except Exception as e:
                 logger.error(f"Fatal error in producer: {e}", exc_info=True)
-                time.sleep(5)
+                if self.is_running:
+                    self._handle_reconnect(f"Exception during connection: {str(e)}")
 
         self.shutdown()
+
+    def _handle_reconnect(self, reason: str):
+        """Handle reconnection with exponential backoff.
+        
+        Args:
+            reason: Reason for reconnection attempt.
+        """
+        self.reconnect_attempt += 1
+        if self.reconnect_attempt > self.max_reconnect_attempts:
+            logger.error(f"Max reconnection attempts ({self.max_reconnect_attempts}) reached. Giving up.")
+            self.is_running = False
+            return
+        
+        # Exponential backoff: 5s, 10s, 20s, 40s, ... (max 5 minutes)
+        delay = min(self.base_reconnect_delay * (2 ** (self.reconnect_attempt - 1)), 300)
+        logger.warning(f"{reason}. Reconnecting in {delay:.1f}s... (attempt {self.reconnect_attempt}/{self.max_reconnect_attempts})")
+        time.sleep(delay)
 
     def shutdown(self):
         """Gracefully shutdown the producer and close all connections."""
