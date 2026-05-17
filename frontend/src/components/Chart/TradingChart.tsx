@@ -52,6 +52,21 @@ export default function TradingChart() {
         textColor: '#d1d4dc',
         attributionLogo: false,
       },
+      crosshair: {
+        mode: 0, 
+        vertLine: {
+          width: 1,
+          color: '#3f3f5a',
+          style: 3,
+          labelBackgroundColor: '#27273b',
+        },
+        horzLine: {
+          width: 1,
+          color: '#3f3f5a',
+          style: 3,
+          labelBackgroundColor: '#27273b',
+        },
+      },
       handleScale: {
         axisPressedMouseMove: {
           time: true,
