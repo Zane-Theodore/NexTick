@@ -4,6 +4,18 @@ import type { ISeriesApi, IChartApi } from 'lightweight-charts';
 
 import { useMarketData } from '../../hooks/useMarketData';
 
+interface LegendData {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+interface CursorPosition {
+  x: number;
+  y: number;
+}
+
 const SUPPORTED_SYMBOLS = import.meta.env.VITE_TRADING_SYMBOLS.split(',').map((s: string) => s.trim());
 const SUPPORTED_INTERVALS = import.meta.env.VITE_CANDLE_INTERVALS.split(',').map((s: string) => s.trim());
 
@@ -14,6 +26,8 @@ export default function TradingChart() {
   const [series, setSeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
   const [symbol, setSymbol] = useState<string>('BTCUSDT');
   const [interval, setInterval] = useState<string>('1m');
+  const [legendData, setLegendData] = useState<LegendData | null>(null);
+  const [cursorPosition, setCursorPosition] = useState<CursorPosition>({ x: 0, y: 0 });
 
   useMarketData(chartInstance, series, symbol, interval);
 
@@ -100,6 +114,48 @@ export default function TradingChart() {
     setChartInstance(chart);
     setSeries(candlestickSeries);
 
+    // Subscribe to crosshair move events
+    const handleCrosshair = (param: any) => {
+      if (!param.point || param.point.x < 0 || param.point.y < 0 || !param.time || !chartContainerRef.current) {
+        setLegendData(null);
+        return;
+      }
+
+      const containerWidth = chartContainerRef.current.clientWidth;
+      const containerHeight = chartContainerRef.current.clientHeight;
+
+      const TOOLTIP_WIDTH = 220;
+      const TOOLTIP_HEIGHT = 150;
+      const OFFSET = 15;
+
+      let finalX = param.point.x + OFFSET;
+      let finalY = param.point.y + OFFSET;
+
+      if (finalX + TOOLTIP_WIDTH > containerWidth) {
+        finalX = param.point.x - TOOLTIP_WIDTH - OFFSET;
+      }
+
+      if (finalY + TOOLTIP_HEIGHT > containerHeight) {
+        finalY = param.point.y - TOOLTIP_HEIGHT - OFFSET;
+      }
+
+      finalX = Math.max(0, finalX);
+      finalY = Math.max(0, finalY);
+
+      setCursorPosition({ x: finalX, y: finalY });
+
+      const candleData = param.seriesData.get(candlestickSeries) as any;
+      if (candleData && candleData.open !== undefined) {
+        setLegendData({
+          open: candleData.open,
+          high: candleData.high,
+          low: candleData.low,
+          close: candleData.close,
+        });
+      }
+    };
+    chart.subscribeCrosshairMove(handleCrosshair);
+
     const resizeObserver = new ResizeObserver((entries) => {
       if (entries.length === 0 || entries[0].target !== chartContainerRef.current) return;
       chart.applyOptions({ 
@@ -110,6 +166,7 @@ export default function TradingChart() {
     resizeObserver.observe(chartContainerRef.current);
 
     return () => {
+      chart.unsubscribeCrosshairMove(handleCrosshair);
       resizeObserver.disconnect();
       chart.remove();
     };
@@ -166,6 +223,38 @@ export default function TradingChart() {
 
       {/* Chart Container - Takes remaining space */}
       <div className="flex-1 relative overflow-hidden bg-[#131722]">
+        {/* OHLCV Legend Tooltip */}
+        {legendData && (
+          <div 
+            className="absolute z-20 pointer-events-none"
+            style={{
+              left: `${cursorPosition.x + 16}px`,
+              top: `${cursorPosition.y + 16}px`,
+            }}
+          >
+            <div className="bg-[#1e1e2e]/95 border border-[#3f3f5a] rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm">
+              <div className="font-mono text-sm text-[#d1d4dc] space-y-1.5">
+                <div className="font-bold text-base text-white mb-3">
+                  {symbol} • {interval}
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                  <span className="text-[#9099aa]">Open:</span>
+                  <span className="text-white font-semibold">{legendData.open.toFixed(2)}</span>
+
+                  <span className="text-[#26a69a]">High:</span>
+                  <span className="text-[#26a69a] font-semibold">{legendData.high.toFixed(2)}</span>
+                  
+                  <span className="text-[#ef5350]">Low:</span>
+                  <span className="text-[#ef5350] font-semibold">{legendData.low.toFixed(2)}</span>
+                  
+                  <span className="text-[#9099aa]">Close:</span>
+                  <span className="text-white font-semibold">{legendData.close.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div 
           ref={chartContainerRef} 
           className="w-full h-full"
