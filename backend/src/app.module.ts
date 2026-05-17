@@ -11,7 +11,7 @@ import { KafkaModule } from '@modules/kafka/kafka.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
-      envFilePath: '../.env',
+      envFilePath: '.env',
       isGlobal: true,
     }),
     EventEmitterModule.forRoot(),
