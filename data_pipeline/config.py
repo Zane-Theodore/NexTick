@@ -1,7 +1,10 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from data_pipeline directory
+env_path = Path(__file__).parent / '.env'
+load_dotenv(env_path)
 
 from data_pipeline.logger_config import get_logger
 
