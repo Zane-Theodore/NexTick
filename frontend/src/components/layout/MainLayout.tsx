@@ -7,7 +7,7 @@ interface MainLayoutProps {
 
 export default function MainLayout({ children }: MainLayoutProps) {
   return (
-    <div className="min-h-screen bg-[#131722] flex flex-col pt-20">
+    <div className="flex flex-col h-screen overflow-hidden bg-[#131722] pt-20">
       <Header />
       
       <main className="flex-1 flex flex-col overflow-hidden">

@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { Logger } from '../utils/logger';
 
-const API_URL = 'http://localhost:3000';
+const API_URL = import.meta.env.VITE_API_URL;
 const logger = new Logger('API');
 
 export const getHistoricalCandles = async (

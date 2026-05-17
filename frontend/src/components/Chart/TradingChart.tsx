@@ -4,8 +4,8 @@ import type { ISeriesApi, IChartApi } from 'lightweight-charts';
 
 import { useMarketData } from '../../hooks/useMarketData';
 
-const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT'];
-const SUPPORTED_INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'];
+const SUPPORTED_SYMBOLS = import.meta.env.VITE_TRADING_SYMBOLS.split(',').map((s: string) => s.trim());
+const SUPPORTED_INTERVALS = import.meta.env.VITE_CANDLE_INTERVALS.split(',').map((s: string) => s.trim());
 
 export default function TradingChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -14,36 +14,25 @@ export default function TradingChart() {
   const [series, setSeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
   const [symbol, setSymbol] = useState<string>('BTCUSDT');
   const [interval, setInterval] = useState<string>('1m');
-  const [loading, setLoading] = useState(false);
 
   useMarketData(chartInstance, series, symbol, interval);
 
   // Handle symbol change
   const handleSymbolChange = (newSymbol: string) => {
-    setLoading(true);
     setSymbol(newSymbol);
   };
 
   // Handle interval change
   const handleIntervalChange = (newInterval: string) => {
-    setLoading(true);
     setInterval(newInterval);
   };
-
-  // Mark loading as complete when chart updates
-  useEffect(() => {
-    if (chartInstance && series && loading) {
-      const timer = setTimeout(() => setLoading(false), 500);
-      return () => clearTimeout(timer);
-    }
-  }, [symbol, interval, chartInstance, series, loading]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
-      height: 800,
+      height: chartContainerRef.current.clientHeight,
       layout: {
         background: { type: ColorType.Solid, color: '#131722' },
         textColor: '#d1d4dc',
@@ -113,7 +102,10 @@ export default function TradingChart() {
 
     const resizeObserver = new ResizeObserver((entries) => {
       if (entries.length === 0 || entries[0].target !== chartContainerRef.current) return;
-      chart.applyOptions({ width: entries[0].contentRect.width });
+      chart.applyOptions({ 
+        width: entries[0].contentRect.width,
+        height: entries[0].contentRect.height,
+      });
     });
     resizeObserver.observe(chartContainerRef.current);
 
@@ -124,9 +116,9 @@ export default function TradingChart() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#131722] pt-5">
+    <div className="h-full flex flex-col bg-[#131722] overflow-hidden">
       {/* Filter Bar */}
-      <div className="px-5 pb-4 flex items-center gap-6 bg-[#131722] border-b border-[#2B2B43]">
+      <div className="shrink-0 px-5 py-4 flex items-center gap-6 bg-[#131722] border-b border-[#2B2B43]">
         {/* Symbol Selector */}
         <div className="flex flex-col">
           <label className="text-xs text-[#9099aa] mb-2 font-semibold">Symbol</label>
@@ -135,7 +127,7 @@ export default function TradingChart() {
             onChange={(e) => handleSymbolChange(e.target.value)}
             className="px-3 py-2 bg-[#1e1e2e] border border-[#3f3f5a] text-[#d1d4dc] rounded hover:border-[#5a5a7a] focus:border-blue-500 focus:outline-none transition-colors"
           >
-            {SUPPORTED_SYMBOLS.map((s) => (
+            {SUPPORTED_SYMBOLS.map((s: string) => (
               <option key={s} value={s}>
                 {s}
               </option>
@@ -147,7 +139,7 @@ export default function TradingChart() {
         <div className="flex flex-col">
           <label className="text-xs text-[#9099aa] mb-2 font-semibold">Interval</label>
           <div className="flex gap-2">
-            {SUPPORTED_INTERVALS.map((iv) => (
+            {SUPPORTED_INTERVALS.map((iv: string) => (
               <button
                 key={iv}
                 onClick={() => handleIntervalChange(iv)}
@@ -163,14 +155,6 @@ export default function TradingChart() {
           </div>
         </div>
 
-        {/* Loading Indicator */}
-        {loading && (
-          <div className="flex items-center gap-2 ml-auto">
-            <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
-            <span className="text-xs text-[#9099aa]">Loading...</span>
-          </div>
-        )}
-
         {/* Current Info */}
         <div className="ml-auto text-right">
           <div className="text-sm text-[#d1d4dc] font-semibold">
@@ -180,22 +164,24 @@ export default function TradingChart() {
         </div>
       </div>
 
-      {/* Chart */}
-      <div 
-        ref={chartContainerRef} 
-        className="w-full border-y border-[#2B2B43]"
-      />
+      {/* Chart Container - Takes remaining space */}
+      <div className="flex-1 relative overflow-hidden bg-[#131722]">
+        <div 
+          ref={chartContainerRef} 
+          className="w-full h-full"
+        />
 
-      {/* Scroll to Latest Button */}
-      <button 
-        onClick={() => chartInstance?.timeScale().scrollToPosition(10, false)}
-        className="absolute bottom-8 right-20 z-10 w-10 h-10 bg-[#2B2B43]/80 hover:bg-blue-600 text-[#d1d4dc] hover:text-white rounded-full flex items-center justify-center backdrop-blur shadow-lg transition-all border border-[#3f3f5a] hover:border-blue-500"
-        title="Scroll to latest"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-          <path fillRule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clipRule="evenodd" />
-        </svg>
-      </button>
+        {/* Scroll to Latest Button */}
+        <button 
+          onClick={() => chartInstance?.timeScale().scrollToPosition(10, false)}
+          className="absolute bottom-8 right-20 z-10 w-10 h-10 bg-[#2B2B43]/80 hover:bg-blue-600 text-[#d1d4dc] hover:text-white rounded-full flex items-center justify-center backdrop-blur shadow-lg transition-all border border-[#3f3f5a] hover:border-blue-500"
+          title="Scroll to latest"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clipRule="evenodd" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }
