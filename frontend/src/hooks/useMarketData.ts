@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import type { MutableRefObject } from 'react';
 import { formatCandle } from '../utils/formatters';
 import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
@@ -11,7 +12,8 @@ export const useMarketData = (
   chart: IChartApi | null,
   candlestickSeries: ISeriesApi<"Candlestick"> | null, 
   symbol: string = 'BTCUSDT',
-  interval: string = '1m'
+  interval: string = '1m',
+  volumeByTimeRef?: MutableRefObject<Map<string, number>>
 ) => {
   useEffect(() => {
     if (!candlestickSeries || !chart) return;
@@ -19,6 +21,7 @@ export const useMarketData = (
     const fetchHistory = async () => {
       try {
         candlestickSeries.setData([]); 
+        volumeByTimeRef?.current.clear();
         
         const rawCandles = await getHistoricalCandles(symbol, interval, 1000);
 
@@ -43,6 +46,9 @@ export const useMarketData = (
         }
 
         candlestickSeries.setData(formattedData as CandlestickData<Time>[]);
+        formattedData.forEach((candle: Exclude<ReturnType<typeof formatCandle>, null>) => {
+          volumeByTimeRef?.current.set(String(candle.time), candle.volume);
+        });
         logger.info(`Successfully loaded ${formattedData.length} candles for symbol: ${symbol} [${interval}]`);
 
         const totalCandles = formattedData.length;
@@ -69,7 +75,8 @@ export const useMarketData = (
       const formatted = formatCandle(data);
       
       if (formatted && formatted.open > 0 && formatted.high > 0 && formatted.low > 0 && formatted.close > 0) {
-        candlestickSeries.update(formatted as CandlestickData<Time>);
+        volumeByTimeRef?.current.set(String(formatted.time), formatted.volume);
+        candlestickSeries.update(formatted as unknown as CandlestickData<Time>);
         
         if (data.is_final) {
           logger.info(`Final candle received for ${data.symbol} [${data.interval}]: O=${data.open}, C=${data.close}, V=${data.volume}`);
@@ -90,5 +97,5 @@ export const useMarketData = (
       leaveKlineRoom(symbol, interval);
       logger.info(`Left kline room: ${symbol}_${interval}`);
     };
-  }, [chart, candlestickSeries, symbol, interval]);
+  }, [chart, candlestickSeries, symbol, interval, volumeByTimeRef]);
 };

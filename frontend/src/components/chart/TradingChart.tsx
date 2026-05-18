@@ -3,12 +3,15 @@ import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 import type { ISeriesApi, IChartApi } from 'lightweight-charts';
 
 import { useMarketData } from '../../hooks/useMarketData';
+import { formatChartValue, formatTooltipTime } from '../../utils/formatters';
 
 interface LegendData {
+  time: number | string;
   open: number;
   high: number;
   low: number;
   close: number;
+  volume: number;
 }
 
 interface CursorPosition {
@@ -21,6 +24,7 @@ const SUPPORTED_INTERVALS = import.meta.env.VITE_CANDLE_INTERVALS.split(',').map
 
 export default function TradingChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
+  const volumeByTimeRef = useRef<Map<string, number>>(new Map());
   
   const [chartInstance, setChartInstance] = useState<IChartApi | null>(null);
   const [series, setSeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
@@ -29,7 +33,7 @@ export default function TradingChart() {
   const [legendData, setLegendData] = useState<LegendData | null>(null);
   const [cursorPosition, setCursorPosition] = useState<CursorPosition>({ x: 0, y: 0 });
 
-  useMarketData(chartInstance, series, symbol, interval);
+  useMarketData(chartInstance, series, symbol, interval, volumeByTimeRef);
 
   // Handle symbol change
   const handleSymbolChange = (newSymbol: string) => {
@@ -109,12 +113,7 @@ export default function TradingChart() {
         },
       },
       localization: {
-        priceFormatter: (price: number) => {
-          return new Intl.NumberFormat('vi-VN', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          }).format(price);
-        },
+        priceFormatter: formatChartValue,
       },
     });
 
@@ -139,8 +138,8 @@ export default function TradingChart() {
       const containerWidth = chartContainerRef.current.clientWidth;
       const containerHeight = chartContainerRef.current.clientHeight;
 
-      const TOOLTIP_WIDTH = 220;
-      const TOOLTIP_HEIGHT = 150;
+      const TOOLTIP_WIDTH = 240;
+      const TOOLTIP_HEIGHT = 210;
       const OFFSET = 15;
 
       let finalX = param.point.x + OFFSET;
@@ -161,11 +160,15 @@ export default function TradingChart() {
 
       const candleData = param.seriesData.get(candlestickSeries) as any;
       if (candleData && candleData.open !== undefined) {
+        const volume = volumeByTimeRef.current.get(String(param.time)) ?? Number(candleData.volume ?? 0);
+
         setLegendData({
+          time: param.time,
           open: candleData.open,
           high: candleData.high,
           low: candleData.low,
           close: candleData.close,
+          volume,
         });
       }
     };
@@ -247,23 +250,29 @@ export default function TradingChart() {
               top: `${cursorPosition.y + 16}px`,
             }}
           >
-            <div className="bg-[#1e1e2e]/95 border border-[#3f3f5a] rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm">
+            <div className="min-w-60 bg-[#1e1e2e]/95 border border-[#3f3f5a] rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm">
               <div className="font-mono text-sm text-[#d1d4dc] space-y-1.5">
-                <div className="font-bold text-base text-white mb-3">
+                <div className="font-bold text-base text-white">
                   {symbol} • {interval}
+                </div>
+                <div className="text-xs text-[#9099aa] mb-2 border-b border-[#3f3f5a] pb-2">
+                  {formatTooltipTime(legendData.time)}
                 </div>
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                   <span className="text-[#9099aa]">Open:</span>
-                  <span className="text-white font-semibold">{legendData.open.toFixed(2)}</span>
+                  <span className="text-white font-semibold">{formatChartValue(legendData.open)}</span>
 
                   <span className="text-[#26a69a]">High:</span>
-                  <span className="text-[#26a69a] font-semibold">{legendData.high.toFixed(2)}</span>
+                  <span className="text-[#26a69a] font-semibold">{formatChartValue(legendData.high)}</span>
                   
                   <span className="text-[#ef5350]">Low:</span>
-                  <span className="text-[#ef5350] font-semibold">{legendData.low.toFixed(2)}</span>
+                  <span className="text-[#ef5350] font-semibold">{formatChartValue(legendData.low)}</span>
                   
                   <span className="text-[#9099aa]">Close:</span>
-                  <span className="text-white font-semibold">{legendData.close.toFixed(2)}</span>
+                  <span className="text-white font-semibold">{formatChartValue(legendData.close)}</span>
+
+                  <span className="text-[#9099aa]">Volume:</span>
+                  <span className="text-white font-semibold">{formatChartValue(legendData.volume)}</span>
                 </div>
               </div>
             </div>
