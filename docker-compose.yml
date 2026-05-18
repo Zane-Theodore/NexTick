@@ -56,7 +56,7 @@ services:
     container_name: nextick-data-producer
     command: python -m data_pipeline.producer.binance_producer
     env_file:
-      - .env
+      - data_pipeline/.env
     environment:
       - KAFKA_BROKER=kafka:29092
       - KAFKA_SERVER=kafka:29092
@@ -82,7 +82,7 @@ services:
       python -m data_pipeline.processor.candle_processor
       "
     env_file:
-      - .env
+      - data_pipeline/.env
     environment:
       - KAFKA_BROKER=kafka:29092
       - KAFKA_SERVER=kafka:29092
