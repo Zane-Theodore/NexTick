@@ -10,7 +10,7 @@ services:
       KAFKA_PROCESS_ROLES: 'broker,controller'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
-      KAFKA_LISTENERS: 'PLAINTEXT_INTERNAL://kafka:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT_INTERNAL://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093'
       KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT_INTERNAL://kafka:29092,PLAINTEXT_HOST://localhost:9092'
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
       KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT_INTERNAL'
@@ -20,6 +20,11 @@ services:
       KAFKA_HEAP_OPTS: "-Xmx1G -Xms512M"
       KAFKA_LOG_RETENTION_HOURS: 2
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 29092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     stop_grace_period: 30s
     networks:
       - nextick_net
@@ -37,7 +42,8 @@ services:
     networks:
       - nextick_net
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
 
   questdb:
     image: questdb/questdb:latest
