@@ -1,10 +1,10 @@
-import json
-import websocket
 import signal
 import sys
 import time
+import json
+import websocket
 from kafka import KafkaProducer
-from kafka.errors import NoBrokersAvailable
+from kafka.errors import KafkaError, NoBrokersAvailable
 
 from data_pipeline import config
 from data_pipeline.logger_config import get_logger
@@ -81,6 +81,7 @@ class BinanceCombinedProducer:
                 retries=5,
                 linger_ms=5,
                 request_timeout_ms=30000,
+                max_block_ms=10000,
             )
         
         self.producer = retry_with_backoff(_create_producer, operation_name='Kafka producer creation')
@@ -92,16 +93,32 @@ class BinanceCombinedProducer:
         Args:
             record: Trade record to publish.
         """
-        def _send():
+        try:
             future = self.producer.send(
                 config.TOPIC_RAW_TRADES,
                 value=record,
                 key=record['symbol'].encode('utf-8')
             )
-            result = future.get(timeout=15)
-            return result
+            future.add_callback(self._on_kafka_send_success, record)
+            future.add_errback(self._on_kafka_send_error, record)
+        except KafkaError:
+            logger.error(f"Kafka publish failed immediately for {record['symbol']}.", exc_info=True)
+        except Exception:
+            logger.error(f"Unexpected Kafka publish failure for {record['symbol']}.", exc_info=True)
 
-        retry_with_backoff(_send, max_retries=3, operation_name=f"Kafka publish for {record['symbol']}")
+    def _on_kafka_send_success(self, metadata, record: dict):
+        """Log successful Kafka publish at debug level without blocking WebSocket reads."""
+        logger.debug(
+            f"Published {record['symbol']} trade {record['trade_id']} "
+            f"to {metadata.topic}[{metadata.partition}]@{metadata.offset}"
+        )
+
+    def _on_kafka_send_error(self, exc, record: dict):
+        """Log async Kafka publish failures."""
+        logger.error(
+            f"Kafka async publish failed for {record['symbol']} trade {record['trade_id']}: {exc}",
+            exc_info=True
+        )
 
     def on_message(self, ws, message):
         """Handle incoming Binance WebSocket trade message.

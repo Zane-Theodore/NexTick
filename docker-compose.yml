@@ -18,6 +18,7 @@ services:
       CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
       KAFKA_LOG_DIRS: '/var/lib/kafka/data'
       KAFKA_HEAP_OPTS: "-Xmx1G -Xms512M"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
       KAFKA_LOG_RETENTION_HOURS: 2
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
     healthcheck:
@@ -39,6 +40,25 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: NexTick-Local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks:
+      - nextick_net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: nextick-kafka-setup
+    env_file:
+      - data_pipeline/.env
+    environment:
+      - KAFKA_BROKER=kafka:29092
+    command: >
+      bash -c "
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic $$KAFKA_TOPIC_RAW_TRADES --partitions 3 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic $$KAFKA_TOPIC_KLINE_STREAM --partitions 3 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
     networks:
       - nextick_net
     depends_on:
@@ -72,7 +92,8 @@ services:
     networks:
       - nextick_net
     depends_on:
-      - kafka
+      kafka-setup:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   data-processor:
@@ -96,8 +117,10 @@ services:
     networks:
       - nextick_net
     depends_on:
-      - kafka
-      - questdb
+      kafka-setup:
+        condition: service_completed_successfully
+      questdb:
+        condition: service_started
     restart: unless-stopped
 
 networks:
