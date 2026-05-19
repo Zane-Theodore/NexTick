@@ -26,7 +26,7 @@ export class Logger {
   /**
    * Log debug information (only in development)
    */
-  debug(message: string, context?: any) {
+  debug(message: string, context?: unknown) {
     if (this.isDevelopment) {
       this.formatAndLog('DEBUG', message, context);
     }
@@ -35,28 +35,28 @@ export class Logger {
   /**
    * Log informational message
    */
-  info(message: string, context?: any) {
+  info(message: string, context?: unknown) {
     this.formatAndLog('INFO', message, context);
   }
 
   /**
    * Log warning message
    */
-  warn(message: string, context?: any) {
+  warn(message: string, context?: unknown) {
     this.formatAndLog('WARN', message, context);
   }
 
   /**
    * Log error message
    */
-  error(message: string, context?: any) {
+  error(message: string, context?: unknown) {
     this.formatAndLog('ERROR', message, context);
   }
 
   /**
    * Internal formatting method
    */
-  private formatAndLog(level: LogLevel, message: string, context?: any) {
+  private formatAndLog(level: LogLevel, message: string, context?: unknown) {
     const timestamp = new Date().toISOString();
     const formattedMessage = `[${timestamp}] [${level}] [${this.moduleName}] ${message}`;
 

@@ -34,7 +34,7 @@ export const leaveKlineRoom = (symbol: string, interval: string) => {
  * Must call joinKlineRoom() before using this
  * @param callback Function to call when candle updates are received
  */
-export const subscribeToCandles = (callback: (candle: any) => void) => {
+export const subscribeToCandles = (callback: (candle: unknown) => void) => {
   socket.on('kline_update', callback);
   
   return () => {

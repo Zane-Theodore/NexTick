@@ -71,15 +71,16 @@ export const useMarketData = (
 
     fetchHistory();
 
-    const handleCandleUpdate = (data: any) => {
+    const handleCandleUpdate = (data: unknown) => {
       const formatted = formatCandle(data);
       
       if (formatted && formatted.open > 0 && formatted.high > 0 && formatted.low > 0 && formatted.close > 0) {
         volumeByTimeRef?.current.set(String(formatted.time), formatted.volume);
         candlestickSeries.update(formatted as unknown as CandlestickData<Time>);
         
-        if (data.is_final) {
-          logger.info(`Final candle received for ${data.symbol} [${data.interval}]: O=${data.open}, C=${data.close}, V=${data.volume}`);
+        if (typeof data === 'object' && data !== null && 'is_final' in data && data.is_final) {
+          const candle = data as Record<string, unknown>;
+          logger.info(`Final candle received for ${candle.symbol} [${candle.interval}]: O=${candle.open}, C=${candle.close}, V=${candle.volume}`);
         }
       } else {
         if (formatted) {

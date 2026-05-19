@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
-import type { ISeriesApi, IChartApi } from 'lightweight-charts';
+import type { CandlestickData, IChartApi, ISeriesApi, MouseEventParams, Time } from 'lightweight-charts';
 
 import { useMarketData } from '../../hooks/useMarketData';
-import { formatChartValue, formatTooltipTime } from '../../utils/formatters';
+import {
+  formatChartValue,
+  formatTimeScaleCrosshair,
+  formatTimeScaleTick,
+  formatTooltipTime,
+} from '../../utils/formatters';
+import type { ChartTime } from '../../utils/formatters';
 
 interface LegendData {
-  time: number | string;
+  time: ChartTime;
   open: number;
   high: number;
   low: number;
@@ -96,24 +102,11 @@ export default function TradingChart() {
         rightOffset: 10,
         minBarSpacing: 10,
         maxBarSpacing: 80,
-        tickMarkFormatter: (time: any) => {
-          let date: Date;
-          
-          if (typeof time === 'number') {
-            date = new Date(time * 1000);
-          } else if (typeof time === 'string') {
-            date = new Date(time);
-          } else {
-            return '';
-          }
-          
-          const hours = date.getHours().toString().padStart(2, '0');
-          const minutes = date.getMinutes().toString().padStart(2, '0');
-          return `${hours}:${minutes}`;
-        },
+        tickMarkFormatter: formatTimeScaleTick,
       },
       localization: {
         priceFormatter: formatChartValue,
+        timeFormatter: formatTimeScaleCrosshair,
       },
     });
 
@@ -129,7 +122,7 @@ export default function TradingChart() {
     setSeries(candlestickSeries);
 
     // Subscribe to crosshair move events
-    const handleCrosshair = (param: any) => {
+    const handleCrosshair = (param: MouseEventParams<Time>) => {
       if (!param.point || param.point.x < 0 || param.point.y < 0 || !param.time || !chartContainerRef.current) {
         setLegendData(null);
         return;
@@ -158,7 +151,7 @@ export default function TradingChart() {
 
       setCursorPosition({ x: finalX, y: finalY });
 
-      const candleData = param.seriesData.get(candlestickSeries) as any;
+      const candleData = param.seriesData.get(candlestickSeries) as (CandlestickData<Time> & { volume?: number }) | undefined;
       if (candleData && candleData.open !== undefined) {
         const volume = volumeByTimeRef.current.get(String(param.time)) ?? Number(candleData.volume ?? 0);
 
