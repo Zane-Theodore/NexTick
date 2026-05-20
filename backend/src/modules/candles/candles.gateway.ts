@@ -16,10 +16,19 @@ import { AppLogger } from '../../common/logger';
 
 @WebSocketGateway({
   cors: { 
-    origin: [
-      'http://localhost:3000',
-      'http://localhost:5173',
-    ],
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        process.env.BACKEND_URL,
+        process.env.FRONTEND_URL,
+      ];
+
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error('Not allowed by CORS'));
+    },
     methods: ['GET', 'POST'],
     credentials: true,
   },
