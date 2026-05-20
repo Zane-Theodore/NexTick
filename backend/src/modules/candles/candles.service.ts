@@ -1,24 +1,20 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
+import { CandleDto } from './dto/candle.dto';
+import { VALID_INTERVALS } from './enum/candle-interval.enum';
 
 @Injectable()
 export class CandlesService {
   private readonly logger = new Logger(CandlesService.name);
   private readonly moduleName = CandlesService.name;
 
-  private readonly VALID_INTERVALS = [
-    '1m', '3m', '5m', '15m', '30m', 
-    '1h', '2h', '4h', '6h', '8h', '12h', 
-    '1d', '3d', '1w', '1M'
-  ];
-
   constructor(private readonly databaseService: DatabaseService) {}
 
-  async getHistoricalCandles(symbol: string = 'BTCUSDT', limit: number = 100, interval: string = '1m') {
+  async getHistoricalCandles(symbol: string = 'BTCUSDT', limit: number = 100, interval: string = '1m'): Promise<CandleDto[]> {
     this.logger.log(`[INFO] [${this.moduleName}] Fetching historical candles for symbol: ${symbol}, interval: ${interval}, limit: ${limit}`);
 
     try {
-      if (!this.VALID_INTERVALS.includes(interval)) {
+      if (!(VALID_INTERVALS as readonly string[]).includes(interval)) {
         throw new BadRequestException(`Invalid time interval requested: ${interval}`);
       }
 
@@ -53,7 +49,13 @@ export class CandlesService {
               localDate.getTime() - localDate.getTimezoneOffset() * 60000;
 
             return {
-              ...row,
+              symbol: row.symbol,
+              interval: row.interval,
+              open: Number(row.open),
+              high: Number(row.high),
+              low: Number(row.low),
+              close: Number(row.close),
+              volume: Number(row.volume),
               timestamp: new Date(utcTime).toISOString(),
             };
           })

@@ -9,7 +9,9 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { OnEvent } from '@nestjs/event-emitter';
-import { Logger } from '@nestjs/common';
+import { Logger, UsePipes, ValidationPipe } from '@nestjs/common';
+import { KlineRoomPayloadDto } from './dto/kline-room-payload.dto';
+import { KlineUpdateDto } from './dto/kline-update.dto';
 
 @WebSocketGateway({
   cors: { 
@@ -23,6 +25,12 @@ import { Logger } from '@nestjs/common';
   transports: ['websocket', 'polling'],
   allowEIO3: true,
 })
+@UsePipes(
+  new ValidationPipe({
+    transform: true,
+    whitelist: true,
+  }),
+)
 export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() 
   server: Server;
@@ -40,7 +48,7 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
 
   @SubscribeMessage('join_kline_room')
   handleJoinRoom(
-    @MessageBody() payload: { symbol: string; interval: string },
+    @MessageBody() payload: KlineRoomPayloadDto,
     @ConnectedSocket() client: Socket,
   ) {
     const roomName = `${payload.symbol.toUpperCase()}_${payload.interval}`;
@@ -52,7 +60,7 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
 
   @SubscribeMessage('leave_kline_room')
   handleLeaveRoom(
-    @MessageBody() payload: { symbol: string; interval: string },
+    @MessageBody() payload: KlineRoomPayloadDto,
     @ConnectedSocket() client: Socket,
   ) {
     const roomName = `${payload.symbol.toUpperCase()}_${payload.interval}`;
@@ -63,7 +71,7 @@ export class CandlesGateway  implements OnGatewayConnection, OnGatewayDisconnect
   }
 
   @OnEvent('candle.update')
-  handleCandleUpdateEvent(candleData: any) {
+  handleCandleUpdateEvent(candleData: KlineUpdateDto) {
     const isFinal = candleData.is_final === true;
     const logLevel = isFinal ? 'log' : 'debug';
     

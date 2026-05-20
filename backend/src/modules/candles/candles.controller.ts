@@ -3,48 +3,45 @@ import {
   Get,
   Query,
   Logger,
-  BadRequestException,
 } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CandlesService } from './candles.service';
+import { CandlesQueryDto } from './dto/candles-query.dto';
+import { CandlesResponseDto } from './dto/candles-response.dto';
 
+@ApiTags('Market Data')
 @Controller('candles')
 export class CandlesController {
-  private readonly logger = new Logger();
-  private readonly moduleName = CandlesController.name;
+  private readonly logger = new Logger(CandlesController.name);
 
   constructor(private readonly candlesService: CandlesService) {}
 
   @Get()
-  async getCandles(
-    @Query('symbol') symbol: string,
-    @Query('limit') limit: string,
-    @Query('interval') interval: string,
-  ) {
-    this.logger.log(`[INFO] [${this.moduleName}] Received request for candles: symbol=${symbol}, interval=${interval}, limit=${limit}`);
+  @ApiOperation({ summary: 'Get historical candle data' })
+  @ApiResponse({ 
+    status: 200, 
+    description: 'Returns the historical candle data',
+    type: CandlesResponseDto,
+  })
+  async getCandles(@Query() query: CandlesQueryDto): Promise<CandlesResponseDto> {
+    const { symbol, interval = '1m', limit = 100 } = query;
 
-    if (!symbol) {
-      throw new BadRequestException('Missing required query parameter: symbol (e.g., ?symbol=BTCUSDT)');
-    }
-    const targetSymbol = symbol.toUpperCase();
+    this.logger.log(
+      `Received request for candles: symbol=${symbol}, interval=${interval}, limit=${limit}`
+    );
 
-    let targetLimit = 100;
-    if (limit) {
-      const parsedLimit = parseInt(limit, 10);
-      if (!isNaN(parsedLimit) && parsedLimit > 0) {
-        targetLimit = parsedLimit;
-      }
-    }
+    const data = await this.candlesService.getHistoricalCandles(
+      symbol,
+      limit,
+      interval,
+    );
 
-    const targetInterval = interval || '1m';
-
-    const data = await this.candlesService.getHistoricalCandles(targetSymbol, targetLimit, targetInterval);
-    
     return {
       success: true,
-      symbol: targetSymbol,
-      interval: targetInterval,
+      symbol,
+      interval,
       count: data.length,
-      data: data,
+      data,
     };
   }
 }

@@ -4,11 +4,19 @@ import { CandlesService } from './candles.service';
 
 describe('CandlesController', () => {
   let controller: CandlesController;
+  const candlesServiceMock = {
+    getHistoricalCandles: jest.fn(),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [CandlesController],
-      providers: [CandlesService],
+      providers: [
+        {
+          provide: CandlesService,
+          useValue: candlesServiceMock,
+        },
+      ],
     }).compile();
 
     controller = module.get<CandlesController>(CandlesController);
