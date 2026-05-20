@@ -1,73 +1,80 @@
-/**
- * Unified Logger Configuration
- * 
- * Format: [LEVEL] [MODULE] Message
- * 
- * Log Levels:
- * - DEBUG: Detailed information for debugging purposes
- * - INFO: General informational messages
- * - WARN: Warning messages for potentially problematic situations
- * - ERROR: Error messages for failed operations
- */
-
 import { Logger as NestLogger } from '@nestjs/common';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
 export class AppLogger extends NestLogger {
-  private moduleName: string;
+  private readonly moduleName: string;
 
   constructor(moduleName: string) {
     super(moduleName);
     this.moduleName = moduleName;
   }
 
-  /**
-   * Log debug information
-   */
-  debug(message: string, context?: any) {
-    this.formatAndLog('DEBUG', message, context);
+  debug(message: string, metadata?: unknown) {
+    super.debug(this.formatMessage('DEBUG', message, metadata));
   }
 
-  /**
-   * Log informational message
-   */
-  info(message: string, context?: any) {
-    this.log(`[INFO] [${this.moduleName}] ${message}`, context);
+  info(message: string, metadata?: unknown) {
+    super.log(this.formatMessage('INFO', message, metadata));
   }
 
-  /**
-   * Log warning message
-   */
-  warning(message: string, context?: any) {
-    this.warn(`[WARN] [${this.moduleName}] ${message}`, context);
+  warning(message: string, metadata?: unknown) {
+    super.warn(this.formatMessage('WARN', message, metadata));
   }
 
-  /**
-   * Log error message
-   */
-  failure(message: string, context?: any) {
-    this.error(`[ERROR] [${this.moduleName}] ${message}`, context);
-  }
+  failure(message: string, error?: unknown, metadata?: unknown) {
+    const payload = this.mergeErrorMetadata(error, metadata);
 
-  /**
-   * Internal formatting method
-   */
-  private formatAndLog(level: LogLevel, message: string, context?: any) {
-    const formattedMessage = `[${level}] [${this.moduleName}] ${message}`;
-    
-    if (level === 'DEBUG') {
-      this.debug(formattedMessage);
-    } else if (level === 'WARN') {
-      this.warn(formattedMessage);
-    } else if (level === 'ERROR') {
-      this.error(formattedMessage);
-    } else {
-      this.log(formattedMessage);
+    if (error instanceof Error) {
+      super.error(this.formatMessage('ERROR', message, payload), error.stack);
+      return;
     }
 
-    if (context) {
-      console.log('Context:', context);
+    super.error(this.formatMessage('ERROR', message, payload));
+  }
+
+  private formatMessage(
+    level: LogLevel,
+    message: string,
+    metadata?: unknown,
+  ): string {
+    const baseMessage = `[${level}] [${this.moduleName}] ${message}`;
+
+    if (metadata === undefined || metadata === null) {
+      return baseMessage;
+    }
+
+    return `${baseMessage} ${this.stringify(metadata)}`;
+  }
+
+  private mergeErrorMetadata(error?: unknown, metadata?: unknown): unknown {
+    if (!error) {
+      return metadata;
+    }
+
+    const errorMetadata =
+      error instanceof Error
+        ? {
+            error: error.name,
+            message: error.message,
+          }
+        : { error };
+
+    if (!metadata) {
+      return errorMetadata;
+    }
+
+    return {
+      ...errorMetadata,
+      metadata,
+    };
+  }
+
+  private stringify(value: unknown): string {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
     }
   }
 }

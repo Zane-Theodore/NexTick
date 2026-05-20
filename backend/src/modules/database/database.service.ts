@@ -1,21 +1,20 @@
 import { ConfigService } from '@nestjs/config';
 import { 
   Injectable, 
-  Logger, 
   OnModuleInit, 
   OnModuleDestroy } from '@nestjs/common';
 import { Pool } from 'pg';
+import { AppLogger } from '../../common/logger';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly configService: ConfigService) {}
 
-  private readonly logger = new Logger();
-  private readonly moduleName = DatabaseService.name;
+  private readonly logger = new AppLogger(DatabaseService.name);
   private pool: Pool;
 
   async onModuleInit() {
-    this.logger.log(`[INFO] [${this.moduleName}] Initializing database connection...`);
+    this.logger.info('Initializing database connection...');
 
     this.pool = new Pool({
         user: this.configService.get('QUESTDB_USER'),
@@ -30,9 +29,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.pool.query('SELECT 1');
-      this.logger.log(`[INFO] [${this.moduleName}] Database connection established successfully.`);
+      this.logger.info('Database connection established successfully.');
     } catch (error) {
-      this.logger.error(`[ERROR] [${this.moduleName}] Failed to establish database connection.`);
+      this.logger.failure('Failed to establish database connection.', error);
       throw error;
     }
   }
@@ -40,12 +39,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     if (this.pool) {
       await this.pool.end();
-      this.logger.log(`[INFO] [${this.moduleName}] Database connection closed.`);
+      this.logger.info('Database connection closed.');
     }
   }
 
   async query(sqlText: string, params?: any[]) {
-    this.logger.debug(`[DEBUG] [${this.moduleName}] Executing query`, {
+    this.logger.debug('Executing query', {
       sql: sqlText,
       params,
     });
@@ -53,13 +52,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     try {
       const result = await this.pool.query(sqlText, params);
 
-      this.logger.debug(`[DEBUG] [${this.moduleName}] Query executed successfully`, {
+      this.logger.debug('Query executed successfully', {
         rowCount: result.rowCount,
       });
 
       return result;
     } catch (error) {
-      this.logger.error(`[ERROR] [${this.moduleName}] Query execution failed`);
+      this.logger.failure('Query execution failed', error);
       throw error;
     }
   }

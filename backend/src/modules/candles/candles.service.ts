@@ -1,17 +1,21 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CandleDto } from './dto/candle.dto';
 import { VALID_INTERVALS } from './enum/candle-interval.enum';
+import { AppLogger } from '../../common/logger';
 
 @Injectable()
 export class CandlesService {
-  private readonly logger = new Logger(CandlesService.name);
-  private readonly moduleName = CandlesService.name;
+  private readonly logger = new AppLogger(CandlesService.name);
 
   constructor(private readonly databaseService: DatabaseService) {}
 
   async getHistoricalCandles(symbol: string = 'BTCUSDT', limit: number = 100, interval: string = '1m'): Promise<CandleDto[]> {
-    this.logger.log(`[INFO] [${this.moduleName}] Fetching historical candles for symbol: ${symbol}, interval: ${interval}, limit: ${limit}`);
+    this.logger.info('Fetching historical candles', {
+      symbol,
+      interval,
+      limit,
+    });
 
     try {
       if (!(VALID_INTERVALS as readonly string[]).includes(interval)) {
@@ -61,11 +65,14 @@ export class CandlesService {
           })
         : [];
 
-      this.logger.log(`[INFO] [${this.moduleName}] Successfully aggregated ${candles.length} [${interval}] candles for ${symbol}`);
+      this.logger.info(`Successfully aggregated ${candles.length} [${interval}] candles for ${symbol}`);
       return candles;
       
     } catch (error) {
-      this.logger.error(`[ERROR] [${this.moduleName}] Failed to fetch historical candles for symbol: ${symbol}, interval: ${interval}`, error);
+      this.logger.failure('Failed to fetch historical candles', error, {
+        symbol,
+        interval,
+      });
       throw error;
     }
   }

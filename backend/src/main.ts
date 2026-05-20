@@ -2,8 +2,10 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { AppLogger } from './common/logger';
 
 async function bootstrap() {
+  const logger = new AppLogger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 
   app.useGlobalPipes(
@@ -29,8 +31,9 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
-  await app.listen(process.env.PORT ?? 3000);
-  console.log(`Application is running on: http://localhost:3000`);
-  console.log(`Swagger UI is available at: http://localhost:3000/api/docs`);
+  const port = process.env.PORT ?? 3000;
+  await app.listen(port);
+  logger.info(`Application is running on: http://localhost:${port}`);
+  logger.info(`Swagger UI is available at: http://localhost:${port}/api/docs`);
 }
 bootstrap();

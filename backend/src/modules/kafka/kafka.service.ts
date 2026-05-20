@@ -3,14 +3,13 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Kafka, Consumer } from 'kafkajs';
 import { 
     Injectable,
-    Logger,
     OnModuleInit,
     OnModuleDestroy } from '@nestjs/common';
+import { AppLogger } from '../../common/logger';
 
 @Injectable()
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger();
-  private readonly moduleName = KafkaService.name;
+  private readonly logger = new AppLogger(KafkaService.name);
   private kafka: Kafka;
   private klineStreamConsumer: Consumer;
 
@@ -20,7 +19,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
-    this.logger.log(`[INFO] [${this.moduleName}] Initializing Kafka consumers...`);
+    this.logger.info('Initializing Kafka consumers...');
 
     this.kafka = new Kafka({
       clientId: this.configService.get<string>('KAFKA_CLIENT_ID'),
@@ -30,7 +29,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     // Single unified consumer for kline stream (contains both final and updating candles)
     await this.initKlineStreamConsumer();
 
-    this.logger.log(`[INFO] [${this.moduleName}] Kafka kline stream consumer initialized and running.`);
+    this.logger.info('Kafka kline stream consumer initialized and running.');
   }
 
   private async initKlineStreamConsumer() {
@@ -49,7 +48,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
         eachMessage: async ({ message }) => {
           const rawValue = message.value?.toString();
           if (!rawValue) {
-            this.logger.warn(`[WARN] [${this.moduleName}] Received message with empty value.`);
+            this.logger.warning('Received message with empty value.');
             return;
           }
 
@@ -58,7 +57,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
             
             // Validate required fields
             if (!candleData.symbol || !candleData.interval || !candleData.open || !candleData.high || !candleData.low || !candleData.close) {
-              this.logger.error(`[ERROR] [${this.moduleName}] Invalid candle data received`, { 
+              this.logger.failure('Invalid candle data received', undefined, { 
                 symbol: candleData.symbol,
                 interval: candleData.interval,
                 timestamp: candleData.timestamp,
@@ -72,39 +71,44 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
               return;
             }
 
-            const logLevel = candleData.is_final ? 'log' : 'debug';
             const logMessage = candleData.is_final
-              ? `[INFO] [${this.moduleName}] Candle data received: ${candleData.symbol} [${candleData.interval}]`
-              : `[DEBUG] [${this.moduleName}] Candle data received (updating): ${candleData.symbol} [${candleData.interval}]`;
-            this.logger[logLevel](logMessage, { 
+              ? `Candle data received: ${candleData.symbol} [${candleData.interval}]`
+              : `Candle data received (updating): ${candleData.symbol} [${candleData.interval}]`;
+            const logMetadata = { 
               symbol: candleData.symbol,
               interval: candleData.interval,
               timestamp: candleData.timestamp,
               is_final: candleData.is_final,
               close: candleData.close,
               volume: candleData.volume
-            });
+            };
+
+            if (candleData.is_final) {
+              this.logger.info(logMessage, logMetadata);
+            } else {
+              this.logger.debug(logMessage, logMetadata);
+            }
 
             // Emit unified event with all candle data (both final and updating)
             this.eventEmitter.emit('candle.update', candleData);
           } catch (error) {
-            this.logger.error(`[ERROR] [${this.moduleName}] Failed to parse message value.`, { error, rawValue });
+            this.logger.failure('Failed to parse message value.', error, { rawValue });
           }
         },
       });
 
-      this.logger.log(`[INFO] [${this.moduleName}] Kline stream consumer initialized.`);
+      this.logger.info('Kline stream consumer initialized.');
     } catch (error) {
-      this.logger.error(`[ERROR] [${this.moduleName}] Failed to initialize kline stream consumer.`);
+      this.logger.failure('Failed to initialize kline stream consumer.', error);
       throw error;
     }
   }
 
   async onModuleDestroy() {
-    this.logger.log(`[INFO] [${this.moduleName}] Disconnecting Kafka consumers...`);
+    this.logger.info('Disconnecting Kafka consumers...');
     if (this.klineStreamConsumer) {
       await this.klineStreamConsumer.disconnect();
     }
-    this.logger.log(`[INFO] [${this.moduleName}] All Kafka consumers disconnected.`);
+    this.logger.info('All Kafka consumers disconnected.');
   }
 }

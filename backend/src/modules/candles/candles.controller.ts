@@ -2,17 +2,17 @@ import {
   Controller,
   Get,
   Query,
-  Logger,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CandlesService } from './candles.service';
 import { CandlesQueryDto } from './dto/candles-query.dto';
 import { CandlesResponseDto } from './dto/candles-response.dto';
+import { AppLogger } from '../../common/logger';
 
 @ApiTags('Market Data')
 @Controller('candles')
 export class CandlesController {
-  private readonly logger = new Logger(CandlesController.name);
+  private readonly logger = new AppLogger(CandlesController.name);
 
   constructor(private readonly candlesService: CandlesService) {}
 
@@ -26,9 +26,11 @@ export class CandlesController {
   async getCandles(@Query() query: CandlesQueryDto): Promise<CandlesResponseDto> {
     const { symbol, interval = '1m', limit = 100 } = query;
 
-    this.logger.log(
-      `Received request for candles: symbol=${symbol}, interval=${interval}, limit=${limit}`
-    );
+    this.logger.info('Received request for candles', {
+      symbol,
+      interval,
+      limit,
+    });
 
     const data = await this.candlesService.getHistoricalCandles(
       symbol,
