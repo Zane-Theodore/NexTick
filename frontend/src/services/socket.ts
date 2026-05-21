@@ -1,4 +1,5 @@
 import { io } from 'socket.io-client';
+import type { MarketCandle } from '../utils/formatters';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL;
 export const socket = io(SOCKET_URL, {
@@ -34,7 +35,11 @@ export const leaveKlineRoom = (symbol: string, interval: string) => {
  * Must call joinKlineRoom() before using this
  * @param callback Function to call when candle updates are received
  */
-export const subscribeToCandles = (callback: (candle: unknown) => void) => {
+export type KlineUpdate = MarketCandle & {
+  is_final: boolean;
+};
+
+export const subscribeToCandles = (callback: (candle: KlineUpdate) => void) => {
   socket.on('kline_update', callback);
   
   return () => {

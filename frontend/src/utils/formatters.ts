@@ -2,6 +2,17 @@ import { Logger } from './logger';
 
 const logger = new Logger('Formatters');
 
+export interface MarketCandle {
+  timestamp: string | number | Date;
+  symbol?: string;
+  interval?: string;
+  open: number | string;
+  high: number | string;
+  low: number | string;
+  close: number | string;
+  volume: number | string;
+}
+
 export interface FormattedCandle {
   time: number;
   open: number;
@@ -11,23 +22,27 @@ export interface FormattedCandle {
   volume: number;
 }
 
-interface RawCandle {
-  timestamp?: string | number | Date;
-  symbol?: string;
-  interval?: string;
-  open?: unknown;
-  high?: unknown;
-  low?: unknown;
-  close?: unknown;
-  volume?: unknown;
-}
+const parseCandleTime = (time: unknown): number | null => {
+  if (typeof time === 'number') {
+    return time > 1_000_000_000_000 ? Math.floor(time / 1000) : Math.floor(time);
+  }
+
+  if (typeof time === 'string' || time instanceof Date) {
+    const date = new Date(time);
+    if (!isNaN(date.getTime())) {
+      return Math.floor(date.getTime() / 1000);
+    }
+  }
+
+  return null;
+};
 
 export const formatCandle = (candle: unknown): FormattedCandle | null => {
   if (!candle || typeof candle !== 'object' || !('timestamp' in candle) || !candle.timestamp) {
     return null;
   }
 
-  const rawCandle = candle as RawCandle;
+  const rawCandle = candle as Partial<MarketCandle>;
   const { timestamp, symbol, interval } = rawCandle;
   if (timestamp === undefined) {
     return null;
@@ -55,7 +70,16 @@ export const formatCandle = (candle: unknown): FormattedCandle | null => {
     return null;
   }
   
-  const utcSeconds = Math.floor(new Date(timestamp).getTime() / 1000);
+  const utcSeconds = parseCandleTime(timestamp);
+
+  if (utcSeconds === null) {
+    logger.error(`Invalid candle timestamp received`, {
+      timestamp,
+      symbol,
+      interval,
+    });
+    return null;
+  }
   
   return {
     time: utcSeconds,

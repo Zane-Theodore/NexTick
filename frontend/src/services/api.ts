@@ -1,16 +1,25 @@
 import axios from 'axios';
 import { Logger } from '../utils/logger';
+import type { MarketCandle } from '../utils/formatters';
 
 const API_URL = import.meta.env.VITE_API_URL;
 const logger = new Logger('API');
+
+interface CandlesResponse {
+  success: boolean;
+  symbol: string;
+  interval: string;
+  count: number;
+  data: MarketCandle[];
+}
 
 export const getHistoricalCandles = async (
   symbol: string = 'BTCUSDT',
   interval: string = '1m',
   limit: number = 1000
-) => {
+): Promise<MarketCandle[]> => {
   try {
-    const { data } = await axios.get(`${API_URL}/candles`, {
+    const { data } = await axios.get<CandlesResponse>(`${API_URL}/candles`, {
       params: { symbol, interval, limit }
     });
     return data.data;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
+import { createChart, CandlestickSeries, ColorType, HistogramSeries } from 'lightweight-charts';
 import type { CandlestickData, IChartApi, ISeriesApi, MouseEventParams, Time } from 'lightweight-charts';
 
 import { useMarketData } from '../../hooks/useMarketData';
@@ -34,12 +34,13 @@ export default function TradingChart() {
   
   const [chartInstance, setChartInstance] = useState<IChartApi | null>(null);
   const [series, setSeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
+  const [volumeSeries, setVolumeSeries] = useState<ISeriesApi<"Histogram"> | null>(null);
   const [symbol, setSymbol] = useState<string>('BTCUSDT');
   const [interval, setInterval] = useState<string>('1m');
   const [legendData, setLegendData] = useState<LegendData | null>(null);
   const [cursorPosition, setCursorPosition] = useState<CursorPosition>({ x: 0, y: 0 });
 
-  useMarketData(chartInstance, series, symbol, interval, volumeByTimeRef);
+  useMarketData(chartInstance, series, volumeSeries, symbol, interval, volumeByTimeRef);
 
   // Handle symbol change
   const handleSymbolChange = (newSymbol: string) => {
@@ -61,6 +62,11 @@ export default function TradingChart() {
         background: { type: ColorType.Solid, color: '#131722' },
         textColor: '#d1d4dc',
         attributionLogo: false,
+        panes: {
+          separatorColor: '#2B2B43',
+          separatorHoverColor: '#3f3f5a',
+          enableResize: false,
+        },
       },
       crosshair: {
         mode: 0, 
@@ -89,7 +95,7 @@ export default function TradingChart() {
         borderVisible: false,
         scaleMargins: {
           top: 0.1,
-          bottom: 0.1,
+          bottom: 0.08,
         },
       },
       grid: {
@@ -118,8 +124,32 @@ export default function TradingChart() {
       wickDownColor: '#ef5350',
     });
 
+    const histogramSeries = chart.addSeries(HistogramSeries, {
+      priceScaleId: 'right',
+      priceLineVisible: false,
+      lastValueVisible: false,
+      priceFormat: {
+        type: 'volume',
+      },
+    }, 1);
+
+    chart.priceScale('right', 1).applyOptions({
+      autoScale: true,
+      alignLabels: true,
+      borderVisible: false,
+      scaleMargins: {
+        top: 0.1,
+        bottom: 0.05,
+      },
+    });
+
+    const panes = chart.panes();
+    panes[0]?.setStretchFactor(4);
+    panes[1]?.setStretchFactor(1);
+
     setChartInstance(chart);
     setSeries(candlestickSeries);
+    setVolumeSeries(histogramSeries);
 
     // Subscribe to crosshair move events
     const handleCrosshair = (param: MouseEventParams<Time>) => {
@@ -179,6 +209,9 @@ export default function TradingChart() {
     return () => {
       chart.unsubscribeCrosshairMove(handleCrosshair);
       resizeObserver.disconnect();
+      setChartInstance(null);
+      setSeries(null);
+      setVolumeSeries(null);
       chart.remove();
     };
   }, []);
