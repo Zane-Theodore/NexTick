@@ -17,6 +17,14 @@ The backend is intentionally not an ingestion engine, candle aggregation engine,
 
 ## Setup
 
+Start the required Docker infrastructure from the repository root before running the backend:
+
+```bash
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
+```
+
+The backend connects to QuestDB and Kafka during application startup. If those services are not ready, `npm run start:dev` fails instead of starting in a partially connected state.
+
 Install dependencies:
 
 ```bash

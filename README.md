@@ -10,21 +10,21 @@ The project is deliberately split into operational boundaries. The API path is o
 
 ```mermaid
 flowchart LR
-  binance[Binance Combined Trade Streams] --> producer[Python Data Producer<br/>BinanceCombinedProducer]
-  producer --> raw[(Kafka<br/>raw trades topic)]
-  raw --> processor[Python Candle Processor<br/>O(1) OHLCV aggregation]
-  processor --> kline[(Kafka<br/>kline stream topic)]
-  processor --> questdb[(QuestDB<br/>market_candles)]
-  questdb --> backend[NestJS Backend<br/>REST API + Swagger]
+  binance["Binance Combined Trade Streams"] --> producer["Python Data Producer: BinanceCombinedProducer"]
+  producer --> raw[("Kafka raw trades topic")]
+  raw --> processor["Python Candle Processor: O(1) OHLCV aggregation"]
+  processor --> kline[("Kafka kline stream topic")]
+  processor --> questdb[("QuestDB market_candles")]
+  questdb --> backend["NestJS Backend: REST API + Swagger"]
   kline --> backend
-  backend --> socket[Socket.IO<br/>room fan-out]
-  backend --> rest[GET /candles]
-  socket --> frontend[React Frontend<br/>Lightweight Charts]
+  backend --> socket["Socket.IO room fan-out"]
+  backend --> rest["GET /candles"]
+  socket --> frontend["React Frontend: Lightweight Charts"]
   rest --> frontend
 
-  questdb -. historical/replay source .-> ai[Isolated AI Services<br/>Replay, GRU, Forecasting]
-  kline -. optional replay stream .-> ai
-  ai -. dedicated topics/storage only .-> future[Forecast Consumers]
+  questdb -.-> ai["Isolated AI Services: Replay, GRU, Forecasting"]
+  kline -.-> ai
+  ai -.-> future["Forecast Consumers"]
 ```
 
 ## Core Stack
@@ -46,7 +46,7 @@ flowchart LR
 6. NestJS consumes kline updates, validates API/socket payloads, queries QuestDB for history, and fans out realtime updates by Socket.IO room.
 7. React loads historical candles once, joins the matching Socket.IO room, and applies realtime updates with `series.update()`.
 
-## One-Click Quickstart
+## Local Quickstart
 
 Create environment files from the examples:
 
@@ -101,23 +101,21 @@ VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=1m,5m,15m,1h
 ```
 
-Then start the complete local stack:
+Start Docker services first. This project currently has no root `package.json`, so run the backend and frontend from their own directories after Kafka, QuestDB, and the Python pipeline are up.
 
 ```bash
-npm run dev
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
 ```
 
-The intended root `dev` script should orchestrate Docker Compose plus backend and frontend development servers. In the current repository snapshot, there is no root `package.json`; if the root script has not been added yet, start the services manually:
-
-```bash
-docker compose up -d kafka kafka-ui kafka-setup questdb data-processor data-producer
-```
+Then start the backend. Do not start it before Docker infrastructure: the NestJS app opens QuestDB and Kafka connections during startup and exits if they are unavailable.
 
 ```bash
 cd backend
 npm install
 npm run start:dev
 ```
+
+Finally start the frontend:
 
 ```bash
 cd frontend
@@ -139,30 +137,30 @@ Default local URLs:
 
 ```text
 NexTick/
-├── data_pipeline/
-│   ├── producer/
-│   │   └── binance_producer.py
-│   ├── processor/
-│   │   └── candle_processor.py
-│   ├── config.py
-│   └── README.md
-├── backend/
-│   ├── src/
-│   │   └── modules/
-│   │       ├── candles/
-│   │       ├── database/
-│   │       └── kafka/
-│   └── README.md
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   ├── hooks/
-│   │   ├── services/
-│   │   └── utils/
-│   └── README.md
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+|-- data_pipeline/
+|   |-- producer/
+|   |   `-- binance_producer.py
+|   |-- processor/
+|   |   `-- candle_processor.py
+|   |-- config.py
+|   `-- README.md
+|-- backend/
+|   |-- src/
+|   |   `-- modules/
+|   |       |-- candles/
+|   |       |-- database/
+|   |       `-- kafka/
+|   `-- README.md
+|-- frontend/
+|   |-- src/
+|   |   |-- components/
+|   |   |-- hooks/
+|   |   |-- services/
+|   |   `-- utils/
+|   `-- README.md
+|-- docker-compose.yml
+|-- requirements.txt
+`-- README.md
 ```
 
 ## Boundary Rules

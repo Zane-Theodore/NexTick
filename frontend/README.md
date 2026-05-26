@@ -16,6 +16,8 @@ The frontend is a high-performance UI client. It loads historical candles throug
 
 ## Setup
 
+Start the backend first. The frontend can boot without it, but chart history and realtime Socket.IO updates require the NestJS API at `VITE_API_URL` and `VITE_SOCKET_URL`.
+
 Install dependencies:
 
 ```bash

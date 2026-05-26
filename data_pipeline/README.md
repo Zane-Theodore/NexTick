@@ -63,10 +63,10 @@ Run the Binance producer:
 python -m data_pipeline.producer.binance_producer
 ```
 
-Docker Compose can also run the pipeline services:
+Docker Compose can also run the pipeline services and their dependencies from the repository root:
 
 ```bash
-docker compose up -d data-processor data-producer
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
 ```
 
 ## Environment Variables
@@ -255,4 +255,3 @@ LIMIT 100;
 ## Pipeline Boundary
 
 The data pipeline should not expose browser APIs or run frontend/backend presentation logic. It communicates through Kafka topics and QuestDB only. Future AI services should consume from Kafka or QuestDB and publish forecasts to dedicated topics or storage contracts, never by coupling directly to this processor's in-memory state.
-
