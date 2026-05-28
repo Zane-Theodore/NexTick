@@ -13,15 +13,6 @@ export default function Header() {
           Nex<span className="text-blue-500">Tick</span>
         </h1>
       </div>
-      
-      <div className="flex items-center gap-4">
-        <button className="text-sm font-medium text-[#d1d4dc] hover:text-white transition-colors">
-          Login
-        </button>
-        <button className="text-sm font-medium bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors">
-          Sign Up
-        </button>
-      </div>
     </header>
   );
 }
