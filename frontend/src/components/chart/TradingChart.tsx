@@ -54,6 +54,9 @@ const INDICATOR_CONFIG = [
   { period: 99, color: '#00d4ff', mutedColor: '#00d4ff80' },
 ] as const;
 
+const MAIN_CHART_DEFAULT_STRETCH_FACTOR = 85;
+const VOLUME_CHART_DEFAULT_STRETCH_FACTOR = 15;
+
 const SUPPORTED_SYMBOLS = import.meta.env.VITE_TRADING_SYMBOLS.split(',').map((s: string) => s.trim());
 const SUPPORTED_INTERVALS = import.meta.env.VITE_CANDLE_INTERVALS.split(',').map((s: string) => s.trim());
 
@@ -114,8 +117,8 @@ export default function TradingChart() {
         attributionLogo: false,
         panes: {
           separatorColor: '#3f4654',
-          separatorHoverColor: '#6b7280',
-          enableResize: false,
+          separatorHoverColor: 'transparent',
+          enableResize: true,
         },
       },
       crosshair: {
@@ -224,8 +227,8 @@ export default function TradingChart() {
     });
 
     const panes = chart.panes();
-    panes[0]?.setStretchFactor(4);
-    panes[1]?.setStretchFactor(1);
+    panes[0]?.setStretchFactor(MAIN_CHART_DEFAULT_STRETCH_FACTOR);
+    panes[1]?.setStretchFactor(VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
 
     chartInstanceRef.current = chart;
     candlestickSeriesRef.current = candlestickSeries;
