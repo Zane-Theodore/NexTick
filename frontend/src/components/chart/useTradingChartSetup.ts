@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { createChart, CandlestickSeries, ColorType, HistogramSeries, LineSeries } from 'lightweight-charts';
-import type { CandlestickData, IChartApi, ISeriesApi, LineData, MouseEventParams, Time } from 'lightweight-charts';
+import type { AutoscaleInfoProvider, CandlestickData, IChartApi, ISeriesApi, LineData, MouseEventParams, Time } from 'lightweight-charts';
 
 import type { CursorPosition, IndicatorSeriesConfig, IndicatorValue, LegendData } from '../../types/chart';
 import {
@@ -126,11 +126,29 @@ export function useTradingChartSetup({
 
     const histogramSeries = chart.addSeries(HistogramSeries, {
       priceScaleId: 'right',
+      base: 0,
       priceLineVisible: false,
       lastValueVisible: false,
       priceFormat: {
         type: 'volume',
       },
+      autoscaleInfoProvider: ((original) => {
+        const autoscaleInfo = original();
+
+        if (!autoscaleInfo?.priceRange) return autoscaleInfo;
+
+        return {
+          ...autoscaleInfo,
+          priceRange: {
+            minValue: 0,
+            maxValue: Math.max(autoscaleInfo.priceRange.maxValue, 1),
+          },
+          margins: {
+            above: 0,
+            below: 0,
+          },
+        };
+      }) satisfies AutoscaleInfoProvider,
     }, 1);
 
     const indicatorSeries = INDICATOR_CONFIG.flatMap(({ period, color, mutedColor }) => ([
@@ -167,7 +185,7 @@ export function useTradingChartSetup({
       borderColor: '#6b7280',
       scaleMargins: {
         top: 0.1,
-        bottom: 0.05,
+        bottom: 0,
       },
     });
 
