@@ -43,7 +43,7 @@ function FilterDropdown({ label, value, options, widthClass, onChange }: FilterD
         <span className="block truncate">{value}</span>
         <span
           className={`pointer-events-none absolute right-3 top-1/2 h-2 w-2 -translate-y-1/2 rotate-45 border-b-2 border-r-2 border-[#9099aa] transition-transform duration-200 ${
-            isOpen ? 'mt-1 rotate-[225deg]' : ''
+            isOpen ? 'mt-1 rotate-225' : ''
           }`}
         />
       </button>
