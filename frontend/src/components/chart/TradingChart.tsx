@@ -109,12 +109,12 @@ export default function TradingChart() {
       width: chartContainerRef.current.clientWidth,
       height: chartContainerRef.current.clientHeight,
       layout: {
-        background: { type: ColorType.Solid, color: '#131722' },
+        background: { type: ColorType.Solid, color: '#0b0f16' },
         textColor: '#d1d4dc',
         attributionLogo: false,
         panes: {
-          separatorColor: '#2B2B43',
-          separatorHoverColor: '#3f3f5a',
+          separatorColor: '#3f4654',
+          separatorHoverColor: '#6b7280',
           enableResize: false,
         },
       },
@@ -122,15 +122,15 @@ export default function TradingChart() {
         mode: 0, 
         vertLine: {
           width: 1,
-          color: '#3f3f5a',
+          color: '#f1f5f9',
           style: 3,
-          labelBackgroundColor: '#27273b',
+          labelBackgroundColor: '#3f4654',
         },
         horzLine: {
           width: 1,
-          color: '#3f3f5a',
+          color: '#f1f5f9',
           style: 3,
-          labelBackgroundColor: '#27273b',
+          labelBackgroundColor: '#3f4654',
         },
       },
       handleScale: {
@@ -142,15 +142,16 @@ export default function TradingChart() {
       rightPriceScale: {
         autoScale: true,
         alignLabels: true,
-        borderVisible: false,
+        borderVisible: true,
+        borderColor: '#6b7280',
         scaleMargins: {
           top: 0.1,
           bottom: 0.08,
         },
       },
       grid: {
-        vertLines: { color: '#2B2B43' },
-        horzLines: { color: '#2B2B43' },
+        vertLines: { color: '#202632' },
+        horzLines: { color: '#202632' },
       },
       timeScale: { 
         timeVisible: true, 
@@ -159,6 +160,7 @@ export default function TradingChart() {
         minBarSpacing: 10,
         maxBarSpacing: 80,
         tickMarkFormatter: formatTimeScaleTick,
+        borderColor: '#6b7280',
       },
       localization: {
         priceFormatter: formatChartValue,
@@ -213,7 +215,8 @@ export default function TradingChart() {
     chart.priceScale('right', 1).applyOptions({
       autoScale: true,
       alignLabels: true,
-      borderVisible: false,
+      borderVisible: true,
+      borderColor: '#6b7280',
       scaleMargins: {
         top: 0.1,
         bottom: 0.05,
@@ -325,16 +328,16 @@ export default function TradingChart() {
   }, [areEmaVisible, areMaVisible, isChartReady]);
 
   return (
-    <div className="h-full flex flex-col bg-[#131722] overflow-hidden">
+    <div className="h-full flex flex-col bg-[#0f1117] overflow-hidden">
       {/* Filter Bar */}
-      <div className="shrink-0 px-5 py-4 flex items-center gap-6 bg-[#131722] border-b border-[#2B2B43]">
+      <div className="shrink-0 px-5 py-4 flex items-center gap-6 bg-[#0f1117] border-b border-[#3f4654]">
         {/* Symbol Selector */}
         <div className="flex flex-col">
           <label className="text-xs text-[#9099aa] mb-2 font-semibold">Symbol</label>
           <select
             value={symbol}
             onChange={(e) => handleSymbolChange(e.target.value)}
-            className="px-3 py-2 bg-[#1e1e2e] border border-[#3f3f5a] text-[#d1d4dc] rounded hover:border-[#5a5a7a] focus:border-blue-500 focus:outline-none transition-colors"
+            className="px-3 py-2 bg-[#151a23] border border-[#3f4654] text-[#d1d4dc] rounded hover:border-[#6b7280] focus:border-blue-500 focus:outline-none transition-colors"
           >
             {SUPPORTED_SYMBOLS.map((s: string) => (
               <option key={s} value={s}>
@@ -355,7 +358,7 @@ export default function TradingChart() {
                 className={`px-3 py-2 rounded text-sm font-medium transition-all border ${
                   interval === iv
                     ? 'bg-blue-600 border-blue-500 text-white shadow-lg'
-                    : 'bg-[#1e1e2e] border-[#3f3f5a] text-[#d1d4dc] hover:border-[#5a5a7a]'
+                    : 'bg-[#151a23] border-[#3f4654] text-[#d1d4dc] hover:border-[#6b7280]'
                 }`}
               >
                 {iv}
@@ -374,7 +377,7 @@ export default function TradingChart() {
       </div>
 
       {/* Chart Container - Takes remaining space */}
-      <div className="flex-1 relative overflow-hidden bg-[#131722]">
+      <div className="flex-1 relative overflow-hidden bg-[#0b0f16]">
         {/* OHLCV Legend Tooltip */}
         {legendData && (
           <div 
@@ -384,12 +387,12 @@ export default function TradingChart() {
               top: `${cursorPosition.y + 16}px`,
             }}
           >
-            <div className="min-w-60 bg-[#1e1e2e]/95 border border-[#3f3f5a] rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm">
+            <div className="min-w-60 bg-[#151a23]/95 border border-[#3f4654] rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm">
               <div className="font-mono text-sm text-[#d1d4dc] space-y-1.5">
                 <div className="font-bold text-base text-white">
                   {symbol} • {interval}
                 </div>
-                <div className="text-xs text-[#9099aa] mb-2 border-b border-[#3f3f5a] pb-2">
+                <div className="text-xs text-[#9099aa] mb-2 border-b border-[#3f4654] pb-2">
                   {formatTooltipTime(legendData.time)}
                 </div>
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1">
@@ -444,7 +447,7 @@ export default function TradingChart() {
             }`}
           >
             <div className="px-1.5 py-1 flex flex-col gap-y-1 font-mono text-xs whitespace-nowrap">
-              <div className="min-h-5 flex flex-nowrap items-center gap-x-3 border border-transparent hover:border-[#3f3f5a] rounded-sm transition-colors duration-200 px-1">
+              <div className="min-h-5 flex flex-nowrap items-center gap-x-3 border border-transparent hover:border-[#6b7280] rounded-sm transition-colors duration-200 px-1">
                 {INDICATOR_CONFIG.map(({ period, color }) => {
                   const indicatorValue = visibleIndicatorValues.find((value) => value.kind === 'ema' && value.period === period);
 
@@ -468,7 +471,7 @@ export default function TradingChart() {
                 </button>
               </div>
 
-              <div className="min-h-5 flex flex-nowrap items-center gap-x-3 border border-transparent hover:border-[#3f3f5a] rounded-sm transition-colors duration-200 px-1">
+              <div className="min-h-5 flex flex-nowrap items-center gap-x-3 border border-transparent hover:border-[#6b7280] rounded-sm transition-colors duration-200 px-1">
                 {INDICATOR_CONFIG.map(({ period, color }) => {
                   const indicatorValue = visibleIndicatorValues.find((value) => value.kind === 'ma' && value.period === period);
 
@@ -498,7 +501,7 @@ export default function TradingChart() {
         {/* Scroll to Latest Button */}
         <button 
           onClick={() => chartInstanceRef.current?.timeScale().scrollToPosition(10, false)}
-          className="absolute bottom-8 right-20 z-10 w-10 h-10 bg-[#2B2B43]/80 hover:bg-blue-600 text-[#d1d4dc] hover:text-white rounded-full flex items-center justify-center backdrop-blur shadow-lg transition-all border border-[#3f3f5a] hover:border-blue-500"
+          className="absolute bottom-8 right-20 z-10 w-10 h-10 bg-[#242a35]/85 hover:bg-blue-600 text-[#d1d4dc] hover:text-white rounded-full flex items-center justify-center backdrop-blur shadow-lg transition-all border border-[#3f4654] hover:border-blue-500"
           title="Scroll to latest"
         >
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
