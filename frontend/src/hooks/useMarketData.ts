@@ -8,22 +8,10 @@ import type { KlineUpdate } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
 import { Logger } from '../utils/logger';
 import type { ISeriesApi, IChartApi, CandlestickData, HistogramData, LineData, Time } from 'lightweight-charts';
+import type { IndicatorSeriesConfig, IndicatorValue } from '../types/chart';
+import { CHART_DOWN_COLOR, CHART_UP_COLOR } from '../components/chart/chartConstants';
 
 const logger = new Logger('MarketData');
-
-export type IndicatorKind = 'ema' | 'ma';
-
-export interface IndicatorSeriesConfig {
-  kind: IndicatorKind;
-  period: number;
-  series: ISeriesApi<"Line">;
-}
-
-export interface IndicatorValue {
-  kind: IndicatorKind;
-  period: number;
-  value: number;
-}
 
 interface EmaRuntimeState {
   lastTime: Time;
@@ -96,7 +84,7 @@ export const useMarketData = (
         const volumeData = formattedData.map(({ time, open, close, volume }) => ({
           time,
           value: volume,
-          color: close >= open ? '#26a69a80' : '#ef535080',
+          color: close >= open ? CHART_UP_COLOR : CHART_DOWN_COLOR,
         })) as HistogramData<Time>[];
 
         candlestickSeries.setData(candleData);
@@ -171,7 +159,7 @@ export const useMarketData = (
         volumeSeries.update({
           time: formatted.time as Time,
           value: formatted.volume,
-          color: formatted.close >= formatted.open ? '#26a69a80' : '#ef535080',
+          color: formatted.close >= formatted.open ? CHART_UP_COLOR : CHART_DOWN_COLOR,
         });
 
         const indicatorValues = indicatorSeriesRef?.current.reduce<IndicatorValue[]>((values, { kind, period, series: indicatorSeries }) => {
