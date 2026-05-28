@@ -2,14 +2,14 @@
 
 Python streaming pipeline for Binance ingestion, O(1) candle aggregation, Kafka publishing, and QuestDB persistence.
 
-This layer owns the market-data write path. It connects to Binance, normalizes raw trades, publishes them to Kafka, aggregates OHLCV candles with constant-memory state, stores final `1m` candles in QuestDB, and publishes final plus non-final candle updates for realtime consumers.
+This layer owns the market-data write path. It connects to Binance, normalizes raw trades, publishes them to Kafka, aggregates OHLCV candles with constant-memory state, stores final base-interval candles in QuestDB, and publishes final plus non-final candle updates for realtime consumers.
 
 ## Responsibilities
 
 | Component | Role |
 | --- | --- |
 | `producer/binance_producer.py` | Connects to Binance combined trade streams and publishes normalized raw trades to Kafka. |
-| `processor/candle_processor.py` | Consumes raw trades, aggregates multi-timeframe candles, persists final `1m` candles, and publishes kline updates. |
+| `processor/candle_processor.py` | Consumes raw trades, aggregates multi-timeframe candles, persists final base-interval candles, and publishes kline updates. |
 | `config.py` | Loads and validates required environment variables from `data_pipeline/.env`. |
 | `logger_config.py` | Provides structured logger setup for pipeline services. |
 
@@ -75,7 +75,7 @@ docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor d
 | --- | --- | --- | --- |
 | `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Binance WebSocket base URL. The current producer builds a combined stream URL from `TRADING_SYMBOLS`. |
 | `TRADING_SYMBOLS` | No | `BTCUSDT,ETHUSDT` | Comma-separated symbols to ingest. Defaults to `BTCUSDT` in `config.py` when not provided. |
-| `CANDLE_INTERVALS` | No | `1m,5m,15m,1h` | Comma-separated candle intervals managed by `MultiTimeframeManager`. Defaults to `1m,5m`. |
+| `CANDLE_INTERVALS` | No | `<interval>,<interval>` | Comma-separated candle intervals managed by `MultiTimeframeManager`. Keep this aligned with backend validation and frontend selector configuration. |
 | `CANDLE_UPDATE_INTERVAL_MS` | No | `500` | Periodic non-final candle broadcast interval in milliseconds. Defaults to `500`. |
 | `KAFKA_BROKER` | Yes | `localhost:9092` | Kafka bootstrap server. Use `kafka:29092` inside Docker Compose services. |
 | `KAFKA_TOPIC_RAW_TRADES` | Yes | `raw-trades` | Topic receiving normalized raw Binance trade records. |
@@ -134,7 +134,7 @@ It:
 3. Creates one `MultiTimeframeManager` per symbol.
 4. Updates each configured `SingleCandleManager` in O(1) time.
 5. Broadcasts non-final candles every `CANDLE_UPDATE_INTERVAL_MS`.
-6. Persists final `1m` candles to QuestDB.
+6. Persists final base-interval candles to QuestDB.
 7. Publishes final and non-final candles to `KAFKA_TOPIC_KLINE_STREAM`.
 
 ### O(1) Aggregation
@@ -157,7 +157,7 @@ No historical trade buffer is required for active candle updates.
 {
   "timestamp": "2026-05-20T08:00:00+00:00",
   "symbol": "BTCUSDT",
-  "interval": "1m",
+  "interval": "<interval>",
   "open": 105000.5,
   "high": 105250.75,
   "low": 104900.25,
@@ -167,7 +167,7 @@ No historical trade buffer is required for active candle updates.
 }
 ```
 
-`is_final=false` updates are for realtime UI movement. `is_final=true` updates represent closed candles. Only final `1m` candles are written to QuestDB.
+`is_final=false` updates are for realtime UI movement. `is_final=true` updates represent closed candles. Only final base-interval candles are written to QuestDB.
 
 ## QuestDB Schema
 
@@ -191,7 +191,7 @@ Storage rules:
 | Rule | Description |
 | --- | --- |
 | Authoritative table | `market_candles` |
-| Persisted interval | Final `1m` candles only |
+| Persisted interval | Final base-interval candles only |
 | Higher intervals | Derived by backend QuestDB `SAMPLE BY ... ALIGN TO CALENDAR` queries |
 | SQL casing | QuestDB keywords should be uppercase; table and column names should be lowercase snake_case. |
 | Inserts | Use parameter binding for candle values. |
@@ -234,7 +234,7 @@ ORDER BY timestamp DESC
 LIMIT 20;
 ```
 
-Aggregate `1m` storage into higher intervals:
+Aggregate base-interval storage into requested intervals:
 
 ```sql
 SELECT
@@ -246,8 +246,8 @@ SELECT
   last(close) AS close,
   sum(volume) AS volume
 FROM market_candles
-WHERE symbol = 'BTCUSDT' AND interval = '1m'
-SAMPLE BY 5m ALIGN TO CALENDAR
+WHERE symbol = 'BTCUSDT' AND interval = '<base_interval>'
+SAMPLE BY <interval> ALIGN TO CALENDAR
 ORDER BY timestamp DESC
 LIMIT 100;
 ```

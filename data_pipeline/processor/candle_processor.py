@@ -82,26 +82,29 @@ class SingleCandleManager:
         Returns:
             Datetime truncated to interval boundary.
         """
-        if self.interval == '1m':
-            return timestamp.replace(second=0, microsecond=0)
-        elif self.interval == '5m':
-            minutes = (timestamp.minute // 5) * 5
+        interval_unit = self.interval[-1]
+        interval_value = int(self.interval[:-1]) if interval_unit != 'M' else 1
+
+        if interval_unit == 'm':
+            minutes = (timestamp.minute // interval_value) * interval_value
             return timestamp.replace(minute=minutes, second=0, microsecond=0)
-        elif self.interval == '15m':
-            minutes = (timestamp.minute // 15) * 15
-            return timestamp.replace(minute=minutes, second=0, microsecond=0)
-        elif self.interval == '30m':
-            minutes = (timestamp.minute // 30) * 30
-            return timestamp.replace(minute=minutes, second=0, microsecond=0)
-        elif self.interval == '1h':
-            return timestamp.replace(minute=0, second=0, microsecond=0)
-        elif self.interval == '4h':
-            hour = (timestamp.hour // 4) * 4
+
+        if interval_unit == 'h':
+            hour = (timestamp.hour // interval_value) * interval_value
             return timestamp.replace(hour=hour, minute=0, second=0, microsecond=0)
-        elif self.interval == '1d':
-            return timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            return timestamp
+
+        if interval_unit == 'd':
+            day = ((timestamp.day - 1) // interval_value) * interval_value + 1
+            return timestamp.replace(day=day, hour=0, minute=0, second=0, microsecond=0)
+
+        if self.interval == '1w':
+            week_start = timestamp - timedelta(days=timestamp.weekday())
+            return week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if self.interval == '1M':
+            return timestamp.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        raise ValueError(f"Unsupported candle interval: {self.interval}")
 
     def update_with_trade(self, trade_price: float, trade_volume: float, trade_time: datetime) -> dict:
         """Update candle with new trade data using O(1) algorithm.
@@ -264,10 +267,10 @@ class CandleProcessor:
         try:
             self.db_conn = psycopg2.connect(
                 host=config.QUESTDB_HOST,
-                port=8812,
-                database="qdb",
-                user="admin",
-                password="quest"
+                port=config.QUESTDB_PORT,
+                database=config.QUESTDB_DATABASE,
+                user=config.QUESTDB_USER,
+                password=config.QUESTDB_PASSWORD
             )
             self.db_conn.autocommit = True
             self.db_cursor = self.db_conn.cursor()

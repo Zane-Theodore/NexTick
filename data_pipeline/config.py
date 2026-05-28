@@ -57,21 +57,49 @@ QUESTDB_DATABASE = get_env_or_raise('QUESTDB_DB_NAME')
 # BINANCE
 BINANCE_SOCKET_URL = get_env_or_raise('BINANCE_SOCKET_URL')
 
+SUPPORTED_CANDLE_INTERVALS = (
+    '1m',
+    '3m',
+    '5m',
+    '15m',
+    '30m',
+    '1h',
+    '2h',
+    '4h',
+    '6h',
+    '8h',
+    '12h',
+    '1d',
+    '3d',
+    '1w',
+    '1M',
+)
+
+DEFAULT_CANDLE_INTERVALS = ",".join(SUPPORTED_CANDLE_INTERVALS)
+
 # DATA PIPELINE CONFIG
 # List of trading symbols to process (can be set via environment variable).
 # Format: comma-separated, e.g., "BTCUSDT,ETHUSDT,BNBUSDT"
 TRADING_SYMBOLS = _split_env_list('TRADING_SYMBOLS', 'BTCUSDT')
-CANDLE_INTERVALS = [item.strip() for item in os.getenv('CANDLE_INTERVALS', '1m,5m').split(',') if item.strip()]
+CANDLE_INTERVALS = [item.strip() for item in os.getenv('CANDLE_INTERVALS', DEFAULT_CANDLE_INTERVALS).split(',') if item.strip()]
 
 # Mapping of interval names to milliseconds
 _INTERVAL_MS_MAP = {
     '1m': 60 * 1000,
+    '3m': 3 * 60 * 1000,
     '5m': 5 * 60 * 1000,
     '15m': 15 * 60 * 1000,
     '30m': 30 * 60 * 1000,
     '1h': 60 * 60 * 1000,
+    '2h': 2 * 60 * 60 * 1000,
     '4h': 4 * 60 * 60 * 1000,
+    '6h': 6 * 60 * 60 * 1000,
+    '8h': 8 * 60 * 60 * 1000,
+    '12h': 12 * 60 * 60 * 1000,
     '1d': 24 * 60 * 60 * 1000,
+    '3d': 3 * 24 * 60 * 60 * 1000,
+    '1w': 7 * 24 * 60 * 60 * 1000,
+    '1M': 30 * 24 * 60 * 60 * 1000,
 }
 
 def get_timeframes_with_ms() -> list[tuple[str, int]]:
@@ -80,7 +108,15 @@ def get_timeframes_with_ms() -> list[tuple[str, int]]:
     Returns:
         List of tuples: [(interval_name, interval_ms), ...]
     """
-    return [(interval, _INTERVAL_MS_MAP.get(interval, 60 * 1000)) for interval in CANDLE_INTERVALS]
+    invalid_intervals = [interval for interval in CANDLE_INTERVALS if interval not in _INTERVAL_MS_MAP]
+    if invalid_intervals:
+        logger.error(f"Invalid candle intervals configured: {invalid_intervals}")
+        raise ValueError(
+            f"Invalid candle intervals configured: {', '.join(invalid_intervals)}. "
+            f"Supported intervals: {', '.join(SUPPORTED_CANDLE_INTERVALS)}"
+        )
+
+    return [(interval, _INTERVAL_MS_MAP[interval]) for interval in CANDLE_INTERVALS]
 
 # Interval in milliseconds for broadcasting updating candles to frontend
 CANDLE_UPDATE_INTERVAL_MS = int(os.getenv('CANDLE_UPDATE_INTERVAL_MS', '500'))

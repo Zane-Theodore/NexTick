@@ -58,7 +58,7 @@ http://localhost:5173
 | `VITE_API_URL` | Yes | `http://localhost:3000` | Base URL for the NestJS REST API. Used by `src/services/api.ts`. |
 | `VITE_SOCKET_URL` | Yes | `http://localhost:3000` | Socket.IO server URL. Used by `src/services/socket.ts`. |
 | `VITE_TRADING_SYMBOLS` | Yes | `BTCUSDT,ETHUSDT` | Comma-separated symbol list displayed by the chart symbol selector. |
-| `VITE_CANDLE_INTERVALS` | Yes | `1m,5m,15m,1h` | Comma-separated interval list displayed by the chart interval controls. |
+| `VITE_CANDLE_INTERVALS` | Yes | `<interval>,<interval>` | Comma-separated interval list displayed by the chart interval controls. Keep this aligned with backend validation and pipeline aggregation. |
 
 Example:
 
@@ -66,7 +66,7 @@ Example:
 VITE_API_URL=http://localhost:3000
 VITE_SOCKET_URL=http://localhost:3000
 VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
-VITE_CANDLE_INTERVALS=1m,5m,15m,1h
+VITE_CANDLE_INTERVALS=<interval>,<interval>
 ```
 
 ## Data Flow
@@ -79,7 +79,7 @@ sequenceDiagram
   participant Socket as Socket.IO
 
   UI->>Hook: symbol + interval selected
-  Hook->>API: GET /candles?symbol=BTCUSDT&interval=1m&limit=1000
+  Hook->>API: GET /candles?symbol=BTCUSDT&interval=<interval>&limit=1000
   API-->>Hook: historical candles
   Hook->>UI: series.setData(history)
   Hook->>Socket: join_kline_room
@@ -162,7 +162,7 @@ Query parameters:
 | Parameter | Example | Description |
 | --- | --- | --- |
 | `symbol` | `BTCUSDT` | Trading pair. |
-| `interval` | `1m` | Candle interval. |
+| `interval` | `<interval>` | Candle interval. |
 | `limit` | `1000` | Maximum candles requested for initial chart history. |
 
 Response data is expected under the `data` property:
@@ -171,7 +171,7 @@ Response data is expected under the `data` property:
 {
   "success": true,
   "symbol": "BTCUSDT",
-  "interval": "1m",
+  "interval": "<interval>",
   "count": 1000,
   "data": []
 }
@@ -183,8 +183,8 @@ The socket service connects to `VITE_SOCKET_URL` with websocket and polling tran
 
 | Event | Direction | Payload | Usage |
 | --- | --- | --- | --- |
-| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Sent after historical data loads successfully. |
-| `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Sent when the hook cleans up or the selected market changes. |
+| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "<interval>" }` | Sent after historical data loads successfully. |
+| `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "<interval>" }` | Sent when the hook cleans up or the selected market changes. |
 | `kline_update` | Server to client | Candle plus `is_final` | Consumed by `subscribeToCandles()` and applied with `series.update()`. |
 
 Realtime candle payload:
@@ -193,7 +193,7 @@ Realtime candle payload:
 {
   "timestamp": "2026-05-20T08:00:00.000Z",
   "symbol": "BTCUSDT",
-  "interval": "1m",
+  "interval": "<interval>",
   "open": 105000.5,
   "high": 105250.75,
   "low": 104900.25,

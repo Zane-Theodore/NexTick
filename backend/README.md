@@ -59,7 +59,7 @@ Default local endpoints:
 | --- | --- |
 | REST API | `http://localhost:3000` |
 | Swagger UI | `http://localhost:3000/api/docs` |
-| Historical candles | `GET http://localhost:3000/candles?symbol=BTCUSDT&interval=1m&limit=100` |
+| Historical candles | `GET http://localhost:3000/candles?symbol=BTCUSDT&interval=<interval>&limit=100` |
 | Socket.IO | `http://localhost:3000` |
 
 ## Environment Variables
@@ -93,13 +93,13 @@ Query parameters:
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `symbol` | `string` | Required | Trading pair, transformed to uppercase by `CandlesQueryDto`. |
-| `interval` | `CandleInterval` | `1m` | Allowlisted candle interval. |
+| `interval` | `CandleInterval` | Configured default | Allowlisted candle interval. |
 | `limit` | `number` | `100` | Number of candles to return, constrained from `1` to `1000`. |
 
 Example:
 
 ```bash
-curl "http://localhost:3000/candles?symbol=BTCUSDT&interval=5m&limit=200"
+curl "http://localhost:3000/candles?symbol=BTCUSDT&interval=<interval>&limit=200"
 ```
 
 Response shape:
@@ -108,13 +108,13 @@ Response shape:
 {
   "success": true,
   "symbol": "BTCUSDT",
-  "interval": "5m",
+  "interval": "<interval>",
   "count": 200,
   "data": [
     {
       "timestamp": "2026-05-20T08:00:00.000Z",
       "symbol": "BTCUSDT",
-      "interval": "5m",
+      "interval": "<interval>",
       "open": 105000.5,
       "high": 105250.75,
       "low": 104900.25,
@@ -136,13 +136,13 @@ Rooms use this format:
 Example:
 
 ```text
-BTCUSDT_1m
+BTCUSDT_<interval>
 ```
 
 | Event | Direction | Payload | Description |
 | --- | --- | --- | --- |
-| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Subscribes the socket to a symbol/interval room. |
-| `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Removes the socket from a symbol/interval room. |
+| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "<interval>" }` | Subscribes the socket to a symbol/interval room. |
+| `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "<interval>" }` | Removes the socket from a symbol/interval room. |
 | `kline_update` | Server to client | `KlineUpdateDto` | Emits a final or non-final candle update to subscribed clients. |
 
 `kline_update` payload:
@@ -151,7 +151,7 @@ BTCUSDT_1m
 {
   "timestamp": "2026-05-20T08:00:00.000Z",
   "symbol": "BTCUSDT",
-  "interval": "1m",
+  "interval": "<interval>",
   "open": 105000.5,
   "high": 105250.75,
   "low": 104900.25,
@@ -218,7 +218,7 @@ This prevents optional query fields from throwing during transformation before v
 SAMPLE BY ${interval} ALIGN TO CALENDAR
 ```
 
-Because QuestDB SQL fragments such as `SAMPLE BY 5m` cannot be parameterized like scalar values, intervals must be allowlisted before interpolation. User-controlled scalar values such as `symbol` and `limit` must be parameterized.
+Because QuestDB SQL fragments such as `SAMPLE BY <interval>` cannot be parameterized like scalar values, intervals must be allowlisted before interpolation. User-controlled scalar values such as `symbol` and `limit` must be parameterized.
 
 ## Backend Boundary
 

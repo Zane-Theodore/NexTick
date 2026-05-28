@@ -66,8 +66,8 @@ export default function TradingChart() {
   const volumeByTimeRef = useRef<Map<string, number>>(new Map());
   
   const [isChartReady, setIsChartReady] = useState<boolean>(false);
-  const [symbol, setSymbol] = useState<string>('BTCUSDT');
-  const [interval, setInterval] = useState<string>('1m');
+  const [symbol, setSymbol] = useState<string>(SUPPORTED_SYMBOLS[0]);
+  const [interval, setInterval] = useState<string>(SUPPORTED_INTERVALS[0]);
   const [legendData, setLegendData] = useState<LegendData | null>(null);
   const [cursorPosition, setCursorPosition] = useState<CursorPosition>({ x: 0, y: 0 });
   const [indicatorValues, setIndicatorValues] = useState<IndicatorValue[]>([]);
