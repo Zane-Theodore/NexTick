@@ -1,21 +1,63 @@
 # NexTick Data Pipeline
 
-Python streaming pipeline for Binance ingestion, O(1) candle aggregation, Kafka publishing, and QuestDB persistence.
+`data_pipeline/` is the Python market-data write path for NexTick.
 
-This layer owns the market-data write path. It connects to Binance, normalizes raw trades, publishes them to Kafka, aggregates OHLCV candles with constant-memory state, stores final base-interval candles in QuestDB, and publishes final plus non-final candle updates for realtime consumers.
+It connects to Binance combined trade streams, publishes normalized raw trades to Kafka, aggregates OHLCV candles in memory, writes final `1m` candles to QuestDB, and publishes final plus non-final candle updates for downstream consumers.
 
-## Responsibilities
+This module does not expose browser APIs, render UI, or run the NestJS backend.
+
+## Components
 
 | Component | Role |
 | --- | --- |
-| `producer/binance_producer.py` | Connects to Binance combined trade streams and publishes normalized raw trades to Kafka. |
-| `processor/candle_processor.py` | Consumes raw trades, aggregates multi-timeframe candles, persists final base-interval candles, and publishes kline updates. |
-| `config.py` | Loads and validates required environment variables from `data_pipeline/.env`. |
-| `logger_config.py` | Provides structured logger setup for pipeline services. |
+| `producer/binance_producer.py` | Runs `BinanceCombinedProducer`, connects to Binance trade streams, validates raw trade price/volume, and publishes cleaned trades to Kafka. |
+| `processor/candle_processor.py` | Runs `CandleProcessor`, consumes raw trades, aggregates candles by symbol/interval, writes final `1m` candles to QuestDB, and publishes kline updates. |
+| `config.py` | Loads `data_pipeline/.env`, validates required config, parses symbols and intervals. |
+| `logger_config.py` | Configures stdout logging with timestamp, level, module name, and message. |
 
-## Setup
+## Run with Docker Compose
 
-Create and activate a Python virtual environment:
+From the repository root:
+
+```bash
+cp data_pipeline/.env.example data_pipeline/.env
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item data_pipeline\.env.example data_pipeline\.env
+```
+
+Fill `data_pipeline/.env`, then start the infrastructure and pipeline:
+
+```bash
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
+```
+
+Compose behavior:
+
+| Service | Behavior |
+| --- | --- |
+| `kafka-setup` | Reads `data_pipeline/.env`, waits for Kafka, creates raw trade and kline topics. |
+| `data-processor` | Overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb`, waits for QuestDB, then runs `python -m data_pipeline.processor.candle_processor`. |
+| `data-producer` | Overrides `KAFKA_BROKER=kafka:29092`, starts after Kafka setup and the processor, then runs `python -m data_pipeline.producer.binance_producer`. |
+
+Check logs:
+
+```bash
+docker compose logs -f data-producer data-processor
+```
+
+## Run Manually
+
+Start Kafka and QuestDB first:
+
+```bash
+docker compose up -d kafka kafka-ui kafka-setup questdb
+```
+
+Create a virtual environment from the repository root:
 
 ```bash
 python -m venv .venv
@@ -25,81 +67,69 @@ Windows PowerShell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m data_pipeline.processor.candle_processor
+```
+
+Open another terminal for the producer:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m data_pipeline.producer.binance_producer
 ```
 
 macOS/Linux:
 
 ```bash
 source .venv/bin/activate
-```
-
-Install dependencies from the repository root:
-
-```bash
 pip install -r requirements.txt
-```
-
-Create the environment file:
-
-```bash
-cp data_pipeline/.env.example data_pipeline/.env
-```
-
-Start Kafka and QuestDB:
-
-```bash
-docker compose up -d kafka kafka-ui kafka-setup questdb
-```
-
-Run the processor:
-
-```bash
 python -m data_pipeline.processor.candle_processor
 ```
 
-Run the Binance producer:
+Open another terminal:
 
 ```bash
+source .venv/bin/activate
 python -m data_pipeline.producer.binance_producer
-```
-
-Docker Compose can also run the pipeline services and their dependencies from the repository root:
-
-```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
 ```
 
 ## Environment Variables
 
-| Variable | Required | Example | Description |
+These names match `data_pipeline/.env.example` and `config.py`.
+
+| Variable | Required by code | Example | Notes |
 | --- | --- | --- | --- |
-| `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Binance WebSocket base URL. The current producer builds a combined stream URL from `TRADING_SYMBOLS`. |
-| `TRADING_SYMBOLS` | No | `BTCUSDT,ETHUSDT` | Comma-separated symbols to ingest. Defaults to `BTCUSDT` in `config.py` when not provided. |
-| `CANDLE_INTERVALS` | No | `<interval>,<interval>` | Comma-separated candle intervals managed by `MultiTimeframeManager`. Keep this aligned with backend validation and frontend selector configuration. |
-| `CANDLE_UPDATE_INTERVAL_MS` | No | `500` | Periodic non-final candle broadcast interval in milliseconds. Defaults to `500`. |
-| `KAFKA_BROKER` | Yes | `localhost:9092` | Kafka bootstrap server. Use `kafka:29092` inside Docker Compose services. |
-| `KAFKA_TOPIC_RAW_TRADES` | Yes | `raw-trades` | Topic receiving normalized raw Binance trade records. |
-| `KAFKA_TOPIC_KLINE_STREAM` | Yes | `kline-stream` | Topic receiving final and non-final candle updates. |
-| `QUESTDB_HOST` | Yes | `localhost` | QuestDB host. Use `questdb` inside Docker Compose services. |
-| `QUESTDB_PORT` | Yes | `8812` | QuestDB PostgreSQL wire port. |
+| `QUESTDB_HOST` | Yes | `localhost` | Use `questdb` inside the Compose network. |
+| `QUESTDB_PORT` | Yes | `8812` | PostgreSQL wire port. |
 | `QUESTDB_USER` | Yes | `admin` | QuestDB user. |
 | `QUESTDB_PASSWORD` | Yes | `quest` | QuestDB password. |
 | `QUESTDB_DB_NAME` | Yes | `qdb` | QuestDB database name. |
+| `KAFKA_BROKER` | Yes | `localhost:9092` | Use `kafka:29092` inside the Compose network. |
+| `KAFKA_TOPIC_RAW_TRADES` | Yes | `raw-trades` | Topic for normalized raw trades. |
+| `KAFKA_TOPIC_KLINE_STREAM` | Yes | `kline-stream` | Topic for candle updates. |
+| `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Loaded by config. The current producer still builds its combined stream URL with the Binance host hardcoded in `binance_producer.py`. |
+| `TRADING_SYMBOLS` | Effectively required in `.env` | `BTCUSDT,ETHUSDT` | If unset, code defaults to `BTCUSDT`; if present but blank, no symbols are produced. |
+| `CANDLE_INTERVALS` | Effectively required in `.env` | `1m,3m,5m,15m,30m,1h` | If unset, code defaults to all supported intervals; if present but blank, no interval managers are created. |
+| `CANDLE_UPDATE_INTERVAL_MS` | No | `500` | Defaults to `500`. Controls non-final candle publish cadence. |
 
-## BinanceCombinedProducer
-
-`BinanceCombinedProducer` is the ingestion entry point.
-
-It:
-
-1. Reads `TRADING_SYMBOLS`.
-2. Builds a Binance combined stream URL:
+Supported intervals:
 
 ```text
-wss://stream.binance.com:9443/stream?streams={symbol}@trade/{symbol}@trade
+1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 ```
 
-3. Normalizes Binance trade payloads into the internal raw trade contract:
+## Kafka Topics
+
+| Topic env | Producer | Consumer | Payload |
+| --- | --- | --- | --- |
+| `KAFKA_TOPIC_RAW_TRADES` | `BinanceCombinedProducer` | `CandleProcessor` | Normalized trade JSON. |
+| `KAFKA_TOPIC_KLINE_STREAM` | `CandleProcessor` | NestJS backend | Candle update JSON with `is_final`. |
+
+Compose creates both topics with 3 partitions and replication factor `1`.
+
+## Raw Trade Message Contract
+
+The producer publishes this shape to `KAFKA_TOPIC_RAW_TRADES`. The Kafka key is `symbol`.
 
 ```json
 {
@@ -112,52 +142,28 @@ wss://stream.binance.com:9443/stream?streams={symbol}@trade/{symbol}@trade
 }
 ```
 
-4. Publishes valid records to `KAFKA_TOPIC_RAW_TRADES` with the symbol as the Kafka key.
+Field source:
 
-Operational behavior:
-
-| Concern | Behavior |
+| Field | Source |
 | --- | --- |
-| Kafka startup | Retries producer creation with exponential backoff. |
-| Binance disconnects | Reconnects with bounded exponential backoff. |
-| Invalid trades | Drops zero or negative price/volume records. |
-| Publish failures | Logs asynchronous and immediate Kafka publish failures. |
+| `symbol` | Binance trade field `s`, uppercased. |
+| `trade_id` | Binance trade field `t`. |
+| `timestamp` | Binance trade field `T`, milliseconds since Unix epoch. |
+| `price` | Binance trade field `p`, converted to number. |
+| `volume` | Binance trade field `q`, converted to number. |
+| `is_buyer_maker` | Binance trade field `m`. |
 
-## CandleProcessor
+Trades with `price <= 0` or `volume <= 0` are dropped.
 
-`CandleProcessor` is the aggregation and storage entry point.
+## Kline Message Contract
 
-It:
-
-1. Consumes raw trades from `KAFKA_TOPIC_RAW_TRADES`.
-2. Converts Binance millisecond timestamps into UTC-aware Python `datetime` values.
-3. Creates one `MultiTimeframeManager` per symbol.
-4. Updates each configured `SingleCandleManager` in O(1) time.
-5. Broadcasts non-final candles every `CANDLE_UPDATE_INTERVAL_MS`.
-6. Persists final base-interval candles to QuestDB.
-7. Publishes final and non-final candles to `KAFKA_TOPIC_KLINE_STREAM`.
-
-### O(1) Aggregation
-
-`SingleCandleManager` stores only the active candle for a symbol/timeframe. Each trade updates:
-
-| Field | Update Rule |
-| --- | --- |
-| `open` | Set once when the interval starts. |
-| `high` | `max(current_high, trade_price)` |
-| `low` | `min(current_low, trade_price)` |
-| `close` | Latest trade price. |
-| `volume` | Running sum of trade volume. |
-
-No historical trade buffer is required for active candle updates.
-
-### Published Kline Contract
+The processor publishes this shape to `KAFKA_TOPIC_KLINE_STREAM`. The Kafka key is `symbol`.
 
 ```json
 {
   "timestamp": "2026-05-20T08:00:00+00:00",
   "symbol": "BTCUSDT",
-  "interval": "<interval>",
+  "interval": "1m",
   "open": 105000.5,
   "high": 105250.75,
   "low": 104900.25,
@@ -167,11 +173,30 @@ No historical trade buffer is required for active candle updates.
 }
 ```
 
-`is_final=false` updates are for realtime UI movement. `is_final=true` updates represent closed candles. Only final base-interval candles are written to QuestDB.
+`is_final=false` means the active candle is still updating. `is_final=true` means a trade crossed into a new interval and the previous candle is closed.
+
+Only final `1m` candles are inserted into QuestDB by the current code.
+
+## O(1) Candle Aggregation
+
+`SingleCandleManager` keeps only the active candle for one symbol and interval.
+
+For each trade:
+
+| Field | Update rule |
+| --- | --- |
+| `open` | Set once when a new candle starts. |
+| `high` | `max(current_high, trade_price)`. |
+| `low` | `min(current_low, trade_price)`. |
+| `close` | Set to the latest trade price. |
+| `volume` | Add the latest trade volume. |
+| `is_final` | Added when publishing. `true` for closed candles, `false` for timer-based active candle updates. |
+
+The processor does not keep a historical trade buffer to update the active candle.
 
 ## QuestDB Schema
 
-The processor verifies and creates the canonical candle table:
+`CandleProcessor` creates this table on startup:
 
 ```sql
 CREATE TABLE IF NOT EXISTS market_candles (
@@ -186,72 +211,52 @@ CREATE TABLE IF NOT EXISTS market_candles (
 ) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
 ```
 
-Storage rules:
+Insert behavior:
 
-| Rule | Description |
+| Rule | Current behavior |
 | --- | --- |
-| Authoritative table | `market_candles` |
-| Persisted interval | Final base-interval candles only |
-| Higher intervals | Derived by backend QuestDB `SAMPLE BY ... ALIGN TO CALENDAR` queries |
-| SQL casing | QuestDB keywords should be uppercase; table and column names should be lowercase snake_case. |
-| Inserts | Use parameter binding for candle values. |
+| Stored candles | Final `1m` candles only. |
+| Insert method | `psycopg2` through QuestDB PostgreSQL wire protocol. |
+| Values | Bound as query parameters. |
+| Offset commit | `consumer.commit()` runs after the insert succeeds. |
+| Failed insert | Retries 3 times; if still failing, the final `1m` candle is not published to the kline topic. |
 
 ## Timestamp and Timezone Rules
 
-Timestamps cross multiple boundaries and must remain explicit.
-
 | Boundary | Format |
 | --- | --- |
-| Binance trade input | Milliseconds since Unix epoch from Binance trade field `T`. |
-| Python processing | UTC-aware `datetime` via `datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)`. |
-| Kafka kline output | ISO 8601 string from `datetime.isoformat()`. |
-| QuestDB insert | Explicit timestamp string formatted as `%Y-%m-%d %H:%M:%S`. |
-| Backend/frontend output | ISO 8601 string. |
+| Binance input | Milliseconds since Unix epoch from trade field `T`. |
+| Python processing | UTC-aware `datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)`. |
+| Candle interval boundary | Truncated from the UTC `datetime`. |
+| Kafka kline output | ISO 8601 from `datetime.isoformat()`, for example `2026-05-20T08:00:00+00:00`. |
+| QuestDB insert | `%Y-%m-%d %H:%M:%S` string. |
 
-Do not pass ambiguous naive datetimes between layers. Invalid or suspicious timestamps should be dropped and logged before they reach QuestDB.
+The processor skips records with missing fields, non-positive price/volume, or timestamps before year 2020.
 
-## Local Operations
+## Failure Handling
 
-Inspect Kafka topics in Kafka UI:
+| Failure | Current behavior |
+| --- | --- |
+| Kafka producer or consumer not ready | Retry with exponential backoff, up to 60 attempts. |
+| Binance WebSocket closes or network drops | Reconnect with exponential backoff, up to 10 attempts. |
+| Invalid Binance payload | Log and skip. |
+| Invalid raw trade in processor | Skip if symbol, timestamp, price, or volume is missing or invalid. |
+| QuestDB connection startup fails | Processor startup fails. |
+| QuestDB insert fails | Retry 3 times, log failure, skip final publish for that persisted `1m` candle. |
+| Kafka kline publish fails | Retry publish, then log failure. |
 
-```text
-http://localhost:8080
-```
+## Boundary
 
-Inspect QuestDB:
+The data pipeline communicates through Kafka topics and QuestDB only.
 
-```text
-http://localhost:9000
-```
+It does not:
 
-Query stored candles:
+| Not owned here | Owner |
+| --- | --- |
+| Browser API | NestJS backend |
+| Frontend UI | React frontend |
+| REST validation and Swagger | NestJS backend |
+| Socket.IO fan-out | NestJS backend |
+| AI forecasting request path | Future isolated service |
 
-```sql
-SELECT *
-FROM market_candles
-WHERE symbol = 'BTCUSDT'
-ORDER BY timestamp DESC
-LIMIT 20;
-```
-
-Aggregate base-interval storage into requested intervals:
-
-```sql
-SELECT
-  timestamp,
-  symbol,
-  first(open) AS open,
-  max(high) AS high,
-  min(low) AS low,
-  last(close) AS close,
-  sum(volume) AS volume
-FROM market_candles
-WHERE symbol = 'BTCUSDT' AND interval = '<base_interval>'
-SAMPLE BY <interval> ALIGN TO CALENDAR
-ORDER BY timestamp DESC
-LIMIT 100;
-```
-
-## Pipeline Boundary
-
-The data pipeline should not expose browser APIs or run frontend/backend presentation logic. It communicates through Kafka topics and QuestDB only. Future AI services should consume from Kafka or QuestDB and publish forecasts to dedicated topics or storage contracts, never by coupling directly to this processor's in-memory state.
+Future replay buffers, model training, online learning, and forecasting services should consume Kafka or QuestDB contracts. They should not depend on `CandleProcessor` in-memory state.

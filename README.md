@@ -1,54 +1,75 @@
 # NexTick
 
-Low-latency cryptocurrency candle streaming with an isolated AI boundary.
+NexTick is a low-latency realtime cryptocurrency candle streaming system.
 
-NexTick ingests Binance trade ticks, transports them through Kafka, aggregates them into OHLCV candles in Python, persists authoritative historical candles in QuestDB, exposes validated REST and Socket.IO contracts through NestJS, and renders incremental updates in a React charting interface.
+It ingests Binance trade ticks, moves them through Kafka, aggregates OHLCV candles in Python, stores historical candles in QuestDB, exposes validated REST and Socket.IO contracts through NestJS, and renders realtime chart updates in a React UI.
 
-The project is deliberately split into operational boundaries. The API path is optimized for validation, historical reads, and realtime fan-out. AI, replay buffers, model training, online learning, and forecasting services are intentionally kept outside the NestJS request and Socket.IO flow.
+NexTick is a market data streaming and charting project. It is not a trading bot and does not provide financial advice.
+
+## Project Overview
+
+The repository is split into three application modules plus local infrastructure:
+
+1. `data_pipeline/` owns ingestion, candle aggregation, QuestDB writes, and Kafka publishing.
+2. `backend/` owns REST APIs, DTO validation, QuestDB reads, Kafka consumption, Swagger, and Socket.IO fan-out.
+3. `frontend/` owns the browser charting UI.
+4. Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, and `data-processor`.
+
+Kafka is the service boundary between the Python pipeline and the backend. QuestDB is the time-series store for historical candles.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  binance["Binance Combined Trade Streams"] --> producer["Python Data Producer: BinanceCombinedProducer"]
+  binance["Binance combined trade streams"] --> producer["Python producer"]
   producer --> raw[("Kafka raw trades topic")]
-  raw --> processor["Python Candle Processor: O(1) OHLCV aggregation"]
-  processor --> kline[("Kafka kline stream topic")]
+  raw --> processor["Python candle processor"]
   processor --> questdb[("QuestDB market_candles")]
-  questdb --> backend["NestJS Backend: REST API + Swagger"]
-  kline --> backend
-  backend --> socket["Socket.IO room fan-out"]
+  processor --> kline[("Kafka kline stream topic")]
+  questdb --> backend["NestJS REST API"]
+  kline --> backendSocket["NestJS Kafka consumer"]
+  backendSocket --> socket["Socket.IO room fan-out"]
   backend --> rest["GET /candles"]
-  socket --> frontend["React Frontend: Lightweight Charts"]
-  rest --> frontend
+  rest --> frontend["React chart UI"]
+  socket --> frontend
 
-  questdb -.-> ai["Isolated AI Services: Replay, GRU, Forecasting"]
-  kline -.-> ai
-  ai -.-> future["Forecast Consumers"]
+  questdb -. future extension .-> ai["AI/model services"]
+  kline -. future extension .-> ai
 ```
 
 ## Core Stack
 
-| Layer | Role | Main Technologies |
+| Area | Role | Main technologies |
 | --- | --- | --- |
-| `data_pipeline/` | Binance ingestion, O(1) candle aggregation, QuestDB persistence, Kafka publishing | Python, `kafka-python`, `websocket-client`, `psycopg2`, QuestDB |
-| `backend/` | API gateway, QuestDB querying, DTO validation, Swagger docs, Socket.IO fan-out | NestJS 11, TypeScript, KafkaJS, Socket.IO, `pg`, `class-validator` |
-| `frontend/` | High-performance realtime charting UI | React 19, Vite, TypeScript, Lightweight Charts, Socket.IO Client, Axios |
+| `data_pipeline/` | Binance ingestion, raw trade publishing, O(1) OHLCV aggregation, QuestDB persistence, kline publishing | Python 3.10, `kafka-python`, `websocket-client`, `psycopg2`, `python-dotenv` |
+| `backend/` | API gateway, validation, QuestDB queries, Kafka consumer, Socket.IO fan-out, Swagger | NestJS, TypeScript, KafkaJS, Socket.IO, `pg`, `class-validator`, Swagger |
+| `frontend/` | Realtime charting UI, REST history loading, Socket.IO updates | React, Vite, TypeScript, Lightweight Charts, Axios, Socket.IO Client, Tailwind CSS |
 | Infrastructure | Local streaming and storage runtime | Docker Compose, Kafka, Kafka UI, QuestDB |
 
 ## Runtime Flow
 
-1. `BinanceCombinedProducer` connects to Binance combined trade streams for `TRADING_SYMBOLS`.
-2. Raw trades are normalized and published to `KAFKA_TOPIC_RAW_TRADES`.
-3. `CandleProcessor` consumes raw trades and updates in-memory candle state in O(1) time per symbol/timeframe.
-4. Final `1m` candles are persisted to QuestDB table `market_candles`.
-5. Final and non-final candle updates are published to `KAFKA_TOPIC_KLINE_STREAM`.
-6. NestJS consumes kline updates, validates API/socket payloads, queries QuestDB for history, and fans out realtime updates by Socket.IO room.
-7. React loads historical candles once, joins the matching Socket.IO room, and applies realtime updates with `series.update()`.
+1. Binance emits trades through combined trade streams.
+2. The Python producer normalizes each trade.
+3. The producer publishes raw trades to `KAFKA_TOPIC_RAW_TRADES`.
+4. The Python candle processor consumes raw trades and updates active OHLCV candle state.
+5. Final `1m` candles are persisted to QuestDB table `market_candles`.
+6. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
+7. NestJS reads historical candles from QuestDB and consumes kline updates from Kafka.
+8. React loads history through REST, joins a Socket.IO room, and updates Lightweight Charts.
 
 ## Local Quickstart
 
+This repo does not have a root `package.json`. Run backend and frontend commands inside their own folders.
+
 Create environment files from the examples:
+
+```powershell
+Copy-Item data_pipeline\.env.example data_pipeline\.env
+Copy-Item backend\.env.example backend\.env
+Copy-Item frontend\.env.example frontend\.env
+```
+
+For macOS/Linux or Git Bash:
 
 ```bash
 cp data_pipeline/.env.example data_pipeline/.env
@@ -56,7 +77,7 @@ cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env
 ```
 
-Use local development values similar to:
+Use local values like these:
 
 ```env
 # data_pipeline/.env
@@ -70,7 +91,7 @@ KAFKA_TOPIC_RAW_TRADES=raw-trades
 KAFKA_TOPIC_KLINE_STREAM=kline-stream
 BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
-CANDLE_INTERVALS=1m,5m,15m,1h
+CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 CANDLE_UPDATE_INTERVAL_MS=500
 ```
 
@@ -96,18 +117,19 @@ BACKEND_URL=http://localhost:3000
 ```env
 # frontend/.env
 VITE_API_URL=http://localhost:3000
+VITE_API_HEALTH_URL=http://localhost:3000/health
 VITE_SOCKET_URL=http://localhost:3000
 VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
-VITE_CANDLE_INTERVALS=1m,5m,15m,1h
+VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ```
 
-Start Docker services first. This project currently has no root `package.json`, so run the backend and frontend from their own directories after Kafka, QuestDB, and the Python pipeline are up.
+Start Docker services first:
 
 ```bash
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
 ```
 
-Then start the backend. Do not start it before Docker infrastructure: the NestJS app opens QuestDB and Kafka connections during startup and exits if they are unavailable.
+Start the backend:
 
 ```bash
 cd backend
@@ -115,7 +137,7 @@ npm install
 npm run start:dev
 ```
 
-Finally start the frontend:
+Start the frontend:
 
 ```bash
 cd frontend
@@ -123,60 +145,85 @@ npm install
 npm run dev
 ```
 
-Default local URLs:
+## Default Local URLs
 
 | Service | URL |
 | --- | --- |
 | Frontend | `http://localhost:5173` |
 | Backend API | `http://localhost:3000` |
+| Backend health | `http://localhost:3000/health` |
 | Swagger UI | `http://localhost:3000/api/docs` |
-| QuestDB Console | `http://localhost:9000` |
 | Kafka UI | `http://localhost:8080` |
+| QuestDB Console | `http://localhost:9000` |
 
 ## Project Structure
 
 ```text
 NexTick/
+|-- backend/
+|   |-- src/
+|   |   |-- common/
+|   |   |-- modules/
+|   |   |   |-- candles/
+|   |   |   |-- database/
+|   |   |   `-- kafka/
+|   |   |-- app.module.ts
+|   |   `-- main.ts
+|   |-- package.json
+|   `-- README.md
 |-- data_pipeline/
 |   |-- producer/
 |   |   `-- binance_producer.py
 |   |-- processor/
 |   |   `-- candle_processor.py
 |   |-- config.py
+|   |-- logger_config.py
 |   `-- README.md
-|-- backend/
-|   |-- src/
-|   |   `-- modules/
-|   |       |-- candles/
-|   |       |-- database/
-|   |       `-- kafka/
-|   `-- README.md
+|-- docs/
+|   |-- architecture.md
+|   |-- overview.md
+|   `-- setup.md
 |-- frontend/
 |   |-- src/
 |   |   |-- components/
 |   |   |-- hooks/
+|   |   |-- pages/
 |   |   |-- services/
+|   |   |-- types/
 |   |   `-- utils/
+|   |-- package.json
 |   `-- README.md
 |-- docker-compose.yml
+|-- Dockerfile
 |-- requirements.txt
 `-- README.md
 ```
 
-## Boundary Rules
+## Module Summary
 
-| Rule | Reason |
+| Module | Current features |
 | --- | --- |
-| The frontend talks only to NestJS REST and Socket.IO. | Prevents browser coupling to Kafka, QuestDB, Binance, or model internals. |
-| NestJS does not ingest Binance streams or aggregate candles. | Keeps the gateway responsive and horizontally scalable. |
-| The Python pipeline owns ingestion, aggregation, persistence, and kline publishing. | Keeps streaming state and storage writes close to the data path. |
-| AI services are isolated from the API request path. | Training and forecasting can evolve independently without blocking market-data delivery. |
-| Kafka and QuestDB are the integration contracts. | Services communicate through explicit topics and persisted time-series data. |
+| `data_pipeline/` | Binance combined trade stream ingestion, raw trade Kafka publishing, multi-interval candle aggregation, final `1m` QuestDB writes, kline Kafka publishing. |
+| `backend/` | `GET /`, `GET /health`, `GET /candles`, Swagger at `/api/docs`, Kafka kline consumer, Socket.IO `join_kline_room`, `leave_kline_room`, and `kline_update`. |
+| `frontend/` | Realtime candlestick and volume chart, symbol/interval controls, EMA/MA overlays, OHLCV tooltip, `/terms` and `/privacy` static pages, footer API status using `VITE_API_HEALTH_URL`. |
 
-## Documentation
+## Documentation Index
 
 | File | Scope |
 | --- | --- |
-| [`data_pipeline/README.md`](data_pipeline/README.md) | Python ingestion, aggregation, Kafka, QuestDB schema, timestamp rules |
-| [`backend/README.md`](backend/README.md) | NestJS API, validation, QuestDB queries, Socket.IO events |
-| [`frontend/README.md`](frontend/README.md) | React charting, env config, realtime update strategy |
+| [`data_pipeline/README.md`](data_pipeline/README.md) | Python producer, processor, Kafka topics, QuestDB schema, timestamp rules |
+| [`backend/README.md`](backend/README.md) | NestJS modules, REST endpoints, DTO validation, QuestDB queries, Socket.IO events |
+| [`frontend/README.md`](frontend/README.md) | React chart UI, env config, REST and Socket.IO flow, chart update strategy |
+| [`docs/overview.md`](docs/overview.md) | High-level project explanation for new readers |
+| [`docs/architecture.md`](docs/architecture.md) | Detailed architecture, contracts, scaling, and future boundaries |
+| [`docs/setup.md`](docs/setup.md) | Step-by-step local setup and troubleshooting |
+
+## Boundary Rules
+
+| Rule | Current boundary |
+| --- | --- |
+| Frontend only talks to backend REST and Socket.IO. | It does not connect to Binance, Kafka, QuestDB, or model services. |
+| Backend is not the ingestion engine. | It does not connect to Binance and does not aggregate raw trades. |
+| Python pipeline owns the write path. | It ingests trades, aggregates candles, writes QuestDB, and publishes kline updates. |
+| Kafka and QuestDB are integration contracts. | Backend consumes processed kline updates from Kafka and reads history from QuestDB. |
+| AI/model services are future extensions. | Replay buffers, model training, online learning, and forecasting should consume Kafka or QuestDB outside the API request path. |

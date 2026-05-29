@@ -1,21 +1,23 @@
 # NexTick Setup
 
-This guide shows how to run NexTick locally. The project has no root `package.json`. The backend and frontend install Node packages inside their own folders. The Python pipeline uses the root `requirements.txt`.
+This guide runs NexTick locally with Docker Compose for Kafka, Kafka UI, QuestDB, and the Python data pipeline, plus local Node processes for the backend and frontend.
+
+The repository has no root `package.json`. Run backend and frontend commands inside their own folders.
 
 ## Requirements
 
-| Tool | Why it is needed |
+| Tool | Required for |
 | --- | --- |
-| Docker and Docker Compose | Runs Kafka, Kafka UI, QuestDB, the data producer, and the data processor. |
-| Node.js and npm | Runs the NestJS backend and Vite frontend. |
-| Python 3.10+ | Runs the Python data pipeline if you do not use containers for it. |
-| PowerShell, Git Bash, or another shell | Creates `.env` files and runs commands. |
+| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, and `data-processor`. |
+| Node.js and npm | NestJS backend and Vite frontend. |
+| Python 3.10+ | Manual data pipeline runs without pipeline containers. |
+| PowerShell, Git Bash, or another shell | Copying env files and running commands. |
 
-On Windows PowerShell, use `Copy-Item` if `cp` is not available.
+The Docker image for the pipeline uses `python:3.10-slim`.
 
-## 1. Create Environment Files
+## 1. Copy Environment Files
 
-From the repository root:
+From the repository root, Windows PowerShell:
 
 ```powershell
 Copy-Item data_pipeline\.env.example data_pipeline\.env
@@ -23,7 +25,7 @@ Copy-Item backend\.env.example backend\.env
 Copy-Item frontend\.env.example frontend\.env
 ```
 
-On macOS/Linux or Git Bash:
+macOS/Linux or Git Bash:
 
 ```bash
 cp data_pipeline/.env.example data_pipeline/.env
@@ -31,11 +33,9 @@ cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env
 ```
 
-## 2. Fill the `.env` Files
+## 2. Fill Environment Values
 
 ### `data_pipeline/.env`
-
-Use these values when the Python pipeline runs on your host machine:
 
 ```env
 QUESTDB_HOST=localhost
@@ -54,7 +54,9 @@ CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 CANDLE_UPDATE_INTERVAL_MS=500
 ```
 
-Docker Compose overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb` for `data-producer` and `data-processor`, so the file can keep the host values above.
+Docker Compose overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb` inside pipeline containers.
+
+`TRADING_SYMBOLS` and `CANDLE_INTERVALS` should not be blank. The code has defaults only when those variables are unset; a blank value in `.env` overrides the default with an empty list.
 
 ### `backend/.env`
 
@@ -79,20 +81,21 @@ FRONTEND_URL=http://localhost:5173
 BACKEND_URL=http://localhost:3000
 ```
 
-The backend connects to QuestDB and Kafka during startup. If those services are not ready, `npm run start:dev` will fail.
+The backend connects to QuestDB and Kafka during startup.
 
 ### `frontend/.env`
 
 ```env
 VITE_API_URL=http://localhost:3000
+VITE_API_HEALTH_URL=http://localhost:3000/health
 VITE_SOCKET_URL=http://localhost:3000
 VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ```
 
-`VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS` are read directly in `frontend/src/components/chart/chartConstants.ts` with `.split(',')`, so do not leave them empty.
+`VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS` are read directly with `.split(',')`, so leaving them empty or undefined can break chart startup.
 
-## 3. Start Docker Services and the Data Pipeline
+## 3. Start Docker Services
 
 From the repository root:
 
@@ -100,28 +103,26 @@ From the repository root:
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
 ```
 
-Services in `docker-compose.yml`:
-
-| Service | Role | Notes |
-| --- | --- | --- |
-| `kafka` | Local Kafka broker | Exposes `localhost:9092`; internal listener is `kafka:29092`. |
-| `kafka-setup` | Creates Kafka topics | Creates `KAFKA_TOPIC_RAW_TRADES` and `KAFKA_TOPIC_KLINE_STREAM`; uses `data_pipeline/.env`. |
-| `questdb` | Time-series database | Exposes Console `9000`, PostgreSQL wire `8812`, and ILP `9009`. |
-| `data-processor` | Reads raw trades, builds candles, writes QuestDB, sends kline updates | Waits for QuestDB before it starts. |
-| `data-producer` | Connects to Binance and sends raw trades | Starts after Kafka setup and the processor. |
-| `kafka-ui` | Kafka web UI | Runs at `http://localhost:8080`. |
-
 Check containers:
 
 ```bash
 docker compose ps
 ```
 
-View pipeline logs:
+View logs:
 
 ```bash
-docker compose logs -f data-producer data-processor
+docker compose logs -f kafka-setup data-processor data-producer
 ```
+
+Local service URLs:
+
+| Service | URL |
+| --- | --- |
+| Kafka UI | `http://localhost:8080` |
+| QuestDB Console | `http://localhost:9000` |
+| Kafka broker for host apps | `localhost:9092` |
+| QuestDB PostgreSQL wire for host apps | `localhost:8812` |
 
 ## 4. Start the Backend
 
@@ -133,21 +134,28 @@ npm install
 npm run start:dev
 ```
 
-Default URLs:
+Backend URLs:
 
-| Service | URL |
+| URL | Purpose |
 | --- | --- |
-| Backend API | `http://localhost:3000` |
-| Swagger UI | `http://localhost:3000/api/docs` |
-| Historical candles | `http://localhost:3000/candles?symbol=BTCUSDT&interval=1m&limit=100` |
+| `http://localhost:3000` | Backend API root. |
+| `http://localhost:3000/health` | Backend health endpoint. |
+| `http://localhost:3000/api/docs` | Swagger UI. |
+| `http://localhost:3000/candles?symbol=BTCUSDT&interval=1m&limit=100` | Historical candle API. |
 
-Quick check:
+Check health:
+
+```bash
+curl "http://localhost:3000/health"
+```
+
+Check candles:
 
 ```bash
 curl "http://localhost:3000/candles?symbol=BTCUSDT&interval=1m&limit=20"
 ```
 
-If `data` is empty, the pipeline may not have produced and saved a final `1m` candle yet. Wait at least one minute and check the processor logs.
+If `data` is empty, wait until the processor has saved at least one final `1m` candle.
 
 ## 5. Start the Frontend
 
@@ -159,35 +167,39 @@ npm install
 npm run dev
 ```
 
-Vite runs at:
+Open:
 
 ```text
 http://localhost:5173
 ```
 
-The frontend will:
+The frontend:
 
-1. Read symbols and intervals from `VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS`.
-2. Call `GET {VITE_API_URL}/candles?symbol=...&interval=...&limit=1000`.
-3. Draw history with `series.setData()`.
-4. Join Socket.IO room `{SYMBOL}_{interval}`.
-5. Receive `kline_update` and update the chart with `series.update()`.
+1. Reads symbols from `VITE_TRADING_SYMBOLS`.
+2. Reads intervals from `VITE_CANDLE_INTERVALS`.
+3. Calls `GET {VITE_API_URL}/candles?symbol=...&interval=...&limit=1000`.
+4. Draws history with `setData()`.
+5. Joins Socket.IO room `{SYMBOL}_{interval}`.
+6. Applies `kline_update` with `update()`.
+7. Checks `VITE_API_HEALTH_URL` for footer status.
 
-## 6. Run the Pipeline Without Containers
+## Optional: Run Pipeline Manually
 
-If you only want Kafka and QuestDB in Docker, start them first:
+Use this only if you want Kafka and QuestDB in Docker but the Python producer and processor on your host.
+
+Start infrastructure only:
 
 ```bash
 docker compose up -d kafka kafka-ui kafka-setup questdb
 ```
 
-Create a Python virtual environment from the repository root:
+Create a virtual environment from the repository root:
 
 ```bash
 python -m venv .venv
 ```
 
-Windows PowerShell:
+Windows PowerShell, processor terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -195,14 +207,14 @@ pip install -r requirements.txt
 python -m data_pipeline.processor.candle_processor
 ```
 
-Open another terminal, activate the same environment, and run the producer:
+Windows PowerShell, producer terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m data_pipeline.producer.binance_producer
 ```
 
-macOS/Linux:
+macOS/Linux, processor terminal:
 
 ```bash
 source .venv/bin/activate
@@ -210,7 +222,7 @@ pip install -r requirements.txt
 python -m data_pipeline.processor.candle_processor
 ```
 
-Open another terminal:
+macOS/Linux, producer terminal:
 
 ```bash
 source .venv/bin/activate
@@ -235,20 +247,25 @@ Frontend:
 cd frontend
 npm run build
 npm run lint
-npm run preview
 ```
 
-The Python pipeline does not have a test runner in this repository yet. Check it with Kafka logs, QuestDB data, and the backend API.
+Pipeline operational checks:
 
-## Check Data
+```bash
+docker compose logs -f data-producer data-processor
+```
 
-QuestDB Console:
+Use Kafka UI to inspect topics:
+
+```text
+http://localhost:8080
+```
+
+Use QuestDB Console to query stored candles:
 
 ```text
 http://localhost:9000
 ```
-
-Query final `1m` candles:
 
 ```sql
 SELECT *
@@ -258,48 +275,20 @@ ORDER BY timestamp DESC
 LIMIT 20;
 ```
 
-Query `5m` candles from stored `1m` data:
-
-```sql
-SELECT
-  timestamp,
-  symbol,
-  first(open) AS open,
-  max(high) AS high,
-  min(low) AS low,
-  last(close) AS close,
-  sum(volume) AS volume
-FROM market_candles
-WHERE symbol = 'BTCUSDT' AND interval = '1m'
-SAMPLE BY 5m ALIGN TO CALENDAR
-ORDER BY timestamp DESC
-LIMIT 100;
-```
-
-Kafka UI:
-
-```text
-http://localhost:8080
-```
-
-Topics to check:
-
-| Topic | Data |
-| --- | --- |
-| `raw-trades` | Clean Binance trades. |
-| `kline-stream` | Final and open candles from the processor. |
-
 ## Troubleshooting
 
 | Problem | Likely cause | Fix |
 | --- | --- | --- |
-| Backend fails on startup | Kafka or QuestDB is not ready | Run `docker compose ps`, wait for healthy services, then start the backend again. |
-| `GET /candles` returns `data: []` | No final `1m` candle has been saved yet | Wait at least one minute, then check `data-processor` logs and the QuestDB table. |
-| Frontend has no symbol or interval options | `frontend/.env` is missing `VITE_TRADING_SYMBOLS` or `VITE_CANDLE_INTERVALS` | Fill comma-separated values and restart Vite. |
-| Socket.IO CORS error | `FRONTEND_URL` or `BACKEND_URL` is wrong | Update `backend/.env` and restart the backend. |
-| Kafka topic does not exist | `kafka-setup` did not finish, or topic env values are empty | Fill `data_pipeline/.env` and run `docker compose up -d kafka-setup`. |
-| Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs. The container uses DNS `8.8.8.8` and `8.8.4.4`. |
-| Interval request returns 400 | The interval is not in the backend allowlist | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
+| Kafka is not ready | Broker is still starting or `kafka-setup` has not completed | Run `docker compose ps` and `docker compose logs -f kafka kafka-setup`. |
+| QuestDB is not ready | QuestDB healthcheck has not passed | Check `http://localhost:9000` or `docker compose logs -f questdb`. |
+| Backend startup failed | Kafka or QuestDB is unavailable, or env values are blank | Confirm Docker services are healthy and `backend/.env` is filled. |
+| Frontend does not load data | Backend is down, `VITE_API_URL` is wrong, or no candles exist yet | Check `/health`, `/candles`, and frontend `.env`; wait for a final `1m` candle. |
+| Footer shows `Offline` | `VITE_API_HEALTH_URL` is missing or backend `/health` is unreachable | Set `VITE_API_HEALTH_URL=http://localhost:3000/health` and restart Vite. |
+| Socket.IO CORS error | `FRONTEND_URL` or `BACKEND_URL` does not match the browser/backend origin | Update `backend/.env` and restart NestJS. |
+| `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after trades start. |
+| Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs; Compose sets DNS to `8.8.8.8` and `8.8.4.4`. |
+| Interval returns 400 | Interval is not in backend `VALID_INTERVALS` | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
+| Topics are missing | `data_pipeline/.env` topic names are blank or `kafka-setup` did not finish | Fill env values and run `docker compose up -d kafka-setup`. |
 
 ## Stop Local Services
 
@@ -309,4 +298,4 @@ Stop containers:
 docker compose down
 ```
 
-Kafka data is stored in the named volume `kafka_data`. QuestDB data is stored in `data/questdb`. Delete those only if you want to remove local data.
+Kafka data is stored in Docker volume `kafka_data`. QuestDB data is stored under `data/questdb`.

@@ -1,147 +1,100 @@
 # NexTick Overview
 
-NexTick is a real-time crypto candle streaming project. It reads Binance trade ticks, sends them through Kafka, builds OHLCV candles in Python, stores historical candles in QuestDB, serves REST and Socket.IO from NestJS, and shows the chart in a React app.
+NexTick is a realtime cryptocurrency candle streaming and charting system.
 
-The project keeps each part separate. The backend does not connect to Binance or build candles from raw trades. The frontend does not connect directly to Kafka, QuestDB, or Binance. This makes the system easier to run, test, and extend later.
+It reads Binance trade ticks, transports them through Kafka, builds OHLCV candles in Python, stores historical candles in QuestDB, serves REST and Socket.IO through NestJS, and renders the market stream in a React chart UI.
 
-## Main Parts
+NexTick is not a trading bot and does not provide financial advice.
 
-| Folder | Role | Main tools |
-| --- | --- | --- |
-| `data_pipeline/` | Reads Binance trades, sends raw trades to Kafka, builds candles, stores final `1m` candles in QuestDB, sends live candle updates | Python, `kafka-python`, `websocket-client`, `psycopg2`, QuestDB |
-| `backend/` | Provides REST API, reads QuestDB, consumes Kafka candle updates, sends Socket.IO updates, validates input, serves Swagger docs | NestJS, TypeScript, KafkaJS, Socket.IO, `pg`, `class-validator`, Swagger |
-| `frontend/` | Shows the real-time chart, loads history through REST, listens to Socket.IO updates | React, Vite, TypeScript, Lightweight Charts, Axios, Socket.IO Client |
-| Infrastructure | Runs local streaming and storage services | Docker Compose, Kafka, Kafka UI, QuestDB |
+## Problem It Solves
 
-## Data Flow
+Realtime charting needs separate concerns:
 
-1. `BinanceCombinedProducer` connects to Binance combined trade streams for `TRADING_SYMBOLS`.
-2. The producer cleans each trade and sends it to Kafka topic `KAFKA_TOPIC_RAW_TRADES`.
-3. `CandleProcessor` reads raw trades and creates candle state per symbol and interval.
-4. Open candles are sent on a timer using `CANDLE_UPDATE_INTERVAL_MS` with `is_final=false`.
-5. When an interval closes, the candle is sent with `is_final=true`. Final `1m` candles are also saved in QuestDB table `market_candles`.
-6. The backend reads `KAFKA_TOPIC_KLINE_STREAM`, emits an internal `candle.update` event, then sends Socket.IO `kline_update` to room `{SYMBOL}_{interval}`.
-7. The frontend calls `GET /candles` for history, joins the matching Socket.IO room, and updates the chart with `series.update()`.
+| Concern | NexTick boundary |
+| --- | --- |
+| High-frequency trade ingestion | Python producer reads Binance combined trade streams. |
+| Candle construction | Python processor updates active OHLCV state. |
+| Historical reads | QuestDB stores final `1m` candles. |
+| Browser API | NestJS validates REST and Socket.IO contracts. |
+| Chart rendering | React and Lightweight Charts handle browser rendering. |
+
+This keeps the browser away from Kafka, QuestDB, Binance credentials, and streaming internals.
+
+## Main Modules
+
+| Module | Role |
+| --- | --- |
+| [`data_pipeline/`](../data_pipeline/README.md) | Binance ingestion, Kafka raw trade publishing, O(1) candle aggregation, QuestDB writes, kline publishing. |
+| [`backend/`](../backend/README.md) | NestJS API gateway, DTO validation, QuestDB queries, Kafka kline consumer, Socket.IO fan-out, Swagger. |
+| [`frontend/`](../frontend/README.md) | React chart UI, REST history loading, Socket.IO realtime updates, static `/terms` and `/privacy` pages. |
+| Infrastructure | Docker Compose services for Kafka, Kafka UI, QuestDB, producer, and processor. |
+
+## End-to-End Data Flow
+
+1. Binance emits trade ticks over combined trade streams.
+2. `BinanceCombinedProducer` normalizes each trade.
+3. The producer publishes raw trade JSON to `KAFKA_TOPIC_RAW_TRADES`.
+4. `CandleProcessor` consumes raw trades and updates one active candle per symbol/interval.
+5. Final `1m` candles are inserted into QuestDB table `market_candles`.
+6. Final and non-final candle updates are published to `KAFKA_TOPIC_KLINE_STREAM`.
+7. `KafkaService` in the backend consumes kline updates and emits internal `candle.update` events.
+8. `CandlesGateway` sends Socket.IO `kline_update` to rooms like `BTCUSDT_1m`.
+9. The frontend loads history from `GET /candles`, joins the room, and updates Lightweight Charts.
 
 ## Current Features
 
-| Feature | Description |
+| Feature | Current implementation |
 | --- | --- |
-| Historical candles | `GET /candles?symbol=BTCUSDT&interval=1m&limit=100` returns candles from oldest to newest. |
-| Many intervals | Supported intervals are `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `3d`, `1w`, `1M`. |
-| Live candles | Socket.IO event `kline_update` sends both open and final candles. |
-| Chart UI | Candlestick chart, volume bars, symbol selector, interval selector, OHLCV tooltip, scroll-to-latest button, EMA/MA legend. |
-| API docs | Swagger UI is available at `/api/docs`. |
-| Local tools | Kafka UI is at `http://localhost:8080`; QuestDB Console is at `http://localhost:9000`. |
+| Binance trade ingestion | `data_pipeline/producer/binance_producer.py`. |
+| Raw trade Kafka topic | Configured by `KAFKA_TOPIC_RAW_TRADES`. |
+| Candle aggregation | O(1) active candle updates in `SingleCandleManager`. |
+| QuestDB storage | Final `1m` candles in `market_candles`. |
+| Historical REST API | `GET /candles?symbol=BTCUSDT&interval=1m&limit=100`. |
+| Health endpoint | `GET /health`. |
+| Swagger UI | `/api/docs`. |
+| Realtime Socket.IO | `join_kline_room`, `leave_kline_room`, `kline_update`. |
+| Chart UI | Candlesticks, volume, symbol/interval controls, OHLCV tooltip, scroll-to-latest, EMA/MA overlays. |
+| Static legal pages | `/terms` and `/privacy` in the frontend. |
+| API status | Frontend footer checks `VITE_API_HEALTH_URL`. |
 
-## Main Data Shapes
-
-### Raw Trade Kafka Message
-
-`data_pipeline/producer/binance_producer.py` sends raw trades to `KAFKA_TOPIC_RAW_TRADES`. The Kafka key is the symbol.
-
-```json
-{
-  "symbol": "BTCUSDT",
-  "trade_id": 123456789,
-  "timestamp": 1779254400000,
-  "price": 105000.5,
-  "volume": 0.125,
-  "is_buyer_maker": false
-}
-```
-
-### Kline Kafka and Socket.IO Message
-
-`CandleProcessor` sends final and open candles to `KAFKA_TOPIC_KLINE_STREAM`. The backend forwards this data through Socket.IO event `kline_update`.
-
-```json
-{
-  "timestamp": "2026-05-20T08:00:00+00:00",
-  "symbol": "BTCUSDT",
-  "interval": "1m",
-  "open": 105000.5,
-  "high": 105250.75,
-  "low": 104900.25,
-  "close": 105120.1,
-  "volume": 12.34567,
-  "is_final": false
-}
-```
-
-### REST Response
-
-`GET /candles` returns this shape:
-
-```json
-{
-  "success": true,
-  "symbol": "BTCUSDT",
-  "interval": "1m",
-  "count": 100,
-  "data": [
-    {
-      "timestamp": "2026-05-20T08:00:00.000Z",
-      "symbol": "BTCUSDT",
-      "interval": "1m",
-      "open": 105000.5,
-      "high": 105250.75,
-      "low": 104900.25,
-      "close": 105120.1,
-      "volume": 12.34567
-    }
-  ]
-}
-```
-
-## Project Rules
-
-| Rule | Reason |
-| --- | --- |
-| The frontend only talks to NestJS REST and Socket.IO. | The browser should not depend on Kafka, QuestDB, Binance, or model code. |
-| The backend does not read Binance streams or build candles from raw trades. | The backend stays focused on API, validation, database reads, and sending live updates. |
-| The Python pipeline owns the market data write path. | Streaming state and database writes stay close to the data source. |
-| QuestDB stores final `1m` candles in the current flow. | The backend can build larger intervals from `1m` data with `SAMPLE BY`. |
-| Intervals must be checked against the allowed list. | The backend places the interval into `SAMPLE BY ${interval}`, so it must be checked first. |
-| AI and model services stay outside the API request path. | Training and forecasts should not slow down candle delivery. |
-
-## Repository Layout
+Supported intervals in code:
 
 ```text
-NexTick/
-|-- backend/
-|   |-- src/
-|   |   |-- modules/
-|   |   |   |-- candles/
-|   |   |   |-- database/
-|   |   |   `-- kafka/
-|   |   |-- common/
-|   |   `-- main.ts
-|   |-- package.json
-|   `-- README.md
-|-- data_pipeline/
-|   |-- producer/
-|   |   `-- binance_producer.py
-|   |-- processor/
-|   |   `-- candle_processor.py
-|   |-- config.py
-|   |-- logger_config.py
-|   `-- README.md
-|-- frontend/
-|   |-- src/
-|   |   |-- components/
-|   |   |-- hooks/
-|   |   |-- services/
-|   |   |-- types/
-|   |   `-- utils/
-|   |-- package.json
-|   `-- README.md
-|-- docs/
-|   |-- architecture.md
-|   |-- overview.md
-|   `-- setup.md
-|-- docker-compose.yml
-|-- Dockerfile
-|-- requirements.txt
-`-- README.md
+1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 ```
+
+## Out of Scope
+
+These are intentionally not implemented as current runtime features:
+
+| Item | Status |
+| --- | --- |
+| Trading execution | Out of scope. NexTick does not place orders. |
+| Financial advice | Out of scope. The UI shows market data only. |
+| Browser access to Kafka or QuestDB | Out of scope. Browser traffic goes through the backend. |
+| Backend Binance ingestion | Out of scope. Python owns ingestion. |
+| Backend raw trade aggregation | Out of scope. Python owns candle aggregation. |
+| AI forecasting | Future extension only. |
+| Replay buffer, model training, online learning | Future extension only. |
+
+## Project Boundaries
+
+| Boundary | Rule |
+| --- | --- |
+| Frontend | Calls only NestJS REST and Socket.IO. |
+| Backend | Reads QuestDB, consumes kline Kafka, validates DTOs, and fans out Socket.IO. |
+| Data pipeline | Owns Binance ingestion, Kafka raw trade publishing, aggregation, QuestDB writes, and kline publishing. |
+| Kafka | Integration contract between pipeline and backend. |
+| QuestDB | Historical candle store. |
+| AI/model services | Future services should consume Kafka or QuestDB and stay outside the current API request path. |
+
+## Documentation
+
+| Document | Scope |
+| --- | --- |
+| [Root README](../README.md) | Main repository overview and quickstart. |
+| [Architecture](architecture.md) | Detailed runtime boundaries, contracts, storage, and scaling notes. |
+| [Setup](setup.md) | Local setup and troubleshooting. |
+| [Data pipeline README](../data_pipeline/README.md) | Python producer and processor details. |
+| [Backend README](../backend/README.md) | NestJS endpoints, modules, Kafka, QuestDB, and Socket.IO. |
+| [Frontend README](../frontend/README.md) | React UI, env config, REST and realtime chart flow. |

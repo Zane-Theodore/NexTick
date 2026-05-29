@@ -1,50 +1,81 @@
 # NexTick Backend
 
-NestJS API gateway for historical candle queries, QuestDB access, Kafka kline consumption, and Socket.IO realtime fan-out.
+`backend/` is the NestJS API gateway for NexTick.
 
-The backend is intentionally not an ingestion engine, candle aggregation engine, or AI runtime. Its job is to validate contracts, query the authoritative time-series store, consume already-processed candle updates, and distribute them to connected clients.
+It validates public contracts, reads historical candles from QuestDB, exposes REST and Swagger, consumes processed kline updates from Kafka, and fans those updates out to browsers through Socket.IO.
+
+The backend is not an ingestion engine. It does not connect to Binance and does not aggregate raw trades into candles.
 
 ## Responsibilities
 
 | Capability | Implementation |
 | --- | --- |
-| Historical candles | `GET /candles` through `CandlesController` and `CandlesService` |
-| QuestDB access | `DatabaseService` using `pg.Pool` over QuestDB PostgreSQL wire protocol |
-| Realtime ingestion | `KafkaService` consuming `KAFKA_TOPIC_KLINE_STREAM` with KafkaJS |
-| Realtime fan-out | `CandlesGateway` emitting Socket.IO `kline_update` events to symbol/interval rooms |
-| Validation | Global `ValidationPipe`, DTO classes, `class-validator`, `class-transformer` |
-| API documentation | Swagger UI at `/api/docs` |
+| REST API | `AppController` and `CandlesController`. |
+| Health check | `GET /health` returns `{ status, timestamp }`. |
+| Historical candles | `GET /candles` queries QuestDB through `CandlesService`. |
+| Swagger | Registered at `/api/docs` in `main.ts`. |
+| Validation | Global `ValidationPipe` plus DTO classes. |
+| QuestDB access | `DatabaseService` uses `pg.Pool` over QuestDB PostgreSQL wire protocol. |
+| Kafka consumption | `KafkaService` consumes `KAFKA_TOPIC_KLINE_STREAM` with KafkaJS. |
+| Realtime fan-out | `CandlesGateway` emits Socket.IO `kline_update` events to symbol/interval rooms. |
 
-## Setup
+## Module Structure
 
-Start the required Docker infrastructure from the repository root before running the backend:
+```text
+backend/src/
+|-- app.controller.ts
+|-- app.module.ts
+|-- app.service.ts
+|-- main.ts
+|-- common/
+|   `-- logger.ts
+`-- modules/
+    |-- candles/
+    |   |-- candles.controller.ts
+    |   |-- candles.gateway.ts
+    |   |-- candles.module.ts
+    |   |-- candles.service.ts
+    |   |-- dto/
+    |   `-- enum/
+    |-- database/
+    |   |-- database.module.ts
+    |   `-- database.service.ts
+    `-- kafka/
+        |-- kafka.module.ts
+        `-- kafka.service.ts
+```
+
+## Local Setup
+
+Start Docker infrastructure from the repository root before starting the backend:
 
 ```bash
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
 ```
 
-The backend connects to QuestDB and Kafka during application startup. If those services are not ready, `npm run start:dev` fails instead of starting in a partially connected state.
-
-Install dependencies:
+Create and fill the backend env file:
 
 ```bash
 cd backend
-npm install
-```
-
-Create the environment file:
-
-```bash
 cp .env.example .env
-```
-
-Start the development server:
-
-```bash
+npm install
 npm run start:dev
 ```
 
-Useful commands:
+On Windows PowerShell:
+
+```powershell
+cd backend
+Copy-Item .env.example .env
+npm install
+npm run start:dev
+```
+
+The app opens QuestDB and Kafka connections during startup. If either service is unavailable, startup fails instead of running partially connected.
+
+## Useful Commands
+
+These scripts come from `backend/package.json`:
 
 ```bash
 npm run build
@@ -53,53 +84,79 @@ npm run test
 npm run test:e2e
 ```
 
-Default local endpoints:
-
-| Endpoint | URL |
-| --- | --- |
-| REST API | `http://localhost:3000` |
-| Swagger UI | `http://localhost:3000/api/docs` |
-| Historical candles | `GET http://localhost:3000/candles?symbol=BTCUSDT&interval=<interval>&limit=100` |
-| Socket.IO | `http://localhost:3000` |
-
 ## Environment Variables
 
-| Variable | Required | Example | Description |
+These names match `backend/.env.example` and the current code.
+
+| Variable | Required | Example | Used by |
 | --- | --- | --- | --- |
-| `QUESTDB_HOST` | Yes | `localhost` | QuestDB PostgreSQL wire host. Use `questdb` when running inside the Docker Compose network. |
-| `QUESTDB_PORT` | Yes | `8812` | QuestDB PostgreSQL wire port. |
-| `QUESTDB_USER` | Yes | `admin` | QuestDB user. |
-| `QUESTDB_PASSWORD` | Yes | `quest` | QuestDB password. |
-| `QUESTDB_DB_NAME` | Yes | `qdb` | QuestDB database name. |
-| `QUESTDB_POOL_MAX` | Yes | `10` | Maximum number of database connections in the backend pool. |
-| `QUESTDB_POOL_TIMEOUT` | Yes | `5000` | Connection timeout in milliseconds for `pg.Pool`. |
-| `QUESTDB_POOL_IDLE_TIMEOUT` | Yes | `30000` | Idle connection timeout in milliseconds. |
-| `KAFKA_BROKER` | Yes | `localhost:9092` | Comma-separated Kafka broker list. |
-| `KAFKA_TOPIC_KLINE_STREAM` | Yes | `kline-stream` | Topic containing final and non-final candle updates from the Python processor. |
-| `KAFKA_CLIENT_ID` | Yes | `nextick-backend` | KafkaJS client ID. |
-| `KAFKA_GROUP_ID` | Yes | `nextick-backend-group` | Kafka consumer group ID for backend kline consumption. |
+| `QUESTDB_HOST` | Yes | `localhost` | `DatabaseService` |
+| `QUESTDB_PORT` | Yes | `8812` | `DatabaseService` |
+| `QUESTDB_USER` | Yes | `admin` | `DatabaseService` |
+| `QUESTDB_PASSWORD` | Yes | `quest` | `DatabaseService` |
+| `QUESTDB_DB_NAME` | Yes | `qdb` | `DatabaseService` |
+| `QUESTDB_POOL_MAX` | Yes | `10` | `pg.Pool.max` |
+| `QUESTDB_POOL_TIMEOUT` | Yes | `5000` | `pg.Pool.connectionTimeoutMillis` |
+| `QUESTDB_POOL_IDLE_TIMEOUT` | Yes | `30000` | `pg.Pool.idleTimeoutMillis` |
+| `KAFKA_BROKER` | Yes | `localhost:9092` | KafkaJS broker list, split by comma. |
+| `KAFKA_TOPIC_KLINE_STREAM` | Yes | `kline-stream` | Kafka topic consumed by the backend. |
+| `KAFKA_CLIENT_ID` | Yes | `nextick-backend` | KafkaJS client id. |
+| `KAFKA_GROUP_ID` | Yes | `nextick-backend-group` | Kafka consumer group id. |
 | `PORT` | Yes | `3000` | NestJS listen port. |
-| `FRONTEND_URL` | Yes | `http://localhost:5173` | Allowed browser origin for REST and Socket.IO CORS. |
-| `BACKEND_URL` | Yes | `http://localhost:3000` | Public backend URL used in logs and Socket.IO CORS allowlist. |
+| `FRONTEND_URL` | Yes | `http://localhost:5173` | REST CORS and Socket.IO CORS allowlist. |
+| `BACKEND_URL` | Yes | `http://localhost:3000` | Log output and Socket.IO CORS allowlist. |
 
-## REST API
+## REST Endpoints
 
-### `GET /candles`
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/` | Returns the current `AppService.getHello()` string: `Hello World!`. |
+| `GET` | `/health` | Returns service health metadata. |
+| `GET` | `/candles` | Returns historical candle data from QuestDB. |
 
-Returns historical candles sorted from oldest to newest.
+Swagger UI:
 
-Query parameters:
+```text
+http://localhost:3000/api/docs
+```
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `symbol` | `string` | Required | Trading pair, transformed to uppercase by `CandlesQueryDto`. |
-| `interval` | `CandleInterval` | Configured default | Allowlisted candle interval. |
-| `limit` | `number` | `100` | Number of candles to return, constrained from `1` to `1000`. |
+### `GET /health`
 
 Example:
 
 ```bash
-curl "http://localhost:3000/candles?symbol=BTCUSDT&interval=<interval>&limit=200"
+curl "http://localhost:3000/health"
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-05-20T08:00:00.000Z"
+}
+```
+
+### `GET /candles`
+
+Example:
+
+```bash
+curl "http://localhost:3000/candles?symbol=BTCUSDT&interval=1m&limit=100"
+```
+
+Query parameters:
+
+| Parameter | Required | Default | Validation |
+| --- | --- | --- | --- |
+| `symbol` | Yes | None | String, not empty, transformed to uppercase. |
+| `interval` | No | `1m` | Must be one of the backend allowlisted intervals. |
+| `limit` | No | `100` | Integer from `1` to `1000`. |
+
+Supported intervals:
+
+```text
+1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 ```
 
 Response shape:
@@ -108,13 +165,13 @@ Response shape:
 {
   "success": true,
   "symbol": "BTCUSDT",
-  "interval": "<interval>",
-  "count": 200,
+  "interval": "1m",
+  "count": 1,
   "data": [
     {
       "timestamp": "2026-05-20T08:00:00.000Z",
       "symbol": "BTCUSDT",
-      "interval": "<interval>",
+      "interval": "1m",
       "open": 105000.5,
       "high": 105250.75,
       "low": 104900.25,
@@ -125,9 +182,55 @@ Response shape:
 }
 ```
 
+## QuestDB Query Behavior
+
+`CandlesService` reads from `market_candles`, where the pipeline currently stores final `1m` candles.
+
+The backend aggregates the stored `1m` rows into the requested interval:
+
+```sql
+SELECT
+  timestamp,
+  symbol,
+  '${interval}' AS interval,
+  first(open) AS open,
+  max(high) AS high,
+  min(low) AS low,
+  last(close) AS close,
+  sum(volume) AS volume
+FROM market_candles
+WHERE symbol = $1 AND interval = '1m'
+SAMPLE BY ${interval} ALIGN TO CALENDAR
+ORDER BY timestamp DESC
+LIMIT $2;
+```
+
+The service reverses returned rows so API clients receive candles from oldest to newest.
+
+Security notes:
+
+| Concern | Current handling |
+| --- | --- |
+| `interval` SQL fragment | Checked against `VALID_INTERVALS` before interpolation into `SAMPLE BY`. |
+| `symbol` | Uppercased, stripped to `[A-Z0-9]`, then passed as `$1`. |
+| `limit` | DTO-constrained to `1..1000`, then passed as `$2`. |
+
+## Kafka Consumer Behavior
+
+`KafkaService`:
+
+1. Creates a KafkaJS client with `KAFKA_CLIENT_ID` and `KAFKA_BROKER`.
+2. Creates one consumer with `KAFKA_GROUP_ID`.
+3. Subscribes to `KAFKA_TOPIC_KLINE_STREAM` with `fromBeginning: false`.
+4. Parses each message as JSON.
+5. Skips empty values and messages missing required candle fields.
+6. Emits an internal `candle.update` event through `EventEmitter2`.
+
+The backend consumes processed candle updates only. It does not consume raw trades.
+
 ## Socket.IO Events
 
-Rooms use this format:
+Room format:
 
 ```text
 {SYMBOL}_{interval}
@@ -136,22 +239,22 @@ Rooms use this format:
 Example:
 
 ```text
-BTCUSDT_<interval>
+BTCUSDT_1m
 ```
 
-| Event | Direction | Payload | Description |
+| Event | Direction | Payload | Behavior |
 | --- | --- | --- | --- |
-| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "<interval>" }` | Subscribes the socket to a symbol/interval room. |
-| `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "<interval>" }` | Removes the socket from a symbol/interval room. |
-| `kline_update` | Server to client | `KlineUpdateDto` | Emits a final or non-final candle update to subscribed clients. |
+| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Joins the socket to `BTCUSDT_1m`. |
+| `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Leaves the matching room. |
+| `kline_update` | Server to client | `KlineUpdateDto` | Sent to the room matching the candle symbol and interval. |
 
 `kline_update` payload:
 
 ```json
 {
-  "timestamp": "2026-05-20T08:00:00.000Z",
+  "timestamp": "2026-05-20T08:00:00+00:00",
   "symbol": "BTCUSDT",
-  "interval": "<interval>",
+  "interval": "1m",
   "open": 105000.5,
   "high": 105250.75,
   "low": 104900.25,
@@ -161,23 +264,19 @@ BTCUSDT_<interval>
 }
 ```
 
-Internally, `KafkaService` emits `candle.update` on the application event bus. `CandlesGateway` listens for that internal event and emits `kline_update` to the matching Socket.IO room.
+Socket.IO CORS allows `BACKEND_URL`, `FRONTEND_URL`, and requests without an `origin`.
 
-## Key Architectural Rules
-
-### DTO Validation
-
-Every public contract should be represented by a DTO:
+## DTO Validation
 
 | Contract | DTO |
 | --- | --- |
-| REST query | `CandlesQueryDto` |
-| REST response | `CandlesResponseDto` |
-| Candle payload | `CandleDto` |
+| REST candle query | `CandlesQueryDto` |
+| REST candle item | `CandleDto` |
+| REST candle response | `CandlesResponseDto` |
 | Socket room payload | `KlineRoomPayloadDto` |
 | Realtime candle update | `KlineUpdateDto` |
 
-The application enables a global `ValidationPipe` with:
+The app enables a global pipe:
 
 ```ts
 new ValidationPipe({
@@ -186,48 +285,15 @@ new ValidationPipe({
 })
 ```
 
-Socket.IO gateway payloads also use `ValidationPipe`.
+Socket gateway payloads also use `ValidationPipe`.
 
-### Swagger Docs
+## Security and Boundary Notes
 
-DTO fields must be decorated with `@ApiProperty()` or `@ApiPropertyOptional()` so the contract is visible in Swagger.
-
-Swagger UI is registered at:
-
-```text
-/api/docs
-```
-
-### Defensive Transform
-
-Transforms must tolerate missing and empty values. Numeric coercion should follow the current pattern:
-
-```ts
-@Transform(({ value }) =>
-  value === undefined || value === '' ? undefined : Number(value),
-)
-```
-
-This prevents optional query fields from throwing during transformation before validation can produce a clear response.
-
-### QuestDB Query Safety
-
-`CandlesService` reads from `market_candles` and uses QuestDB aggregation:
-
-```sql
-SAMPLE BY ${interval} ALIGN TO CALENDAR
-```
-
-Because QuestDB SQL fragments such as `SAMPLE BY <interval>` cannot be parameterized like scalar values, intervals must be allowlisted before interpolation. User-controlled scalar values such as `symbol` and `limit` must be parameterized.
-
-## Backend Boundary
-
-The backend must not:
-
-| Do Not | Owner |
+| Rule | Reason |
 | --- | --- |
-| Connect to Binance WebSocket | Python data pipeline |
-| Aggregate raw trades into candles | Python `CandleProcessor` |
-| Persist final candles from raw trades | Python `CandleProcessor` |
-| Run replay buffers, GRU training, or online learning | Isolated AI/model services |
-| Expose Kafka or QuestDB directly to browsers | Backend gateway only |
+| Validate interval allowlist before SQL interpolation. | QuestDB `SAMPLE BY ${interval}` is a SQL fragment and cannot be passed as a scalar parameter. |
+| Parameterize scalar values. | `symbol` and `limit` are passed as query parameters. |
+| Do not expose Kafka or QuestDB to browsers. | Browsers should use NestJS REST and Socket.IO only. |
+| Do not ingest Binance in the backend. | Binance ingestion belongs to the Python producer. |
+| Do not aggregate raw trades in the backend. | Candle aggregation belongs to the Python processor. |
+| Keep AI/model work outside the API request path. | Future forecasting should consume Kafka or QuestDB through explicit contracts. |
