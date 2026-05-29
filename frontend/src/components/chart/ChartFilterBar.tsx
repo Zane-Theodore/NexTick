@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { formatIntervalLabel } from './chartConstants';
 
 interface ChartFilterBarProps {
   symbol: string;
@@ -15,10 +16,12 @@ interface FilterDropdownProps {
   options: string[];
   widthClass: string;
   onChange: (value: string) => void;
+  formatOptionLabel?: (value: string) => string;
 }
 
-function FilterDropdown({ label, value, options, widthClass, onChange }: FilterDropdownProps) {
+function FilterDropdown({ label, value, options, widthClass, onChange, formatOptionLabel = (option) => option }: FilterDropdownProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const selectedLabel = formatOptionLabel(value);
 
   return (
     <div
@@ -40,7 +43,7 @@ function FilterDropdown({ label, value, options, widthClass, onChange }: FilterD
         aria-haspopup="listbox"
         aria-expanded={isOpen}
       >
-        <span className="block truncate">{value}</span>
+        <span className="block truncate">{selectedLabel}</span>
         <span
           className={`pointer-events-none absolute right-3 top-1/2 h-2 w-2 -translate-y-1/2 rotate-45 border-b-2 border-r-2 border-[#9099aa] transition-transform duration-200 ${
             isOpen ? 'mt-1 rotate-225' : ''
@@ -56,25 +59,29 @@ function FilterDropdown({ label, value, options, widthClass, onChange }: FilterD
         }`}
       >
         <div className="max-h-64 overflow-y-auto py-1" role="listbox">
-          {options.map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => {
-                onChange(option);
-                setIsOpen(false);
-              }}
-              className={`block w-full px-3 py-2 text-left text-sm transition-colors ${
-                option === value
-                  ? 'bg-[#24466a] text-white'
-                  : 'text-[#d1d4dc] hover:bg-[#1b2f49] hover:text-white'
-              }`}
-              role="option"
-              aria-selected={option === value}
-            >
-              {option}
-            </button>
-          ))}
+          {options.map((option) => {
+            const optionLabel = formatOptionLabel(option);
+
+            return (
+              <button
+                key={option}
+                type="button"
+                onClick={() => {
+                  onChange(option);
+                  setIsOpen(false);
+                }}
+                className={`block w-full px-3 py-2 text-left text-sm transition-colors ${
+                  option === value
+                    ? 'bg-[#24466a] text-white'
+                    : 'text-[#d1d4dc] hover:bg-[#1b2f49] hover:text-white'
+                }`}
+                role="option"
+                aria-selected={option === value}
+              >
+                {optionLabel}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -104,15 +111,16 @@ export default function ChartFilterBar({
           label="Interval"
           value={interval}
           options={supportedIntervals}
-          widthClass="w-[82px]"
+          widthClass="w-[132px]"
           onChange={onIntervalChange}
+          formatOptionLabel={formatIntervalLabel}
         />
 
         <div className="ml-auto flex items-center gap-2 text-sm text-[#d1d4dc]">
           <span className="h-2 w-2 rounded-full bg-[#26a69a] shadow-[0_0_8px_rgba(38,166,154,0.8)]" />
           <span className="font-semibold">{symbol}</span>
           <span className="text-[#5b6472]">/</span>
-          <span className="text-[#9099aa]">{interval}</span>
+          <span className="text-[#9099aa]">{formatIntervalLabel(interval)}</span>
         </div>
       </div>
     </div>

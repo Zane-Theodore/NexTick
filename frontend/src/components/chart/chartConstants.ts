@@ -15,3 +15,29 @@ export const CHART_MAX_BAR_SPACING = 80;
 
 export const SUPPORTED_SYMBOLS = import.meta.env.VITE_TRADING_SYMBOLS.split(',').map((symbol: string) => symbol.trim());
 export const SUPPORTED_INTERVALS = import.meta.env.VITE_CANDLE_INTERVALS.split(',').map((interval: string) => interval.trim());
+
+const INTERVAL_UNITS: Record<string, string> = {
+  m: 'minute',
+  h: 'hour',
+  d: 'day',
+  w: 'week',
+  M: 'month',
+};
+
+export const formatIntervalLabel = (interval: string): string => {
+  const match = interval.match(/^(\d+)([mhdwM])$/);
+
+  if (!match) {
+    return interval;
+  }
+
+  const [, rawValue, unitKey] = match;
+  const value = Number(rawValue);
+  const unit = INTERVAL_UNITS[unitKey];
+
+  if (!unit || !Number.isFinite(value)) {
+    return interval;
+  }
+
+  return `${value} ${unit}${value === 1 ? '' : 's'}`;
+};
