@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
-import { createChart, CandlestickSeries, ColorType, HistogramSeries, LineSeries } from 'lightweight-charts';
+import { createChart, CandlestickSeries, ColorType, LineSeries } from 'lightweight-charts';
 import type { AutoscaleInfoProvider, CandlestickData, IChartApi, ISeriesApi, LineData, MouseEventParams, Time } from 'lightweight-charts';
 
 import type { CursorPosition, IndicatorSeriesConfig, IndicatorValue, LegendData } from '../../types/chart';
@@ -24,7 +24,7 @@ interface UseTradingChartSetupParams {
   chartContainerRef: RefObject<HTMLDivElement | null>;
   chartInstanceRef: RefObject<IChartApi | null>;
   candlestickSeriesRef: RefObject<ISeriesApi<"Candlestick"> | null>;
-  volumeSeriesRef: RefObject<ISeriesApi<"Histogram"> | null>;
+  volumeSeriesRef: RefObject<ISeriesApi<"Candlestick"> | null>;
   indicatorSeriesRef: RefObject<IndicatorSeriesConfig[]>;
   volumeByTimeRef: RefObject<Map<string, number>>;
   areEmaVisible: boolean;
@@ -124,9 +124,12 @@ export function useTradingChartSetup({
       wickDownColor: CHART_DOWN_COLOR,
     });
 
-    const histogramSeries = chart.addSeries(HistogramSeries, {
+    const volumeSeries = chart.addSeries(CandlestickSeries, {
+      upColor: CHART_UP_COLOR,
+      downColor: CHART_DOWN_COLOR,
+      borderVisible: false,
+      wickVisible: false,
       priceScaleId: 'right',
-      base: 0,
       priceLineVisible: false,
       lastValueVisible: false,
       priceFormat: {
@@ -195,7 +198,7 @@ export function useTradingChartSetup({
 
     chartInstanceRef.current = chart;
     candlestickSeriesRef.current = candlestickSeries;
-    volumeSeriesRef.current = histogramSeries;
+    volumeSeriesRef.current = volumeSeries;
     indicatorSeriesRef.current = indicatorSeries;
     setIsChartReady(true);
 

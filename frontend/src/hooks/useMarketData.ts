@@ -7,7 +7,7 @@ import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/s
 import type { KlineUpdate } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
 import { Logger } from '../utils/logger';
-import type { ISeriesApi, IChartApi, CandlestickData, HistogramData, LineData, Time } from 'lightweight-charts';
+import type { ISeriesApi, IChartApi, CandlestickData, LineData, Time } from 'lightweight-charts';
 import type { IndicatorSeriesConfig, IndicatorValue } from '../types/chart';
 import { CHART_DOWN_COLOR, CHART_UP_COLOR } from '../components/chart/chartConstants';
 
@@ -22,7 +22,7 @@ interface EmaRuntimeState {
 export const useMarketData = (
   chartRef: RefObject<IChartApi | null>,
   candlestickSeriesRef: RefObject<ISeriesApi<"Candlestick"> | null>, 
-  volumeSeriesRef: RefObject<ISeriesApi<"Histogram"> | null>,
+  volumeSeriesRef: RefObject<ISeriesApi<"Candlestick"> | null>,
   symbol: string = 'BTCUSDT',
   interval: string = '1m',
   volumeByTimeRef?: RefObject<Map<string, number>>,
@@ -83,9 +83,12 @@ export const useMarketData = (
 
         const volumeData = formattedData.map(({ time, open, close, volume }) => ({
           time,
-          value: volume,
+          open: 0,
+          high: volume,
+          low: 0,
+          close: volume,
           color: close >= open ? CHART_UP_COLOR : CHART_DOWN_COLOR,
-        })) as HistogramData<Time>[];
+        })) as CandlestickData<Time>[];
 
         candlestickSeries.setData(candleData);
         volumeSeries.setData(volumeData);
@@ -158,7 +161,10 @@ export const useMarketData = (
         });
         volumeSeries.update({
           time: formatted.time as Time,
-          value: formatted.volume,
+          open: 0,
+          high: formatted.volume,
+          low: 0,
+          close: formatted.volume,
           color: formatted.close >= formatted.open ? CHART_UP_COLOR : CHART_DOWN_COLOR,
         });
 

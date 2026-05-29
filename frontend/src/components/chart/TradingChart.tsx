@@ -14,7 +14,7 @@ export default function TradingChart() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<IChartApi | null>(null);
   const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const indicatorSeriesRef = useRef<IndicatorSeriesConfig[]>([]);
   const volumeByTimeRef = useRef<Map<string, number>>(new Map());
   
