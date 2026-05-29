@@ -16,7 +16,7 @@ The frontend is a high-performance UI client. It loads historical candles throug
 
 ## Setup
 
-Start the backend first. The frontend can boot without it, but chart history and realtime Socket.IO updates require the NestJS API at `VITE_API_URL` and `VITE_SOCKET_URL`.
+Start the backend first. The frontend can boot without it, but chart history, API health status, and realtime Socket.IO updates require the NestJS API at `VITE_API_URL`, `VITE_API_HEALTH_URL`, and `VITE_SOCKET_URL`.
 
 Install dependencies:
 
@@ -56,6 +56,7 @@ http://localhost:5173
 | Variable | Required | Example | Description |
 | --- | --- | --- | --- |
 | `VITE_API_URL` | Yes | `http://localhost:3000` | Base URL for the NestJS REST API. Used by `src/services/api.ts`. |
+| `VITE_API_HEALTH_URL` | Yes | `http://localhost:3000/health` | Full URL for the backend health endpoint. Used by the footer API status. |
 | `VITE_SOCKET_URL` | Yes | `http://localhost:3000` | Socket.IO server URL. Used by `src/services/socket.ts`. |
 | `VITE_TRADING_SYMBOLS` | Yes | `BTCUSDT,ETHUSDT` | Comma-separated symbol list displayed by the chart symbol selector. |
 | `VITE_CANDLE_INTERVALS` | Yes | `<interval>,<interval>` | Comma-separated interval list displayed by the chart interval controls. Keep this aligned with backend validation and pipeline aggregation. |
@@ -64,6 +65,7 @@ Example:
 
 ```env
 VITE_API_URL=http://localhost:3000
+VITE_API_HEALTH_URL=http://localhost:3000/health
 VITE_SOCKET_URL=http://localhost:3000
 VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=<interval>,<interval>

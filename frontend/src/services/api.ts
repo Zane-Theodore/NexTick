@@ -2,7 +2,8 @@ import axios from 'axios';
 import { Logger } from '../utils/logger';
 import type { MarketCandle } from '../utils/formatters';
 
-const API_URL = import.meta.env.VITE_API_URL;
+export const API_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? '';
+export const API_HEALTH_URL = import.meta.env.VITE_API_HEALTH_URL?.replace(/\/$/, '') ?? '';
 const logger = new Logger('API');
 
 interface CandlesResponse {
@@ -18,6 +19,10 @@ export const getHistoricalCandles = async (
   interval: string = '1m',
   limit: number = 1000
 ): Promise<MarketCandle[]> => {
+  if (!API_URL) {
+    throw new Error('VITE_API_URL is not configured');
+  }
+
   try {
     const { data } = await axios.get<CandlesResponse>(`${API_URL}/candles`, {
       params: { symbol, interval, limit }
