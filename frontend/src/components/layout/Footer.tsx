@@ -6,8 +6,8 @@ export default function Footer() {
       </div>
 
       <div className="flex items-center gap-4 text-xs text-[#d1d4dc]/60">
-        <a href="#" className="hover:text-white transition-colors">Terms</a>
-        <a href="#" className="hover:text-white transition-colors">Privacy</a>
+        <a href="/terms" className="hover:text-white transition-colors">Terms</a>
+        <a href="/privacy" className="hover:text-white transition-colors">Privacy</a>
         <span className="w-1 h-1 rounded-full bg-[#3f4654]"></span>
         
         <div className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
