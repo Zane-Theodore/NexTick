@@ -66,8 +66,8 @@ function FilterDropdown({ label, value, options, widthClass, onChange }: FilterD
               }}
               className={`block w-full px-3 py-2 text-left text-sm transition-colors ${
                 option === value
-                  ? 'bg-blue-600 text-white'
-                  : 'text-[#d1d4dc] hover:bg-[#1d2430] hover:text-white'
+                  ? 'bg-[#24466a] text-white'
+                  : 'text-[#d1d4dc] hover:bg-[#1b2f49] hover:text-white'
               }`}
               role="option"
               aria-selected={option === value}

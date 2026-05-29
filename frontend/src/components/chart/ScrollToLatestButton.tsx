@@ -6,7 +6,7 @@ export default function ScrollToLatestButton({ onClick }: ScrollToLatestButtonPr
   return (
     <button
       onClick={onClick}
-      className="absolute bottom-8 right-20 z-10 w-10 h-10 bg-[#242a35]/85 hover:bg-blue-600 text-[#d1d4dc] hover:text-white rounded-full flex items-center justify-center backdrop-blur shadow-lg transition-all border border-[#3f4654] hover:border-blue-500"
+      className="absolute bottom-8 right-20 z-10 w-10 h-10 bg-[#242a35]/85 hover:bg-[#1b2f49] text-[#d1d4dc] hover:text-white rounded-full flex items-center justify-center backdrop-blur shadow-lg transition-all border border-[#3f4654] hover:border-[#3b5f87]"
       title="Scroll to latest"
     >
       <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
