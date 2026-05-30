@@ -107,7 +107,7 @@ These names match `data_pipeline/.env.example` and `config.py`.
 | `KAFKA_BROKER` | Yes | `localhost:9092` | Use `kafka:29092` inside the Compose network. |
 | `KAFKA_TOPIC_RAW_TRADES` | Yes | `raw-trades` | Topic for normalized raw trades. |
 | `KAFKA_TOPIC_KLINE_STREAM` | Yes | `kline-stream` | Topic for candle updates. |
-| `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Loaded by config. The current producer still builds its combined stream URL with the Binance host hardcoded in `binance_producer.py`. |
+| `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Base Binance WebSocket endpoint used by the producer when building the combined stream URL. |
 | `TRADING_SYMBOLS` | Effectively required in `.env` | `BTCUSDT,ETHUSDT` | If unset, code defaults to `BTCUSDT`; if present but blank, no symbols are produced. |
 | `CANDLE_INTERVALS` | Effectively required in `.env` | `1m,3m,5m,15m,30m,1h` | If unset, code defaults to all supported intervals; if present but blank, no interval managers are created. |
 | `CANDLE_UPDATE_INTERVAL_MS` | No | `500` | Defaults to `500`. Controls non-final candle publish cadence. |

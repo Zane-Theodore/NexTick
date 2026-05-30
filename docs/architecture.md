@@ -49,9 +49,9 @@ flowchart LR
 
 Current behavior:
 
-1. Reads `TRADING_SYMBOLS` from config.
+1. Reads `BINANCE_SOCKET_URL` and `TRADING_SYMBOLS` from config.
 2. Lowercases symbols.
-3. Builds a Binance combined stream URL like:
+3. Builds a combined stream URL from `BINANCE_SOCKET_URL`, like:
 
 ```text
 wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade
@@ -60,8 +60,6 @@ wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade
 4. Converts Binance payloads into the raw trade contract.
 5. Drops trades with non-positive price or volume.
 6. Publishes to `KAFKA_TOPIC_RAW_TRADES` with `symbol` as the Kafka key.
-
-`BINANCE_SOCKET_URL` is loaded as required config, but the current producer hardcodes the Binance combined stream host in code.
 
 ### Processor
 

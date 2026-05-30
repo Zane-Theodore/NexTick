@@ -68,7 +68,9 @@ class BinanceCombinedProducer:
         self.base_reconnect_delay = 5
         
         streams = "/".join([f"{sym}@trade" for sym in self.symbols])
-        self.ws_url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+        binance_socket_url = config.BINANCE_SOCKET_URL.rstrip('/')
+        query_separator = '&' if '?' in binance_socket_url else '?'
+        self.ws_url = f"{binance_socket_url}{query_separator}streams={streams}"
         
         logger.info(f"Initializing Binance Combined Producer for: {', '.join(s.upper() for s in self.symbols)}")
         
