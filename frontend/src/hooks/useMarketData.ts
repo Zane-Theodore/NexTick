@@ -1,23 +1,17 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 import { formatCandle } from '../utils/formatters';
 import type { FormattedCandle } from '../utils/formatters';
-import { calculateEMAHistory, calculateMAHistory, calculateNextEMA, calculateNextMA } from '../utils/indicators';
+import { calculateEMAHistory, calculateMACDHistory, calculateMAHistory, calculateRSIHistory, calculateVolumeMAHistory } from '../utils/indicators';
 import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/socket';
 import type { KlineUpdate } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
 import { Logger } from '../utils/logger';
 import type { ISeriesApi, IChartApi, CandlestickData, LineData, Time } from 'lightweight-charts';
-import type { IndicatorSeriesConfig, IndicatorValue } from '../types/chart';
+import type { IndicatorSeriesConfig, IndicatorSetting, IndicatorValue } from '../types/chart';
 import { CHART_DOWN_COLOR, CHART_UP_COLOR } from '../components/chart/chartConstants';
 
 const logger = new Logger('MarketData');
-
-interface EmaRuntimeState {
-  lastTime: Time;
-  lastValue: number;
-  previousValue: number | null;
-}
 
 export const useMarketData = (
   chartRef: RefObject<IChartApi | null>,
@@ -27,11 +21,40 @@ export const useMarketData = (
   interval: string = '1m',
   volumeByTimeRef?: RefObject<Map<string, number>>,
   indicatorSeriesRef?: RefObject<IndicatorSeriesConfig[]>,
+  indicatorSettings: IndicatorSetting[] = [],
   onIndicatorValuesChange?: (values: IndicatorValue[]) => void,
   isChartReady: boolean = true
 ) => {
-  const emaStateByPeriodRef = useRef<Map<number, EmaRuntimeState>>(new Map());
   const candleHistoryRef = useRef<FormattedCandle[]>([]);
+
+  const syncIndicatorSeries = useCallback((history: FormattedCandle[]) => {
+    const nextValues = indicatorSeriesRef?.current.reduce<IndicatorValue[]>((values, config) => {
+      const indicatorData = getIndicatorData(config, history) as LineData<Time>[];
+      config.series.setData(indicatorData);
+
+      const lastPoint = indicatorData.at(-1);
+      if (lastPoint) {
+        values.push({
+          id: config.id,
+          group: config.group,
+          kind: config.kind,
+          label: config.label,
+          period: config.period,
+          value: lastPoint.value,
+          color: config.color,
+        });
+      }
+
+      return values;
+    }, []) ?? [];
+
+    onIndicatorValuesChange?.(nextValues);
+  }, [indicatorSeriesRef, onIndicatorValuesChange]);
+
+  useEffect(() => {
+    if (!isChartReady || candleHistoryRef.current.length === 0) return;
+    syncIndicatorSeries(candleHistoryRef.current);
+  }, [indicatorSettings, isChartReady, syncIndicatorSeries]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -46,7 +69,6 @@ export const useMarketData = (
         candlestickSeries.setData([]); 
         volumeSeries.setData([]);
         indicatorSeriesRef?.current.forEach(({ series: indicatorSeries }) => indicatorSeries.setData([]));
-        emaStateByPeriodRef.current.clear();
         candleHistoryRef.current = [];
         onIndicatorValuesChange?.([]);
         volumeByTimeRef?.current.clear();
@@ -93,30 +115,7 @@ export const useMarketData = (
         candlestickSeries.setData(candleData);
         volumeSeries.setData(volumeData);
         candleHistoryRef.current = formattedData;
-        const indicatorValues = indicatorSeriesRef?.current.map(({ kind, period, series: indicatorSeries }) => {
-          const indicatorData = kind === 'ema'
-            ? calculateEMAHistory(formattedData, period) as LineData<Time>[]
-            : calculateMAHistory(formattedData, period) as LineData<Time>[];
-          indicatorSeries.setData(indicatorData);
-
-          const lastPoint = indicatorData.at(-1);
-          const previousPoint = indicatorData.length > 1 ? indicatorData[indicatorData.length - 2] : null;
-
-          if (kind === 'ema' && lastPoint) {
-            emaStateByPeriodRef.current.set(period, {
-              lastTime: lastPoint.time,
-              lastValue: lastPoint.value,
-              previousValue: previousPoint?.value ?? null,
-            });
-          }
-
-          return {
-            kind,
-            period,
-            value: lastPoint?.value ?? 0,
-          };
-        }) ?? [];
-        onIndicatorValuesChange?.(indicatorValues);
+        syncIndicatorSeries(formattedData);
         formattedData.forEach((candle) => {
           volumeByTimeRef?.current.set(String(candle.time), candle.volume);
         });
@@ -168,42 +167,7 @@ export const useMarketData = (
           color: formatted.close >= formatted.open ? CHART_UP_COLOR : CHART_DOWN_COLOR,
         });
 
-        const indicatorValues = indicatorSeriesRef?.current.reduce<IndicatorValue[]>((values, { kind, period, series: indicatorSeries }) => {
-          const time = formatted.time as Time;
-          const emaState = kind === 'ema' ? emaStateByPeriodRef.current.get(period) : undefined;
-          const previousEma = emaState?.lastTime === time
-            ? emaState.previousValue ?? emaState.lastValue
-            : emaState?.lastValue ?? formatted.close;
-          const nextValue = kind === 'ema'
-            ? calculateNextEMA(formatted.close, previousEma, period)
-            : calculateNextMA(candleHistoryRef.current, period);
-
-          if (nextValue === null) {
-            return values;
-          }
-
-          indicatorSeries.update({
-            time,
-            value: nextValue,
-          });
-
-          if (kind === 'ema') {
-            emaStateByPeriodRef.current.set(period, {
-              lastTime: time,
-              lastValue: nextValue,
-              previousValue: emaState?.lastTime === time ? emaState.previousValue : emaState?.lastValue ?? null,
-            });
-          }
-
-          values.push({
-            kind,
-            period,
-            value: nextValue,
-          });
-
-          return values;
-        }, []) ?? [];
-        onIndicatorValuesChange?.(indicatorValues);
+        syncIndicatorSeries(candleHistoryRef.current);
         
         if (data.is_final) {
           logger.info(`Final candle received for ${data.symbol} [${data.interval}]: O=${data.open}, C=${data.close}, V=${data.volume}`);
@@ -233,6 +197,42 @@ export const useMarketData = (
     volumeByTimeRef,
     indicatorSeriesRef,
     onIndicatorValuesChange,
+    syncIndicatorSeries,
     isChartReady,
   ]);
 };
+
+function getIndicatorData(config: IndicatorSeriesConfig, history: FormattedCandle[]): LineData<Time>[] {
+  if (history.length === 0) return [];
+
+  switch (config.kind) {
+    case 'ema':
+      return calculateEMAHistory(history, config.period ?? 1) as LineData<Time>[];
+    case 'ma':
+      return calculateMAHistory(history, config.period ?? 1) as LineData<Time>[];
+    case 'volume-ma':
+      return calculateVolumeMAHistory(history, config.period ?? 1) as LineData<Time>[];
+    case 'rsi':
+      return calculateRSIHistory(history, config.period ?? 14) as LineData<Time>[];
+    case 'macd': {
+      const macd = calculateMACDHistory(
+        history,
+        config.fastPeriod ?? 12,
+        config.slowPeriod ?? 26,
+        config.signalPeriod ?? 9,
+      );
+      return macd.macd as LineData<Time>[];
+    }
+    case 'macd-signal': {
+      const macd = calculateMACDHistory(
+        history,
+        config.fastPeriod ?? 12,
+        config.slowPeriod ?? 26,
+        config.signalPeriod ?? 9,
+      );
+      return macd.signal as LineData<Time>[];
+    }
+    default:
+      return [];
+  }
+}

@@ -1,13 +1,13 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 
 import { useMarketData } from '../../hooks/useMarketData';
-import type { CursorPosition, IndicatorSeriesConfig, IndicatorValue, LegendData } from '../../types/chart';
+import type { CursorPosition, IndicatorGroup, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData } from '../../types/chart';
 import ChartFilterBar from './ChartFilterBar';
 import IndicatorLegend from './IndicatorLegend';
 import OhlcvTooltip from './OhlcvTooltip';
 import ScrollToLatestButton from './ScrollToLatestButton';
-import { SUPPORTED_INTERVALS, SUPPORTED_SYMBOLS } from './chartConstants';
+import { DEFAULT_INDICATOR_SETTINGS, SUPPORTED_INTERVALS, SUPPORTED_SYMBOLS } from './chartConstants';
 import { useTradingChartSetup } from './useTradingChartSetup';
 
 export default function TradingChart() {
@@ -25,13 +25,44 @@ export default function TradingChart() {
   const [cursorPosition, setCursorPosition] = useState<CursorPosition>({ x: 0, y: 0 });
   const [indicatorValues, setIndicatorValues] = useState<IndicatorValue[]>([]);
   const [hoverIndicatorValues, setHoverIndicatorValues] = useState<IndicatorValue[] | null>(null);
-  const [isIndicatorLegendOpen, setIsIndicatorLegendOpen] = useState<boolean>(true);
-  const [areEmaVisible, setAreEmaVisible] = useState<boolean>(true);
-  const [areMaVisible, setAreMaVisible] = useState<boolean>(false);
+  const [isIndicatorLegendOpen, setIsIndicatorLegendOpen] = useState<boolean>(false);
+  const [dismissedIndicatorGroups, setDismissedIndicatorGroups] = useState<IndicatorGroup[]>([]);
+  const [indicatorSettings, setIndicatorSettings] = useState<IndicatorSetting[]>(() => (
+    DEFAULT_INDICATOR_SETTINGS.map((setting) => ({ ...setting }))
+  ));
 
   const handleIndicatorValuesChange = useCallback((values: IndicatorValue[]) => {
     setIndicatorValues(values);
   }, []);
+
+  const handleToggleIndicatorGroupVisibility = useCallback((group: IndicatorGroup) => {
+    setIndicatorSettings((settings) => settings.map((setting) => (
+      setting.group === group
+        ? { ...setting, visible: !settings.some((candidate) => candidate.group === group && candidate.visible) }
+        : setting
+    )));
+  }, []);
+
+  const handleApplyIndicatorSettings = useCallback((updatedSettings: IndicatorSetting[]) => {
+    const updatedSettingsById = new Map(updatedSettings.map((setting) => [setting.id, setting]));
+    setIndicatorSettings((settings) => settings.map((setting) => (
+      updatedSettingsById.get(setting.id) ?? setting
+    )));
+  }, []);
+
+  const handleDismissIndicatorGroup = useCallback((group: IndicatorGroup) => {
+    setDismissedIndicatorGroups((groups) => (
+      groups.includes(group) ? groups : [...groups, group]
+    ));
+  }, []);
+
+  const activeIndicatorSettings = useMemo(() => (
+    indicatorSettings.filter((setting) => !dismissedIndicatorGroups.includes(setting.group))
+  ), [dismissedIndicatorGroups, indicatorSettings]);
+
+  const activeDefaultIndicatorSettings = useMemo(() => (
+    DEFAULT_INDICATOR_SETTINGS.filter((setting) => !dismissedIndicatorGroups.includes(setting.group))
+  ), [dismissedIndicatorGroups]);
 
   useTradingChartSetup({
     chartContainerRef,
@@ -40,8 +71,7 @@ export default function TradingChart() {
     volumeSeriesRef,
     indicatorSeriesRef,
     volumeByTimeRef,
-    areEmaVisible,
-    areMaVisible,
+    indicatorSettings: activeIndicatorSettings,
     setIsChartReady,
     setLegendData,
     setCursorPosition,
@@ -56,6 +86,7 @@ export default function TradingChart() {
     interval,
     volumeByTimeRef,
     indicatorSeriesRef,
+    activeIndicatorSettings,
     handleIndicatorValuesChange,
     isChartReady,
   );
@@ -86,13 +117,14 @@ export default function TradingChart() {
         <div ref={chartContainerRef} className="w-full h-full" />
 
         <IndicatorLegend
+          settings={activeIndicatorSettings}
+          defaultSettings={activeDefaultIndicatorSettings}
           values={visibleIndicatorValues}
           isOpen={isIndicatorLegendOpen}
-          areEmaVisible={areEmaVisible}
-          areMaVisible={areMaVisible}
           onToggleOpen={() => setIsIndicatorLegendOpen((isOpen) => !isOpen)}
-          onToggleEma={() => setAreEmaVisible((isVisible) => !isVisible)}
-          onToggleMa={() => setAreMaVisible((isVisible) => !isVisible)}
+          onToggleGroupVisibility={handleToggleIndicatorGroupVisibility}
+          onDismissGroup={handleDismissIndicatorGroup}
+          onApplySettings={handleApplyIndicatorSettings}
         />
 
         <ScrollToLatestButton onClick={() => chartInstanceRef.current?.timeScale().scrollToPosition(10, false)} />

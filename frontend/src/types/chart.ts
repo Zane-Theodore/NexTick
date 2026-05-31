@@ -2,18 +2,53 @@ import type { ISeriesApi } from 'lightweight-charts';
 
 import type { ChartTime } from '../utils/formatters';
 
-export type IndicatorKind = 'ema' | 'ma';
+export type IndicatorGroup = 'ema' | 'ma' | 'volume-ma' | 'rsi' | 'macd';
+export type IndicatorKind = IndicatorGroup | 'macd-signal';
+
+export interface SinglePeriodIndicatorSetting {
+  id: string;
+  group: Exclude<IndicatorGroup, 'macd'>;
+  label: string;
+  visible: boolean;
+  period: number;
+  color: string;
+}
+
+export interface MacdIndicatorSetting {
+  id: string;
+  group: 'macd';
+  label: string;
+  visible: boolean;
+  fastPeriod: number;
+  slowPeriod: number;
+  signalPeriod: number;
+  macdColor: string;
+  signalColor: string;
+}
+
+export type IndicatorSetting = SinglePeriodIndicatorSetting | MacdIndicatorSetting;
 
 export interface IndicatorSeriesConfig {
+  id: string;
+  group: IndicatorGroup;
   kind: IndicatorKind;
-  period: number;
+  label: string;
+  period?: number;
+  fastPeriod?: number;
+  slowPeriod?: number;
+  signalPeriod?: number;
+  color: string;
   series: ISeriesApi<"Line">;
 }
 
 export interface IndicatorValue {
+  id: string;
+  group: IndicatorGroup;
   kind: IndicatorKind;
-  period: number;
+  label: string;
+  period?: number;
   value: number;
+  color: string;
 }
 
 export interface LegendData {

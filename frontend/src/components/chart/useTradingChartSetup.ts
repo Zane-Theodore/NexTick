@@ -3,7 +3,7 @@ import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { createChart, CandlestickSeries, ColorType, LineSeries } from 'lightweight-charts';
 import type { AutoscaleInfoProvider, CandlestickData, IChartApi, ISeriesApi, LineData, MouseEventParams, Time } from 'lightweight-charts';
 
-import type { CursorPosition, IndicatorSeriesConfig, IndicatorValue, LegendData } from '../../types/chart';
+import type { CursorPosition, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData } from '../../types/chart';
 import {
   formatChartValue,
   formatTimeScaleCrosshair,
@@ -15,7 +15,6 @@ import {
   CHART_MAX_BAR_SPACING,
   CHART_MIN_BAR_SPACING,
   CHART_UP_COLOR,
-  INDICATOR_CONFIG,
   MAIN_CHART_DEFAULT_STRETCH_FACTOR,
   VOLUME_CHART_DEFAULT_STRETCH_FACTOR,
 } from './chartConstants';
@@ -27,8 +26,7 @@ interface UseTradingChartSetupParams {
   volumeSeriesRef: RefObject<ISeriesApi<"Candlestick"> | null>;
   indicatorSeriesRef: RefObject<IndicatorSeriesConfig[]>;
   volumeByTimeRef: RefObject<Map<string, number>>;
-  areEmaVisible: boolean;
-  areMaVisible: boolean;
+  indicatorSettings: IndicatorSetting[];
   setIsChartReady: Dispatch<SetStateAction<boolean>>;
   setLegendData: Dispatch<SetStateAction<LegendData | null>>;
   setCursorPosition: Dispatch<SetStateAction<CursorPosition>>;
@@ -42,8 +40,7 @@ export function useTradingChartSetup({
   volumeSeriesRef,
   indicatorSeriesRef,
   volumeByTimeRef,
-  areEmaVisible,
-  areMaVisible,
+  indicatorSettings,
   setIsChartReady,
   setLegendData,
   setCursorPosition,
@@ -154,33 +151,6 @@ export function useTradingChartSetup({
       }) satisfies AutoscaleInfoProvider,
     }, 1);
 
-    const indicatorSeries = INDICATOR_CONFIG.flatMap(({ period, color, mutedColor }) => ([
-      {
-        kind: 'ema' as const,
-        period,
-        series: chart.addSeries(LineSeries, {
-          color,
-          lineWidth: 1,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-          visible: true,
-        }),
-      },
-      {
-        kind: 'ma' as const,
-        period,
-        series: chart.addSeries(LineSeries, {
-          color: mutedColor,
-          lineWidth: 1,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-          visible: false,
-        }),
-      },
-    ]));
-
     chart.priceScale('right', 1).applyOptions({
       autoScale: true,
       alignLabels: true,
@@ -199,7 +169,7 @@ export function useTradingChartSetup({
     chartInstanceRef.current = chart;
     candlestickSeriesRef.current = candlestickSeries;
     volumeSeriesRef.current = volumeSeries;
-    indicatorSeriesRef.current = indicatorSeries;
+    indicatorSeriesRef.current = [];
     setIsChartReady(true);
 
     const handleCrosshair = (param: MouseEventParams<Time>) => {
@@ -246,14 +216,18 @@ export function useTradingChartSetup({
         });
       }
 
-      const hoveredIndicators = indicatorSeries.reduce<IndicatorValue[]>((values, { kind, period, series }) => {
+      const hoveredIndicators = indicatorSeriesRef.current.reduce<IndicatorValue[]>((values, { id, group, kind, label, period, color, series }) => {
         const lineData = param.seriesData.get(series) as LineData<Time> | undefined;
 
         if (lineData) {
           values.push({
+            id,
+            group,
             kind,
+            label,
             period,
             value: lineData.value,
+            color,
           });
         }
 
@@ -297,8 +271,98 @@ export function useTradingChartSetup({
   ]);
 
   useEffect(() => {
-    indicatorSeriesRef.current.forEach(({ kind, series }) => {
-      series.applyOptions({ visible: kind === 'ema' ? areEmaVisible : areMaVisible });
+    const chart = chartInstanceRef.current;
+    if (!chart) return;
+
+    let currentConfigs = [...indicatorSeriesRef.current];
+    const desiredIds = new Set<string>();
+
+    const upsertSeries = (config: Omit<IndicatorSeriesConfig, 'series'>, paneIndex: number) => {
+      desiredIds.add(config.id);
+
+      const existingConfig = currentConfigs.find((currentConfig) => currentConfig.id === config.id);
+      if (existingConfig) {
+        Object.assign(existingConfig, config);
+        existingConfig.series.applyOptions({
+          color: config.color,
+          visible: true,
+        });
+        return;
+      }
+
+      currentConfigs.push({
+        ...config,
+        series: chart.addSeries(LineSeries, createLineOptions(config.color), paneIndex),
+      });
+    };
+
+    indicatorSettings.forEach((setting) => {
+      if (!setting.visible) return;
+
+      if (setting.group === 'macd') {
+        upsertSeries({
+          id: `${setting.id}-macd`,
+          group: setting.group,
+          kind: 'macd',
+          label: setting.label,
+          fastPeriod: setting.fastPeriod,
+          slowPeriod: setting.slowPeriod,
+          signalPeriod: setting.signalPeriod,
+          color: setting.macdColor,
+        }, 3);
+        upsertSeries({
+          id: `${setting.id}-signal`,
+          group: setting.group,
+          kind: 'macd-signal',
+          label: `${setting.label} Signal`,
+          fastPeriod: setting.fastPeriod,
+          slowPeriod: setting.slowPeriod,
+          signalPeriod: setting.signalPeriod,
+          color: setting.signalColor,
+        }, 3);
+        return;
+      }
+
+      const paneIndex = setting.group === 'volume-ma'
+        ? 1
+        : setting.group === 'rsi'
+          ? 2
+          : 0;
+
+      upsertSeries({
+        id: setting.id,
+        group: setting.group,
+        kind: setting.group,
+        label: setting.label,
+        period: setting.period,
+        color: setting.color,
+      }, paneIndex);
     });
-  }, [areEmaVisible, areMaVisible, indicatorSeriesRef]);
+
+    currentConfigs = currentConfigs.filter((config) => {
+      if (desiredIds.has(config.id)) return true;
+      chart.removeSeries(config.series);
+      return false;
+    });
+
+    indicatorSeriesRef.current = currentConfigs;
+
+    const hasLowerIndicatorPane = indicatorSettings.some((setting) => setting.visible && (setting.group === 'rsi' || setting.group === 'macd'));
+    const panes = chart.panes();
+    panes[0]?.setStretchFactor(hasLowerIndicatorPane ? 70 : MAIN_CHART_DEFAULT_STRETCH_FACTOR);
+    panes[1]?.setStretchFactor(VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
+    panes[2]?.setStretchFactor(18);
+    panes[3]?.setStretchFactor(18);
+  }, [chartInstanceRef, indicatorSeriesRef, indicatorSettings]);
+}
+
+function createLineOptions(color: string) {
+  return {
+    color,
+    lineWidth: 1 as const,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+    visible: true,
+  };
 }

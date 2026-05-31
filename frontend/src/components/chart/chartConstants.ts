@@ -1,8 +1,26 @@
-export const INDICATOR_CONFIG = [
-  { period: 7, color: '#f5d90a', mutedColor: '#f5d90a80' },
-  { period: 25, color: '#ff4ecd', mutedColor: '#ff4ecd80' },
-  { period: 99, color: '#00d4ff', mutedColor: '#00d4ff80' },
-] as const;
+import type { IndicatorSetting } from '../../types/chart';
+
+export const DEFAULT_INDICATOR_SETTINGS: IndicatorSetting[] = [
+  { id: 'ema-7', group: 'ema', label: 'EMA', visible: true, period: 7, color: '#f5d90a' },
+  { id: 'ema-25', group: 'ema', label: 'EMA', visible: true, period: 25, color: '#ff4ecd' },
+  { id: 'ema-99', group: 'ema', label: 'EMA', visible: true, period: 99, color: '#00d4ff' },
+  { id: 'ma-7', group: 'ma', label: 'MA', visible: false, period: 7, color: '#d9e3f0' },
+  { id: 'ma-25', group: 'ma', label: 'MA', visible: false, period: 25, color: '#9ca3af' },
+  { id: 'ma-99', group: 'ma', label: 'MA', visible: false, period: 99, color: '#64748b' },
+  { id: 'volume-ma-20', group: 'volume-ma', label: 'Vol MA', visible: true, period: 20, color: '#f59e0b' },
+  { id: 'rsi-14', group: 'rsi', label: 'RSI', visible: false, period: 14, color: '#a78bfa' },
+  {
+    id: 'macd',
+    group: 'macd',
+    label: 'MACD',
+    visible: false,
+    fastPeriod: 12,
+    slowPeriod: 26,
+    signalPeriod: 9,
+    macdColor: '#38bdf8',
+    signalColor: '#f97316',
+  },
+];
 
 export const MAIN_CHART_DEFAULT_STRETCH_FACTOR = 85;
 export const VOLUME_CHART_DEFAULT_STRETCH_FACTOR = 15;
