@@ -64,6 +64,8 @@ export const useMarketData = (
     if (!isChartReady) return;
     if (!candlestickSeries || !volumeSeries || !chart) return;
 
+    let isCancelled = false;
+
     const fetchHistory = async () => {
       try {
         candlestickSeries.setData([]); 
@@ -74,6 +76,8 @@ export const useMarketData = (
         volumeByTimeRef?.current.clear();
         
         const rawCandles = await getHistoricalCandles(symbol, interval, 1000);
+
+        if (isCancelled) return;
 
         if (!rawCandles || rawCandles.length === 0) {
           logger.warn(`No candle data received from API for symbol: ${symbol}, interval: ${interval}`);
@@ -135,6 +139,7 @@ export const useMarketData = (
         logger.info(`Joined kline room: ${symbol}_${interval}`);
         
       } catch (error) {
+        if (isCancelled) return;
         logger.error(`Failed to fetch historical data for symbol: ${symbol}, interval: ${interval}`, error);
       }
     };
@@ -142,10 +147,23 @@ export const useMarketData = (
     fetchHistory();
 
     const handleCandleUpdate = (data: KlineUpdate) => {
+      if (data.symbol?.toUpperCase() !== symbol.toUpperCase() || data.interval !== interval) {
+        return;
+      }
+
       const formatted = formatCandle(data);
       
       if (formatted && formatted.open > 0 && formatted.high > 0 && formatted.low > 0 && formatted.close > 0) {
         const lastCandle = candleHistoryRef.current.at(-1);
+
+        if (lastCandle && formatted.time < lastCandle.time) {
+          logger.debug(`Ignored stale candle update for ${data.symbol} [${data.interval}]`, {
+            updateTime: formatted.time,
+            lastTime: lastCandle.time,
+          });
+          return;
+        }
+
         candleHistoryRef.current = lastCandle?.time === formatted.time
           ? [...candleHistoryRef.current.slice(0, -1), formatted]
           : [...candleHistoryRef.current, formatted];
@@ -183,6 +201,7 @@ export const useMarketData = (
     const unsubscribe = subscribeToCandles(handleCandleUpdate);
 
     return () => {
+      isCancelled = true;
       unsubscribe();
       // Leave room when component unmounts or dependencies change
       leaveKlineRoom(symbol, interval);

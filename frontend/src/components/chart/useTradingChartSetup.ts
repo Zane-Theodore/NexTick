@@ -276,6 +276,17 @@ export function useTradingChartSetup({
 
     let currentConfigs = [...indicatorSeriesRef.current];
     const desiredIds = new Set<string>();
+    const lowerPaneByGroup = new Map<IndicatorSetting['group'], number>();
+    let nextLowerPaneIndex = 2;
+
+    if (indicatorSettings.some((setting) => setting.visible && setting.group === 'rsi')) {
+      lowerPaneByGroup.set('rsi', nextLowerPaneIndex);
+      nextLowerPaneIndex += 1;
+    }
+
+    if (indicatorSettings.some((setting) => setting.visible && setting.group === 'macd')) {
+      lowerPaneByGroup.set('macd', nextLowerPaneIndex);
+    }
 
     const upsertSeries = (config: Omit<IndicatorSeriesConfig, 'series'>, paneIndex: number) => {
       desiredIds.add(config.id);
@@ -309,7 +320,7 @@ export function useTradingChartSetup({
           slowPeriod: setting.slowPeriod,
           signalPeriod: setting.signalPeriod,
           color: setting.macdColor,
-        }, 3);
+        }, lowerPaneByGroup.get('macd') ?? 2);
         upsertSeries({
           id: `${setting.id}-signal`,
           group: setting.group,
@@ -319,14 +330,14 @@ export function useTradingChartSetup({
           slowPeriod: setting.slowPeriod,
           signalPeriod: setting.signalPeriod,
           color: setting.signalColor,
-        }, 3);
+        }, lowerPaneByGroup.get('macd') ?? 2);
         return;
       }
 
       const paneIndex = setting.group === 'volume-ma'
         ? 1
         : setting.group === 'rsi'
-          ? 2
+          ? lowerPaneByGroup.get('rsi') ?? 2
           : 0;
 
       upsertSeries({
@@ -347,9 +358,8 @@ export function useTradingChartSetup({
 
     indicatorSeriesRef.current = currentConfigs;
 
-    const hasLowerIndicatorPane = indicatorSettings.some((setting) => setting.visible && (setting.group === 'rsi' || setting.group === 'macd'));
     const panes = chart.panes();
-    panes[0]?.setStretchFactor(hasLowerIndicatorPane ? 70 : MAIN_CHART_DEFAULT_STRETCH_FACTOR);
+    panes[0]?.setStretchFactor(lowerPaneByGroup.size > 0 ? 70 : MAIN_CHART_DEFAULT_STRETCH_FACTOR);
     panes[1]?.setStretchFactor(VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
     panes[2]?.setStretchFactor(18);
     panes[3]?.setStretchFactor(18);

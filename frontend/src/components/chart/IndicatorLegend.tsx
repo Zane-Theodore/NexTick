@@ -152,43 +152,43 @@ export default function IndicatorLegend({
 
       {activeGroup && (
         <div
-          className="fixed z-50 w-[min(520px,calc(100vw-24px))] border border-[#3f4654] bg-[#0f1117] shadow-2xl shadow-black/50"
+          className="fixed z-50 w-[min(520px,calc(100vw-24px))] overflow-hidden rounded-lg border border-[#3f4654] bg-[#0f1117] shadow-2xl shadow-black/50"
           style={{ left: windowPosition.x, top: windowPosition.y }}
         >
           <div
-            className="flex h-10 cursor-move select-none items-center justify-between border-b border-[#3f4654] bg-[#151a23] px-3"
+            className="flex h-11 cursor-move select-none items-center justify-between border-b border-[#3f4654] bg-[#151a23] px-3"
             onMouseDown={handleHeaderMouseDown}
           >
             <span className="text-sm font-semibold text-[#d1d4dc]">{activeGroupLabel} settings</span>
             <button
               type="button"
               onClick={() => setActiveGroup(null)}
-              className="h-7 w-7 text-[#9099aa] transition-colors hover:text-white"
+              className="h-7 w-7 rounded-md border border-transparent text-[#9099aa] transition-colors hover:border-[#6b7280] hover:text-white"
               title="Close settings"
             >
               x
             </button>
           </div>
 
-          <div className="max-h-[calc(100vh-220px)] overflow-auto p-3">
+          <div className="max-h-[calc(100vh-220px)] overflow-auto bg-[#0d121b] p-3">
             <IndicatorSettingsForm
               settings={draftSettings}
               onChange={setDraftSettings}
             />
           </div>
 
-          <div className="flex items-center justify-end gap-2 border-t border-[#3f4654] bg-[#0f1117] px-3 py-3">
+          <div className="flex items-center justify-end gap-2 border-t border-[#3f4654] bg-[#111722] px-3 py-3">
             <button
               type="button"
               onClick={handleReset}
-              className="h-8 border border-[#3f4654] px-3 text-sm font-semibold text-[#d1d4dc] transition-colors hover:border-[#6b7280] hover:text-white"
+              className="h-8 rounded-md border border-[#3f4654] px-3 text-sm font-semibold text-[#d1d4dc] transition-colors hover:border-[#6b7280] hover:text-white"
             >
               Reset
             </button>
             <button
               type="button"
               onClick={handleApply}
-              className="h-8 border border-[#26a69a] bg-[#17453f] px-3 text-sm font-semibold text-white transition-colors hover:bg-[#1f5c54]"
+              className="h-8 rounded-md border border-[#26a69a] bg-[#17453f] px-3 text-sm font-semibold text-white transition-colors hover:bg-[#1f5c54]"
             >
               Apply
             </button>
@@ -345,7 +345,7 @@ function SingleSettingsEditor({
   onChange: (setting: SinglePeriodIndicatorSetting) => void;
 }) {
   return (
-    <div className="grid grid-cols-[1fr_80px_72px] items-center gap-3 border border-[#252c38] bg-[#111722] p-2">
+    <div className="grid grid-cols-[1fr_80px_72px] items-center gap-3 rounded-md border border-[#252c38] bg-[#111722] p-3">
       <span className="text-sm font-semibold text-[#d1d4dc]">{setting.label}({setting.period})</span>
       <NumberInput value={setting.period} min={1} max={250} onChange={(period) => onChange({ ...setting, period })} />
       <ColorInput value={setting.color} onChange={(color) => onChange({ ...setting, color })} />
@@ -361,7 +361,7 @@ function MacdSettingsEditor({
   onChange: (setting: MacdIndicatorSetting) => void;
 }) {
   return (
-    <div className="flex flex-col gap-3 border border-[#252c38] bg-[#111722] p-2">
+    <div className="flex flex-col gap-3 rounded-md border border-[#252c38] bg-[#111722] p-3">
       <span className="text-sm font-semibold text-[#d1d4dc]">{setting.label}</span>
       <div className="grid grid-cols-3 gap-2">
         <Field label="Fast">
@@ -419,7 +419,7 @@ function NumberInput({
       min={min}
       max={max}
       onChange={(event) => onChange(clampPeriod(Number(event.target.value), min, max))}
-      className="h-8 w-full border border-[#3f4654] bg-[#151a23] px-2 text-right text-sm text-[#d1d4dc] outline-none transition-colors focus:border-[#6b7280]"
+      className="h-8 w-full rounded-md border border-[#3f4654] bg-[#151a23] px-2 text-right text-sm text-[#d1d4dc] outline-none transition-colors focus:border-[#6b7280]"
     />
   );
 }
@@ -436,7 +436,7 @@ function ColorInput({
       type="color"
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      className="h-8 w-full cursor-pointer border border-[#3f4654] bg-[#151a23] p-0.5"
+      className="h-8 w-full cursor-pointer rounded-md border border-[#3f4654] bg-[#151a23] p-0.5"
     />
   );
 }
