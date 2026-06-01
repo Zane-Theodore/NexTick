@@ -2,7 +2,7 @@
 
 `frontend/` is the React charting UI for NexTick.
 
-It loads historical candles from the NestJS REST API, joins Socket.IO rooms for realtime kline updates, and renders candlestick, volume, and indicator series with Lightweight Charts.
+It loads historical candles from the NestJS REST API, joins Socket.IO rooms for realtime kline updates, and renders candlestick, volume, OHLCV tooltip, and configurable indicator series with Lightweight Charts.
 
 The frontend does not connect directly to Binance, Kafka, QuestDB, or AI/model services.
 
@@ -11,12 +11,12 @@ The frontend does not connect directly to Binance, Kafka, QuestDB, or AI/model s
 | Area | Current dependency |
 | --- | --- |
 | UI | React 19 |
-| Build tool | Vite |
-| Language | TypeScript |
-| Charting | Lightweight Charts |
+| Build tool | Vite 8 |
+| Language | TypeScript 6 |
+| Charting | Lightweight Charts 5 |
 | REST client | Axios |
 | Realtime client | Socket.IO Client |
-| Styling | Tailwind CSS with PostCSS |
+| Styling | Tailwind CSS 4 with PostCSS |
 
 ## Source Structure
 
@@ -26,11 +26,12 @@ frontend/src/
 |-- main.tsx
 |-- components/
 |   |-- chart/
-|   |   |-- TradingChart.tsx
 |   |   |-- ChartFilterBar.tsx
+|   |   |-- IndicatorEyeIcon.tsx
 |   |   |-- IndicatorLegend.tsx
 |   |   |-- OhlcvTooltip.tsx
 |   |   |-- ScrollToLatestButton.tsx
+|   |   |-- TradingChart.tsx
 |   |   |-- chartConstants.ts
 |   |   `-- useTradingChartSetup.ts
 |   |-- layout/
@@ -57,7 +58,7 @@ frontend/src/
 
 ## Local Setup
 
-Start the backend first. The UI can render without it, but historical candles, API health status, and realtime updates require the NestJS API.
+Start the backend first. The UI shell can render without it, but historical candles, API health status, and realtime updates require the NestJS API.
 
 ```bash
 cd frontend
@@ -66,7 +67,7 @@ npm install
 npm run dev
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 cd frontend
@@ -75,16 +76,11 @@ npm install
 npm run dev
 ```
 
-Build and lint:
+Build, lint, and preview:
 
 ```bash
 npm run build
 npm run lint
-```
-
-Preview a production build:
-
-```bash
 npm run preview
 ```
 
@@ -96,7 +92,7 @@ http://localhost:5173
 
 ## Environment Variables
 
-These names match `frontend/.env.example` and current frontend code.
+These names match `frontend/.env.example` and current frontend code. The example file intentionally contains blank values; local `.env` must be filled before Vite starts.
 
 | Variable | Required | Example | Used by |
 | --- | --- | --- | --- |
@@ -116,7 +112,7 @@ VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ```
 
-`VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS` are read with `.split(',')`, so do not leave them empty.
+`VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS` are read with direct `.split(',')` calls. Do not leave them blank or undefined.
 
 ## Data Flow
 
@@ -132,10 +128,12 @@ sequenceDiagram
   API-->>Hook: historical candles
   Hook->>UI: candlestickSeries.setData(history)
   Hook->>UI: volumeSeries.setData(history)
+  Hook->>UI: indicatorSeries.setData(history)
   Hook->>Socket: join_kline_room
   Socket-->>Hook: kline_update
   Hook->>UI: candlestickSeries.update(candle)
   Hook->>UI: volumeSeries.update(candle)
+  Hook->>UI: indicatorSeries.setData(updated history)
   Hook->>Socket: leave_kline_room on cleanup
 ```
 
@@ -210,13 +208,35 @@ The frontend uses Lightweight Charts imperatively from React lifecycle hooks.
 
 | Scenario | Lightweight Charts API | Code location |
 | --- | --- | --- |
-| Historical load | `candlestickSeries.setData()` and `volumeSeries.setData()` | `useMarketData.ts` |
+| Historical load | `candlestickSeries.setData()`, `volumeSeries.setData()`, and indicator `setData()` | `useMarketData.ts` |
 | Symbol or interval change | Clear series, load history, then `setData()` | `useMarketData.ts` |
 | Realtime candle | `candlestickSeries.update()` and `volumeSeries.update()` | `useMarketData.ts` |
+| Realtime indicators | Recalculate visible indicator history and call indicator `setData()` | `useMarketData.ts` |
+| Cursor tooltip | Crosshair data updates `OhlcvTooltip` and hovered indicator values | `useTradingChartSetup.ts` |
 
-Realtime updates should not call `setData()` for every tick.
+Realtime candle and volume updates should not call `setData()` for every tick. Indicator series are recalculated from the maintained candle history because EMA, MA, volume-MA, RSI, and MACD depend on historical context.
 
-`useMarketData.ts` also keeps `candleHistoryRef` so the latest realtime candle can replace the current candle or append a new one. EMA and MA indicator series are updated from the same formatted candle stream.
+## Indicators
+
+Default indicator settings live in `components/chart/chartConstants.ts`.
+
+| Indicator group | Default state | Notes |
+| --- | --- | --- |
+| EMA | Visible | Default periods `7`, `25`, `99` on the main chart. |
+| MA | Configured but hidden by group state | Default periods `7`, `25`, `99` on the main chart. |
+| Volume MA | Visible | Default period `20` on the volume pane. |
+| RSI | Hidden | Uses a secondary pane when enabled. |
+| MACD | Hidden | Uses MACD and signal line series in a secondary pane. |
+
+The indicator settings window supports:
+
+| Control | Applies to |
+| --- | --- |
+| Visibility | All indicator groups. |
+| Period slots up to `10` | EMA, MA, volume-MA. |
+| Price source | EMA, MA, RSI, MACD. |
+| Line width and color | All visible line indicators. |
+| Fast, slow, and signal periods | MACD. |
 
 ## Routes and UI Features
 
@@ -225,10 +245,11 @@ Realtime updates should not call `setData()` for every tick.
 | `/` | Renders the realtime chart UI. |
 | `/terms` | Renders static legal/demo terms content. |
 | `/privacy` | Renders static legal/demo privacy content. |
+| Symbol and interval controls | Read options from Vite env. |
 | Footer API status | Calls `VITE_API_HEALTH_URL` every 30 seconds with a 5 second timeout. |
 | Status labels | `Checking...`, `Online`, or `Offline`. |
 
-The Terms and Privacy pages are static pages for the demo/portfolio UI.
+Routing is currently implemented by checking `window.location.pathname` in `App.tsx`; there is no React Router dependency.
 
 ## Frontend Boundary
 

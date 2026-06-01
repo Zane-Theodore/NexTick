@@ -2,9 +2,9 @@
 
 `backend/` is the NestJS API gateway for NexTick.
 
-It validates public contracts, reads historical candles from QuestDB, exposes REST and Swagger, consumes processed kline updates from Kafka, and fans those updates out to browsers through Socket.IO.
+It validates public contracts, reads historical candles from QuestDB, exposes REST and Swagger, consumes processed kline updates from Kafka, and fans those updates out to browsers through Socket.IO rooms.
 
-The backend is not an ingestion engine. It does not connect to Binance and does not aggregate raw trades into candles.
+The backend is not an ingestion engine. It does not connect to Binance and does not aggregate raw trades.
 
 ## Responsibilities
 
@@ -14,35 +14,42 @@ The backend is not an ingestion engine. It does not connect to Binance and does 
 | Health check | `GET /health` returns `{ status, timestamp }`. |
 | Historical candles | `GET /candles` queries QuestDB through `CandlesService`. |
 | Swagger | Registered at `/api/docs` in `main.ts`. |
-| Validation | Global `ValidationPipe` plus DTO classes. |
+| Validation | Global `ValidationPipe` plus DTO classes for REST and Socket.IO payloads. |
 | QuestDB access | `DatabaseService` uses `pg.Pool` over QuestDB PostgreSQL wire protocol. |
 | Kafka consumption | `KafkaService` consumes `KAFKA_TOPIC_KLINE_STREAM` with KafkaJS. |
 | Realtime fan-out | `CandlesGateway` emits Socket.IO `kline_update` events to symbol/interval rooms. |
 
-## Module Structure
+## Source Structure
 
 ```text
-backend/src/
-|-- app.controller.ts
-|-- app.module.ts
-|-- app.service.ts
-|-- main.ts
-|-- common/
-|   `-- logger.ts
-`-- modules/
-    |-- candles/
-    |   |-- candles.controller.ts
-    |   |-- candles.gateway.ts
-    |   |-- candles.module.ts
-    |   |-- candles.service.ts
-    |   |-- dto/
-    |   `-- enum/
-    |-- database/
-    |   |-- database.module.ts
-    |   `-- database.service.ts
-    `-- kafka/
-        |-- kafka.module.ts
-        `-- kafka.service.ts
+backend/
+|-- src/
+|   |-- app.controller.ts
+|   |-- app.controller.spec.ts
+|   |-- app.module.ts
+|   |-- app.service.ts
+|   |-- common/
+|   |   `-- logger.ts
+|   |-- main.ts
+|   `-- modules/
+|       |-- candles/
+|       |   |-- candles.controller.ts
+|       |   |-- candles.gateway.ts
+|       |   |-- candles.module.ts
+|       |   |-- candles.service.ts
+|       |   |-- dto/
+|       |   `-- enum/
+|       |-- database/
+|       |   |-- database.module.ts
+|       |   `-- database.service.ts
+|       `-- kafka/
+|           |-- kafka.module.ts
+|           `-- kafka.service.ts
+|-- test/
+|   |-- app.e2e-spec.ts
+|   `-- jest-e2e.json
+|-- package.json
+`-- README.md
 ```
 
 ## Local Setup
@@ -62,7 +69,7 @@ npm install
 npm run start:dev
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 cd backend
@@ -71,22 +78,29 @@ npm install
 npm run start:dev
 ```
 
-The app opens QuestDB and Kafka connections during startup. If either service is unavailable, startup fails instead of running partially connected.
+The app opens QuestDB and Kafka connections during startup. If either service is unavailable or a required env value is blank, startup fails instead of running partially connected.
 
-## Useful Commands
+## Scripts
 
 These scripts come from `backend/package.json`:
 
-```bash
-npm run build
-npm run lint
-npm run test
-npm run test:e2e
-```
+| Command | Purpose |
+| --- | --- |
+| `npm run start` | Start NestJS once. |
+| `npm run start:dev` | Start NestJS in watch mode. |
+| `npm run start:debug` | Start NestJS in debug watch mode. |
+| `npm run start:prod` | Run `dist/main` after a build. |
+| `npm run build` | Compile the backend. |
+| `npm run format` | Run Prettier over `src/**/*.ts` and `test/**/*.ts`. |
+| `npm run lint` | Run ESLint with `--fix`. |
+| `npm run test` | Run unit specs under `src`. |
+| `npm run test:watch` | Run Jest in watch mode. |
+| `npm run test:cov` | Run Jest with coverage. |
+| `npm run test:e2e` | Run e2e tests from `test/jest-e2e.json`. |
 
 ## Environment Variables
 
-These names match `backend/.env.example` and the current code.
+These names match `backend/.env.example` and current code. The example file intentionally contains blank values; local `.env` must be filled before startup.
 
 | Variable | Required | Example | Used by |
 | --- | --- | --- | --- |
@@ -110,7 +124,7 @@ These names match `backend/.env.example` and the current code.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/` | Returns the current `AppService.getHello()` string: `Hello World!`. |
+| `GET` | `/` | Returns `Hello World!`. |
 | `GET` | `/health` | Returns service health metadata. |
 | `GET` | `/candles` | Returns historical candle data from QuestDB. |
 
@@ -149,8 +163,8 @@ Query parameters:
 
 | Parameter | Required | Default | Validation |
 | --- | --- | --- | --- |
-| `symbol` | Yes | None | String, not empty, transformed to uppercase. |
-| `interval` | No | `1m` | Must be one of the backend allowlisted intervals. |
+| `symbol` | Yes | None | String, not empty, transformed to uppercase by DTO. |
+| `interval` | No | `1m` | Must be one of `VALID_INTERVALS`. |
 | `limit` | No | `100` | Integer from `1` to `1000`. |
 
 Supported intervals:
@@ -184,9 +198,9 @@ Response shape:
 
 ## QuestDB Query Behavior
 
-`CandlesService` reads from `market_candles`, where the pipeline currently stores final `1m` candles.
+`CandlesService` reads from `market_candles`, where the pipeline stores final `1m` candles.
 
-The backend aggregates the stored `1m` rows into the requested interval:
+The backend aggregates stored `1m` rows into the requested interval:
 
 ```sql
 SELECT
@@ -205,7 +219,7 @@ ORDER BY timestamp DESC
 LIMIT $2;
 ```
 
-The service reverses returned rows so API clients receive candles from oldest to newest.
+The service reverses returned rows so API clients receive candles from oldest to newest. It also converts QuestDB timestamps to ISO strings before returning the DTO.
 
 Security notes:
 
@@ -264,7 +278,7 @@ BTCUSDT_1m
 }
 ```
 
-Socket.IO CORS allows `BACKEND_URL`, `FRONTEND_URL`, and requests without an `origin`.
+Socket.IO CORS allows `BACKEND_URL`, `FRONTEND_URL`, and requests without an `origin`. REST CORS allows `FRONTEND_URL`.
 
 ## DTO Validation
 
@@ -286,6 +300,24 @@ new ValidationPipe({
 ```
 
 Socket gateway payloads also use `ValidationPipe`.
+
+## Tests
+
+Current test coverage is focused on NestJS service/controller/gateway behavior:
+
+| Area | Files |
+| --- | --- |
+| App root and health | `src/app.controller.spec.ts`, `test/app.e2e-spec.ts` |
+| Candles API and service | `src/modules/candles/*.spec.ts` |
+| Database provider | `src/modules/database/database.service.spec.ts` |
+| Kafka consumer | `src/modules/kafka/kafka.service.spec.ts` |
+
+Run:
+
+```bash
+npm run test
+npm run test:e2e
+```
 
 ## Security and Boundary Notes
 

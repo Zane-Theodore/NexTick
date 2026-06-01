@@ -23,7 +23,7 @@ From the repository root:
 cp data_pipeline/.env.example data_pipeline/.env
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 Copy-Item data_pipeline\.env.example data_pipeline\.env
@@ -39,7 +39,10 @@ Compose behavior:
 
 | Service | Behavior |
 | --- | --- |
-| `kafka-setup` | Reads `data_pipeline/.env`, waits for Kafka, creates raw trade and kline topics. |
+| `kafka` | Runs a single KRaft Kafka broker with internal listener `kafka:29092` and host listener `localhost:9092`. |
+| `kafka-ui` | Exposes topic and consumer inspection at `http://localhost:8080`. |
+| `kafka-setup` | Reads `data_pipeline/.env`, waits for Kafka, creates raw trade and kline topics with 3 partitions. |
+| `questdb` | Exposes the web console on `9000` and PostgreSQL wire on `8812`. |
 | `data-processor` | Overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb`, waits for QuestDB, then runs `python -m data_pipeline.processor.candle_processor`. |
 | `data-producer` | Overrides `KAFKA_BROKER=kafka:29092`, starts after Kafka setup and the processor, then runs `python -m data_pipeline.producer.binance_producer`. |
 
@@ -51,7 +54,9 @@ docker compose logs -f data-producer data-processor
 
 ## Run Manually
 
-Start Kafka and QuestDB first:
+Use this mode when Kafka and QuestDB run in Docker but the Python producer and processor run on the host.
+
+Start infrastructure only:
 
 ```bash
 docker compose up -d kafka kafka-ui kafka-setup questdb
@@ -63,7 +68,7 @@ Create a virtual environment from the repository root:
 python -m venv .venv
 ```
 
-Windows PowerShell:
+Windows PowerShell, processor terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -71,14 +76,14 @@ pip install -r requirements.txt
 python -m data_pipeline.processor.candle_processor
 ```
 
-Open another terminal for the producer:
+Windows PowerShell, producer terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m data_pipeline.producer.binance_producer
 ```
 
-macOS/Linux:
+macOS/Linux, processor terminal:
 
 ```bash
 source .venv/bin/activate
@@ -86,7 +91,7 @@ pip install -r requirements.txt
 python -m data_pipeline.processor.candle_processor
 ```
 
-Open another terminal:
+macOS/Linux, producer terminal:
 
 ```bash
 source .venv/bin/activate
@@ -95,7 +100,7 @@ python -m data_pipeline.producer.binance_producer
 
 ## Environment Variables
 
-These names match `data_pipeline/.env.example` and `config.py`.
+These names match `data_pipeline/.env.example` and `config.py`. The example file intentionally contains blank values; local `.env` must be filled before startup.
 
 | Variable | Required by code | Example | Notes |
 | --- | --- | --- | --- |
@@ -107,9 +112,9 @@ These names match `data_pipeline/.env.example` and `config.py`.
 | `KAFKA_BROKER` | Yes | `localhost:9092` | Use `kafka:29092` inside the Compose network. |
 | `KAFKA_TOPIC_RAW_TRADES` | Yes | `raw-trades` | Topic for normalized raw trades. |
 | `KAFKA_TOPIC_KLINE_STREAM` | Yes | `kline-stream` | Topic for candle updates. |
-| `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Base Binance WebSocket endpoint used by the producer when building the combined stream URL. |
-| `TRADING_SYMBOLS` | Effectively required in `.env` | `BTCUSDT,ETHUSDT` | If unset, code defaults to `BTCUSDT`; if present but blank, no symbols are produced. |
-| `CANDLE_INTERVALS` | Effectively required in `.env` | `1m,3m,5m,15m,30m,1h` | If unset, code defaults to all supported intervals; if present but blank, no interval managers are created. |
+| `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Base Binance WebSocket endpoint used to build the combined stream URL. |
+| `TRADING_SYMBOLS` | Effectively required in `.env` | `BTCUSDT,ETHUSDT` | If unset, defaults to `BTCUSDT`; if present but blank, no symbols are produced. |
+| `CANDLE_INTERVALS` | Effectively required in `.env` | `1m,3m,5m,15m,30m,1h` | If unset, defaults to all supported intervals; if present but blank, no interval managers are created. |
 | `CANDLE_UPDATE_INTERVAL_MS` | No | `500` | Defaults to `500`. Controls non-final candle publish cadence. |
 
 Supported intervals:
@@ -125,7 +130,7 @@ Supported intervals:
 | `KAFKA_TOPIC_RAW_TRADES` | `BinanceCombinedProducer` | `CandleProcessor` | Normalized trade JSON. |
 | `KAFKA_TOPIC_KLINE_STREAM` | `CandleProcessor` | NestJS backend | Candle update JSON with `is_final`. |
 
-Compose creates both topics with 3 partitions and replication factor `1`.
+Compose creates both topics with 3 partitions and replication factor `1`. The Kafka key is the candle or trade `symbol`, so records for a symbol stay partition-consistent.
 
 ## Raw Trade Message Contract
 
@@ -177,7 +182,7 @@ The processor publishes this shape to `KAFKA_TOPIC_KLINE_STREAM`. The Kafka key 
 
 Only final `1m` candles are inserted into QuestDB by the current code.
 
-## O(1) Candle Aggregation
+## Candle Aggregation
 
 `SingleCandleManager` keeps only the active candle for one symbol and interval.
 
@@ -192,7 +197,9 @@ For each trade:
 | `volume` | Add the latest trade volume. |
 | `is_final` | Added when publishing. `true` for closed candles, `false` for timer-based active candle updates. |
 
-The processor does not keep a historical trade buffer to update the active candle.
+`MultiTimeframeManager` owns one `SingleCandleManager` per configured interval for a symbol. It emits non-final candles every `CANDLE_UPDATE_INTERVAL_MS`.
+
+The processor does not keep a historical trade buffer to update active candles.
 
 ## QuestDB Schema
 

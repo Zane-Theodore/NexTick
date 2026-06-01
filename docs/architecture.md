@@ -1,8 +1,8 @@
 # NexTick Architecture
 
-NexTick is a realtime market data system with explicit runtime boundaries.
+NexTick is a realtime market-data system with explicit runtime boundaries.
 
-Binance trades enter the Python pipeline, Kafka separates services, QuestDB stores historical candles, NestJS exposes validated API contracts, and React renders the chart. AI forecasting, replay buffers, model training, and online learning are future extensions only.
+Binance trades enter the Python pipeline, Kafka separates services, QuestDB stores final `1m` candles, NestJS exposes validated API contracts, and React renders the chart. AI forecasting, replay buffers, model training, and online learning are future extensions only.
 
 ## System Diagram
 
@@ -50,7 +50,7 @@ flowchart LR
 Current behavior:
 
 1. Reads `BINANCE_SOCKET_URL` and `TRADING_SYMBOLS` from config.
-2. Lowercases symbols.
+2. Lowercases configured symbols for Binance stream names.
 3. Builds a combined stream URL from `BINANCE_SOCKET_URL`, like:
 
 ```text
@@ -60,6 +60,7 @@ wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade
 4. Converts Binance payloads into the raw trade contract.
 5. Drops trades with non-positive price or volume.
 6. Publishes to `KAFKA_TOPIC_RAW_TRADES` with `symbol` as the Kafka key.
+7. Reconnects to Binance with exponential backoff when the WebSocket drops.
 
 ### Processor
 
@@ -70,13 +71,14 @@ Current behavior:
 1. Connects to QuestDB through PostgreSQL wire protocol.
 2. Creates `market_candles` if it does not exist.
 3. Consumes `KAFKA_TOPIC_RAW_TRADES` with group id `candle-processor-group`.
-4. Creates one `MultiTimeframeManager` per symbol.
+4. Creates one `MultiTimeframeManager` per detected symbol.
 5. Creates one `SingleCandleManager` per configured interval.
 6. Emits non-final candles every `CANDLE_UPDATE_INTERVAL_MS`.
 7. Emits final candles when a trade crosses an interval boundary.
 8. Persists final `1m` candles only.
+9. Publishes final `1m` candles only after QuestDB insert succeeds.
 
-### O(1) Aggregation
+### Candle Aggregation
 
 Each `SingleCandleManager` keeps only the active candle for one symbol and interval.
 
@@ -98,7 +100,7 @@ No replay buffer or full trade history is used for active candle aggregation.
 | `KAFKA_TOPIC_RAW_TRADES` | Python producer | Python processor | Raw trade JSON. |
 | `KAFKA_TOPIC_KLINE_STREAM` | Python processor | NestJS backend | Candle JSON plus `is_final`. |
 
-Docker Compose creates both topics in `kafka-setup` using values from `data_pipeline/.env`.
+Docker Compose creates both topics in `kafka-setup` using values from `data_pipeline/.env`. Each topic is created with 3 partitions and replication factor `1`.
 
 ## Data Shapes
 
@@ -262,17 +264,29 @@ Key files:
 | `src/App.tsx` | Selects `/`, `/terms`, or `/privacy` based on `window.location.pathname`. |
 | `src/services/api.ts` | Calls `GET {VITE_API_URL}/candles`. |
 | `src/services/socket.ts` | Creates Socket.IO client and room helpers. |
-| `src/hooks/useMarketData.ts` | Loads history, joins/leaves rooms, applies realtime candles. |
-| `src/components/chart/TradingChart.tsx` | Owns chart refs, selected market, indicators, and chart UI. |
+| `src/hooks/useMarketData.ts` | Loads history, joins/leaves rooms, applies realtime candles, and syncs indicators. |
+| `src/components/chart/TradingChart.tsx` | Owns chart refs, selected market, indicators, and chart UI state. |
+| `src/components/chart/IndicatorLegend.tsx` | Displays indicator values and settings window. |
 | `src/components/layout/Footer.tsx` | Checks `VITE_API_HEALTH_URL` and displays `Checking...`, `Online`, or `Offline`. |
 
 Chart update rules:
 
 | Case | API |
 | --- | --- |
-| Historical load | `setData()` |
-| Symbol or interval switch | Clear series, fetch history, then `setData()` |
-| Realtime candle | `update()` |
+| Historical load | `setData()` for candles, volume, and indicator series. |
+| Symbol or interval switch | Clear series, fetch history, then `setData()`. |
+| Realtime candle | `update()` for candle and volume series. |
+| Realtime indicators | Recalculate visible indicator history and call indicator `setData()`. |
+
+Indicator groups:
+
+| Group | Pane behavior |
+| --- | --- |
+| EMA | Main chart pane. |
+| MA | Main chart pane. |
+| Volume MA | Volume pane. |
+| RSI | Secondary pane when enabled. |
+| MACD | Secondary pane with MACD and signal line when enabled. |
 
 ## Time Format Rules
 
@@ -327,10 +341,10 @@ Chart update rules:
 
 | Change | Update these places |
 | --- | --- |
-| Add interval | `data_pipeline/config.py`, `backend/src/modules/candles/enum/candle-interval.enum.ts`, `data_pipeline/.env`, `frontend/.env`. |
-| Add symbol | `data_pipeline/.env`, `frontend/.env`. |
+| Add interval | `data_pipeline/config.py`, `backend/src/modules/candles/enum/candle-interval.enum.ts`, `data_pipeline/.env`, `frontend/.env`, docs. |
+| Add symbol | `data_pipeline/.env`, `frontend/.env`, docs/examples if needed. |
 | Rename topics | `data_pipeline/.env`, `backend/.env`, `docker-compose.yml`, docs. |
-| Change kline payload | Python `broadcast_candle`, backend DTOs, frontend `MarketCandle` and `KlineUpdate`. |
+| Change kline payload | Python `broadcast_candle`, backend DTOs, frontend `MarketCandle` and `KlineUpdate`, docs. |
 | Change QuestDB schema | Processor DDL and insert, backend SQL, docs, and data migration plan. |
 | Change health route | `AppController`, frontend `VITE_API_HEALTH_URL`, docs. |
 

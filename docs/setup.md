@@ -35,6 +35,8 @@ cp frontend/.env.example frontend/.env
 
 ## 2. Fill Environment Values
 
+The `.env.example` files intentionally contain blank values. Fill each local `.env` before starting services.
+
 ### `data_pipeline/.env`
 
 ```env
@@ -124,6 +126,14 @@ Local service URLs:
 | Kafka broker for host apps | `localhost:9092` |
 | QuestDB PostgreSQL wire for host apps | `localhost:8812` |
 
+Expected service order:
+
+1. `kafka` becomes healthy.
+2. `kafka-setup` creates `raw-trades` and `kline-stream`.
+3. `questdb` becomes healthy.
+4. `data-processor` starts and verifies/creates `market_candles`.
+5. `data-producer` starts and connects to Binance.
+
 ## 4. Start the Backend
 
 Open a new terminal:
@@ -180,8 +190,9 @@ The frontend:
 3. Calls `GET {VITE_API_URL}/candles?symbol=...&interval=...&limit=1000`.
 4. Draws history with `setData()`.
 5. Joins Socket.IO room `{SYMBOL}_{interval}`.
-6. Applies `kline_update` with `update()`.
-7. Checks `VITE_API_HEALTH_URL` for footer status.
+6. Applies `kline_update` with `update()` for candles and volume.
+7. Recalculates visible indicator series from maintained candle history.
+8. Checks `VITE_API_HEALTH_URL` for footer status.
 
 ## Optional: Run Pipeline Manually
 
@@ -249,6 +260,12 @@ npm run build
 npm run lint
 ```
 
+Pipeline syntax check:
+
+```bash
+python -m compileall data_pipeline
+```
+
 Pipeline operational checks:
 
 ```bash
@@ -280,6 +297,7 @@ LIMIT 20;
 | Problem | Likely cause | Fix |
 | --- | --- | --- |
 | Kafka is not ready | Broker is still starting or `kafka-setup` has not completed | Run `docker compose ps` and `docker compose logs -f kafka kafka-setup`. |
+| Topics are missing | `data_pipeline/.env` topic names are blank or `kafka-setup` did not finish | Fill env values and run `docker compose up -d kafka-setup`. |
 | QuestDB is not ready | QuestDB healthcheck has not passed | Check `http://localhost:9000` or `docker compose logs -f questdb`. |
 | Backend startup failed | Kafka or QuestDB is unavailable, or env values are blank | Confirm Docker services are healthy and `backend/.env` is filled. |
 | Frontend does not load data | Backend is down, `VITE_API_URL` is wrong, or no candles exist yet | Check `/health`, `/candles`, and frontend `.env`; wait for a final `1m` candle. |
@@ -288,7 +306,7 @@ LIMIT 20;
 | `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after trades start. |
 | Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs; Compose sets DNS to `8.8.8.8` and `8.8.4.4`. |
 | Interval returns 400 | Interval is not in backend `VALID_INTERVALS` | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
-| Topics are missing | `data_pipeline/.env` topic names are blank or `kafka-setup` did not finish | Fill env values and run `docker compose up -d kafka-setup`. |
+| Chart fails during startup | `VITE_TRADING_SYMBOLS` or `VITE_CANDLE_INTERVALS` is blank or undefined | Fill both frontend env values and restart Vite. |
 
 ## Stop Local Services
 
