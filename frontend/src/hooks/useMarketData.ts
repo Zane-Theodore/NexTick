@@ -211,19 +211,20 @@ export const useMarketData = (
 function getIndicatorData(config: IndicatorSeriesConfig, history: FormattedCandle[]): LineData<Time>[] {
   if (history.length === 0) return [];
   if (config.period !== undefined && config.period <= 0) return [];
+  const sourceHistory = getSourceHistory(history, config.source ?? 'close');
 
   switch (config.kind) {
     case 'ema':
-      return calculateEMAHistory(history, config.period ?? 1) as LineData<Time>[];
+      return calculateEMAHistory(sourceHistory, config.period ?? 1) as LineData<Time>[];
     case 'ma':
-      return calculateMAHistory(history, config.period ?? 1) as LineData<Time>[];
+      return calculateMAHistory(sourceHistory, config.period ?? 1) as LineData<Time>[];
     case 'volume-ma':
       return calculateVolumeMAHistory(history, config.period ?? 1) as LineData<Time>[];
     case 'rsi':
-      return calculateRSIHistory(history, config.period ?? 14) as LineData<Time>[];
+      return calculateRSIHistory(sourceHistory, config.period ?? 14) as LineData<Time>[];
     case 'macd': {
       const macd = calculateMACDHistory(
-        history,
+        sourceHistory,
         config.fastPeriod ?? 12,
         config.slowPeriod ?? 26,
         config.signalPeriod ?? 9,
@@ -232,7 +233,7 @@ function getIndicatorData(config: IndicatorSeriesConfig, history: FormattedCandl
     }
     case 'macd-signal': {
       const macd = calculateMACDHistory(
-        history,
+        sourceHistory,
         config.fastPeriod ?? 12,
         config.slowPeriod ?? 26,
         config.signalPeriod ?? 9,
@@ -252,7 +253,7 @@ function getIndicatorValues(settings: IndicatorSetting[], history: FormattedCand
 
     if (setting.group === 'macd') {
       const macd = calculateMACDHistory(
-        history,
+        getSourceHistory(history, setting.source),
         setting.fastPeriod,
         setting.slowPeriod,
         setting.signalPeriod,
@@ -291,6 +292,8 @@ function getIndicatorValues(settings: IndicatorSetting[], history: FormattedCand
       kind: setting.group,
       label: setting.label,
       period: setting.period,
+      source: setting.source,
+      lineWidth: setting.lineWidth,
       color: setting.color,
     };
     const indicatorData = getIndicatorData(config as IndicatorSeriesConfig, history);
@@ -310,4 +313,16 @@ function getIndicatorValues(settings: IndicatorSetting[], history: FormattedCand
 
     return values;
   }, []);
+}
+
+function getSourceHistory(
+  history: FormattedCandle[],
+  source: NonNullable<IndicatorSeriesConfig['source']>,
+) {
+  if (source === 'close') return history;
+
+  return history.map((candle) => ({
+    ...candle,
+    close: candle[source],
+  }));
 }
