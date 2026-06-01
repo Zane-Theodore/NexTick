@@ -28,28 +28,15 @@ export const useMarketData = (
   const candleHistoryRef = useRef<FormattedCandle[]>([]);
 
   const syncIndicatorSeries = useCallback((history: FormattedCandle[]) => {
-    const nextValues = indicatorSeriesRef?.current.reduce<IndicatorValue[]>((values, config) => {
+    indicatorSeriesRef?.current.forEach((config) => {
       const indicatorData = getIndicatorData(config, history) as LineData<Time>[];
       config.series.setData(indicatorData);
+    });
 
-      const lastPoint = indicatorData.at(-1);
-      if (lastPoint) {
-        values.push({
-          id: config.id,
-          group: config.group,
-          kind: config.kind,
-          label: config.label,
-          period: config.period,
-          value: lastPoint.value,
-          color: config.color,
-        });
-      }
-
-      return values;
-    }, []) ?? [];
+    const nextValues = getIndicatorValues(indicatorSettings, history);
 
     onIndicatorValuesChange?.(nextValues);
-  }, [indicatorSeriesRef, onIndicatorValuesChange]);
+  }, [indicatorSeriesRef, indicatorSettings, onIndicatorValuesChange]);
 
   useEffect(() => {
     if (!isChartReady || candleHistoryRef.current.length === 0) return;
@@ -223,6 +210,7 @@ export const useMarketData = (
 
 function getIndicatorData(config: IndicatorSeriesConfig, history: FormattedCandle[]): LineData<Time>[] {
   if (history.length === 0) return [];
+  if (config.period !== undefined && config.period <= 0) return [];
 
   switch (config.kind) {
     case 'ema':
@@ -254,4 +242,72 @@ function getIndicatorData(config: IndicatorSeriesConfig, history: FormattedCandl
     default:
       return [];
   }
+}
+
+function getIndicatorValues(settings: IndicatorSetting[], history: FormattedCandle[]): IndicatorValue[] {
+  if (history.length === 0) return [];
+
+  return settings.reduce<IndicatorValue[]>((values, setting) => {
+    if (!setting.visible) return values;
+
+    if (setting.group === 'macd') {
+      const macd = calculateMACDHistory(
+        history,
+        setting.fastPeriod,
+        setting.slowPeriod,
+        setting.signalPeriod,
+      );
+      const macdPoint = macd.macd.at(-1);
+      const signalPoint = macd.signal.at(-1);
+
+      if (macdPoint) {
+        values.push({
+          id: `${setting.id}-macd`,
+          group: setting.group,
+          kind: 'macd',
+          label: setting.label,
+          value: macdPoint.value,
+          color: setting.macdColor,
+        });
+      }
+
+      if (signalPoint) {
+        values.push({
+          id: `${setting.id}-signal`,
+          group: setting.group,
+          kind: 'macd-signal',
+          label: `${setting.label} Signal`,
+          value: signalPoint.value,
+          color: setting.signalColor,
+        });
+      }
+
+      return values;
+    }
+
+    const config: Omit<IndicatorSeriesConfig, 'series'> = {
+      id: setting.id,
+      group: setting.group,
+      kind: setting.group,
+      label: setting.label,
+      period: setting.period,
+      color: setting.color,
+    };
+    const indicatorData = getIndicatorData(config as IndicatorSeriesConfig, history);
+    const lastPoint = indicatorData.at(-1);
+
+    if (lastPoint) {
+      values.push({
+        id: setting.id,
+        group: setting.group,
+        kind: setting.group,
+        label: setting.label,
+        period: setting.period,
+        value: lastPoint.value,
+        color: setting.color,
+      });
+    }
+
+    return values;
+  }, []);
 }

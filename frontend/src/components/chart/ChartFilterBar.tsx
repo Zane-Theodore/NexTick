@@ -8,6 +8,7 @@ interface ChartFilterBarProps {
   supportedIntervals: string[];
   onSymbolChange: (symbol: string) => void;
   onIntervalChange: (interval: string) => void;
+  onOpenIndicatorSettings: () => void;
 }
 
 interface FilterDropdownProps {
@@ -95,6 +96,7 @@ export default function ChartFilterBar({
   supportedIntervals,
   onSymbolChange,
   onIntervalChange,
+  onOpenIndicatorSettings,
 }: ChartFilterBarProps) {
   return (
     <div className="shrink-0 border-b border-[#3f4654] bg-[#0f1117] px-4 py-3">
@@ -116,6 +118,16 @@ export default function ChartFilterBar({
           formatOptionLabel={formatIntervalLabel}
         />
 
+        <button
+          type="button"
+          onClick={onOpenIndicatorSettings}
+          className="flex h-10 w-10 items-center justify-center rounded border border-[#3f4654] bg-[#151a23] text-[#9099aa] outline-none transition-colors hover:border-[#6b7280] hover:text-white focus:border-[#6b7280] focus:text-white"
+          title="Indicator settings"
+          aria-label="Indicator settings"
+        >
+          <LineChartIcon />
+        </button>
+
         <div className="ml-auto flex items-center gap-2 text-sm text-[#d1d4dc]">
           <span className="h-2 w-2 rounded-full bg-[#26a69a] shadow-[0_0_8px_rgba(38,166,154,0.8)]" />
           <span className="font-semibold">{symbol}</span>
@@ -124,5 +136,26 @@ export default function ChartFilterBar({
         </div>
       </div>
     </div>
+  );
+}
+
+function LineChartIcon() {
+  return (
+    <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path
+        d="M3 16.5h14M4 13l3.4-3.2 2.7 2.2L15.5 5"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M14 5h1.8v1.8"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }

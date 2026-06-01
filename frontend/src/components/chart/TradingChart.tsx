@@ -25,8 +25,9 @@ export default function TradingChart() {
   const [cursorPosition, setCursorPosition] = useState<CursorPosition>({ x: 0, y: 0 });
   const [indicatorValues, setIndicatorValues] = useState<IndicatorValue[]>([]);
   const [hoverIndicatorValues, setHoverIndicatorValues] = useState<IndicatorValue[] | null>(null);
-  const [isIndicatorLegendOpen, setIsIndicatorLegendOpen] = useState<boolean>(false);
-  const [dismissedIndicatorGroups, setDismissedIndicatorGroups] = useState<IndicatorGroup[]>([]);
+  const [isIndicatorLegendOpen, setIsIndicatorLegendOpen] = useState<boolean>(true);
+  const [indicatorSettingsWindow, setIndicatorSettingsWindow] = useState<{ id: number; initialGroup: IndicatorGroup | null } | null>(null);
+  const [hiddenIndicatorGroups, setHiddenIndicatorGroups] = useState<IndicatorGroup[]>(['ma']);
   const [indicatorSettings, setIndicatorSettings] = useState<IndicatorSetting[]>(() => (
     DEFAULT_INDICATOR_SETTINGS.map((setting) => ({ ...setting }))
   ));
@@ -36,33 +37,46 @@ export default function TradingChart() {
   }, []);
 
   const handleToggleIndicatorGroupVisibility = useCallback((group: IndicatorGroup) => {
-    setIndicatorSettings((settings) => settings.map((setting) => (
-      setting.group === group
-        ? { ...setting, visible: !settings.some((candidate) => candidate.group === group && candidate.visible) }
-        : setting
-    )));
+    setHiddenIndicatorGroups((groups) => (
+      groups.includes(group)
+        ? groups.filter((hiddenGroup) => hiddenGroup !== group)
+        : [...groups, group]
+    ));
   }, []);
 
   const handleApplyIndicatorSettings = useCallback((updatedSettings: IndicatorSetting[]) => {
     const updatedSettingsById = new Map(updatedSettings.map((setting) => [setting.id, setting]));
-    setIndicatorSettings((settings) => settings.map((setting) => (
-      updatedSettingsById.get(setting.id) ?? setting
+    setIndicatorSettings((settings) => {
+      const currentSettingIds = new Set(settings.map((setting) => setting.id));
+      return [
+        ...settings.map((setting) => updatedSettingsById.get(setting.id) ?? setting),
+        ...updatedSettings.filter((setting) => !currentSettingIds.has(setting.id)),
+      ];
+    });
+    setHiddenIndicatorGroups((groups) => groups.filter((group) => (
+      updatedSettings.some((setting) => setting.group === group && setting.visible)
     )));
   }, []);
 
   const handleDismissIndicatorGroup = useCallback((group: IndicatorGroup) => {
-    setDismissedIndicatorGroups((groups) => (
-      groups.includes(group) ? groups : [...groups, group]
-    ));
+    setIndicatorSettings((settings) => settings.map((setting) => (
+      setting.group === group ? { ...setting, visible: false } : setting
+    )));
+    setHiddenIndicatorGroups((groups) => groups.filter((hiddenGroup) => hiddenGroup !== group));
   }, []);
 
-  const activeIndicatorSettings = useMemo(() => (
-    indicatorSettings.filter((setting) => !dismissedIndicatorGroups.includes(setting.group))
-  ), [dismissedIndicatorGroups, indicatorSettings]);
+  const handleOpenIndicatorSettingsWindow = useCallback((initialGroup: IndicatorGroup | null) => {
+    setIndicatorSettingsWindow((currentWindow) => ({
+      id: (currentWindow?.id ?? 0) + 1,
+      initialGroup,
+    }));
+  }, []);
 
-  const activeDefaultIndicatorSettings = useMemo(() => (
-    DEFAULT_INDICATOR_SETTINGS.filter((setting) => !dismissedIndicatorGroups.includes(setting.group))
-  ), [dismissedIndicatorGroups]);
+  const chartIndicatorSettings = useMemo(() => (
+    indicatorSettings.map((setting) => (
+      hiddenIndicatorGroups.includes(setting.group) ? { ...setting, visible: false } : setting
+    ))
+  ), [hiddenIndicatorGroups, indicatorSettings]);
 
   useTradingChartSetup({
     chartContainerRef,
@@ -71,7 +85,7 @@ export default function TradingChart() {
     volumeSeriesRef,
     indicatorSeriesRef,
     volumeByTimeRef,
-    indicatorSettings: activeIndicatorSettings,
+    indicatorSettings: chartIndicatorSettings,
     setIsChartReady,
     setLegendData,
     setCursorPosition,
@@ -86,12 +100,22 @@ export default function TradingChart() {
     interval,
     volumeByTimeRef,
     indicatorSeriesRef,
-    activeIndicatorSettings,
+    indicatorSettings,
     handleIndicatorValuesChange,
     isChartReady,
   );
 
-  const visibleIndicatorValues = hoverIndicatorValues ?? indicatorValues;
+  const visibleIndicatorValues = useMemo(() => {
+    if (!hoverIndicatorValues) return indicatorValues;
+
+    const hoverValuesById = new Map(hoverIndicatorValues.map((value) => [value.id, value]));
+    const mergedValues = indicatorValues.map((value) => hoverValuesById.get(value.id) ?? value);
+    const mergedValueIds = new Set(mergedValues.map((value) => value.id));
+    return [
+      ...mergedValues,
+      ...hoverIndicatorValues.filter((value) => !mergedValueIds.has(value.id)),
+    ];
+  }, [hoverIndicatorValues, indicatorValues]);
 
   return (
     <div className="h-full flex flex-col bg-[#0f1117] overflow-hidden">
@@ -102,6 +126,7 @@ export default function TradingChart() {
         supportedIntervals={SUPPORTED_INTERVALS}
         onSymbolChange={setSymbol}
         onIntervalChange={setInterval}
+        onOpenIndicatorSettings={() => handleOpenIndicatorSettingsWindow(null)}
       />
 
       <div className="flex-1 relative overflow-hidden bg-[#0b0f16]">
@@ -117,13 +142,18 @@ export default function TradingChart() {
         <div ref={chartContainerRef} className="w-full h-full" />
 
         <IndicatorLegend
-          settings={activeIndicatorSettings}
-          defaultSettings={activeDefaultIndicatorSettings}
+          settings={indicatorSettings}
+          allSettings={indicatorSettings}
+          allDefaultSettings={DEFAULT_INDICATOR_SETTINGS}
           values={visibleIndicatorValues}
+          hiddenGroups={hiddenIndicatorGroups}
           isOpen={isIndicatorLegendOpen}
+          settingsWindow={indicatorSettingsWindow}
           onToggleOpen={() => setIsIndicatorLegendOpen((isOpen) => !isOpen)}
           onToggleGroupVisibility={handleToggleIndicatorGroupVisibility}
           onDismissGroup={handleDismissIndicatorGroup}
+          onOpenSettingsWindow={handleOpenIndicatorSettingsWindow}
+          onCloseSettingsWindow={() => setIndicatorSettingsWindow(null)}
           onApplySettings={handleApplyIndicatorSettings}
         />
 
