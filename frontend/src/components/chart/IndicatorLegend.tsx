@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 
-import type { IndicatorGroup, IndicatorSetting, IndicatorValue, MacdIndicatorSetting, SinglePeriodIndicatorSetting } from '../../types/chart';
+import type { ChartPaneLayout, IndicatorGroup, IndicatorPriceSource, IndicatorSetting, IndicatorValue, MacdIndicatorSetting, SinglePeriodIndicatorSetting } from '../../types/chart';
 import { formatChartValue } from '../../utils/formatters';
 import IndicatorEyeIcon from './IndicatorEyeIcon';
 
@@ -16,8 +16,8 @@ const INDICATOR_GROUPS: Array<{ group: IndicatorGroup; label: string }> = [
 type IndicatorSettingsTab = 'main' | 'secondary';
 
 const INDICATOR_SETTINGS_TABS: Array<{ id: IndicatorSettingsTab; label: string; groups: IndicatorGroup[] }> = [
-  { id: 'main', label: 'Main', groups: ['ema', 'ma'] },
-  { id: 'secondary', label: 'Secondary', groups: ['volume-ma', 'rsi', 'macd'] },
+  { id: 'main', label: 'Main chart indicators', groups: ['ema', 'ma'] },
+  { id: 'secondary', label: 'Sub-panel indicators', groups: ['volume-ma', 'rsi', 'macd'] },
 ];
 
 type SlotIndicatorGroup = 'ema' | 'ma' | 'volume-ma';
@@ -41,6 +41,13 @@ const SLOT_DEFAULT_COLORS = [
   '#eab308',
   '#94a3b8',
 ];
+const PRICE_SOURCE_OPTIONS: Array<{ value: IndicatorPriceSource; label: string }> = [
+  { value: 'open', label: 'Open' },
+  { value: 'high', label: 'High' },
+  { value: 'low', label: 'Low' },
+  { value: 'close', label: 'Close' },
+];
+const LINE_WIDTH_OPTIONS = [1, 2, 3, 4] as const;
 
 interface IndicatorLegendProps {
   settings: IndicatorSetting[];
@@ -48,9 +55,8 @@ interface IndicatorLegendProps {
   allDefaultSettings: IndicatorSetting[];
   values: IndicatorValue[];
   hiddenGroups: IndicatorGroup[];
-  isOpen: boolean;
+  paneLayouts: ChartPaneLayout[];
   settingsWindow: { id: number; initialGroup: IndicatorGroup | null } | null;
-  onToggleOpen: () => void;
   onToggleGroupVisibility: (group: IndicatorGroup) => void;
   onDismissGroup: (group: IndicatorGroup) => void;
   onOpenSettingsWindow: (group: IndicatorGroup | null) => void;
@@ -64,67 +70,69 @@ export default function IndicatorLegend({
   allDefaultSettings,
   values,
   hiddenGroups,
-  isOpen,
+  paneLayouts,
   settingsWindow,
-  onToggleOpen,
   onToggleGroupVisibility,
   onDismissGroup,
   onOpenSettingsWindow,
   onCloseSettingsWindow,
   onApplySettings,
 }: IndicatorLegendProps) {
+  const [collapsedPaneIndexes, setCollapsedPaneIndexes] = useState<number[]>([]);
+  const activeGroups = useMemo(() => new Set(
+    settings
+      .filter((setting) => setting.visible && !hiddenGroups.includes(setting.group))
+      .map((setting) => setting.group),
+  ), [hiddenGroups, settings]);
   const groupedSettings = useMemo(() => (
     INDICATOR_GROUPS.map(({ group, label }) => ({
       group,
       label,
+      paneIndex: getLegendPaneIndex(group, activeGroups),
       settings: settings.filter((setting) => setting.group === group && setting.visible),
     })).filter(({ settings }) => settings.length > 0)
-  ), [settings]);
+  ), [activeGroups, settings]);
+  const paneLegendGroups = useMemo(() => {
+    const groupsByPane = new Map<number, typeof groupedSettings>();
+
+    groupedSettings.forEach((groupSettings) => {
+      const paneGroups = groupsByPane.get(groupSettings.paneIndex) ?? [];
+      groupsByPane.set(groupSettings.paneIndex, [...paneGroups, groupSettings]);
+    });
+
+    return Array.from(groupsByPane.entries())
+      .map(([paneIndex, groups]) => ({ paneIndex, groups }))
+      .sort((a, b) => a.paneIndex - b.paneIndex);
+  }, [groupedSettings]);
   const settingsVisibilityKey = allSettings.map((setting) => `${setting.id}:${setting.visible ? 1 : 0}`).join('|');
+  const handleTogglePaneLegend = (paneIndex: number) => {
+    setCollapsedPaneIndexes((currentIndexes) => (
+      currentIndexes.includes(paneIndex)
+        ? currentIndexes.filter((currentIndex) => currentIndex !== paneIndex)
+        : [...currentIndexes, paneIndex]
+    ));
+  };
 
   return (
     <>
-      <div className="absolute left-0 top-2 z-10 flex max-w-[calc(100%-56px)] items-start">
-        <button
-          type="button"
-          onClick={onToggleOpen}
-          className="h-7 w-7 shrink-0 border border-transparent rounded-md text-[#d1d4dc] hover:border-[#6b7280] hover:text-white flex items-center justify-center transition-colors"
-          title={isOpen ? 'Hide indicators' : 'Show indicators'}
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className={`h-4 w-4 transition-transform duration-300 ease-out ${
-              isOpen ? 'rotate-0' : '-rotate-90'
-            }`}
-            viewBox="0 0 20 20"
-            fill="currentColor"
-          >
-            <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
-          </svg>
-        </button>
+      {paneLegendGroups.map(({ paneIndex, groups }) => {
+        const paneLayout = getPaneLegendLayout(paneLayouts, paneIndex);
 
-        <div
-          className={`overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-out ${
-            isOpen ? 'max-w-[min(780px,calc(100vw-48px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-3'
-          }`}
-        >
-          <div className="max-h-[calc(100vh-150px)] overflow-auto px-1.5 py-1 font-mono text-xs whitespace-nowrap">
-            {groupedSettings.map(({ group, label, settings: groupSettings }) => (
-              <IndicatorLegendRow
-                key={group}
-                group={group}
-                label={label}
-                settings={groupSettings}
-                values={values}
-                isHidden={hiddenGroups.includes(group)}
-                onToggleVisibility={onToggleGroupVisibility}
-                onOpenSettings={onOpenSettingsWindow}
-                onDismiss={onDismissGroup}
-              />
-            ))}
-          </div>
-        </div>
-      </div>
+        return (
+          <PaneIndicatorLegend
+            key={paneIndex}
+            paneLayout={paneLayout}
+            groups={groups}
+            values={values}
+            hiddenGroups={hiddenGroups}
+            isOpen={!collapsedPaneIndexes.includes(paneIndex)}
+            onToggleOpen={() => handleTogglePaneLegend(paneIndex)}
+            onToggleGroupVisibility={onToggleGroupVisibility}
+            onOpenSettingsWindow={onOpenSettingsWindow}
+            onDismissGroup={onDismissGroup}
+          />
+        );
+      })}
 
       {settingsWindow && (
         <IndicatorSettingsWindow
@@ -137,6 +145,84 @@ export default function IndicatorLegend({
         />
       )}
     </>
+  );
+}
+
+interface PaneIndicatorLegendProps {
+  paneLayout: ChartPaneLayout;
+  groups: Array<{
+    group: IndicatorGroup;
+    label: string;
+    settings: IndicatorSetting[];
+  }>;
+  values: IndicatorValue[];
+  hiddenGroups: IndicatorGroup[];
+  isOpen: boolean;
+  onToggleOpen: () => void;
+  onToggleGroupVisibility: (group: IndicatorGroup) => void;
+  onOpenSettingsWindow: (group: IndicatorGroup) => void;
+  onDismissGroup: (group: IndicatorGroup) => void;
+}
+
+function PaneIndicatorLegend({
+  paneLayout,
+  groups,
+  values,
+  hiddenGroups,
+  isOpen,
+  onToggleOpen,
+  onToggleGroupVisibility,
+  onOpenSettingsWindow,
+  onDismissGroup,
+}: PaneIndicatorLegendProps) {
+  return (
+    <div
+      className="absolute left-0 z-10 flex max-w-[calc(100%-56px)] items-start"
+      style={{ top: paneLayout.top + 6 }}
+    >
+      <button
+        type="button"
+        onClick={onToggleOpen}
+        className="h-7 w-7 shrink-0 border border-transparent rounded-md text-[#d1d4dc] hover:border-[#6b7280] hover:text-white flex items-center justify-center transition-colors"
+        title={isOpen ? 'Hide indicators' : 'Show indicators'}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          className={`h-4 w-4 transition-transform duration-300 ease-out ${
+            isOpen ? 'rotate-0' : '-rotate-90'
+          }`}
+          viewBox="0 0 20 20"
+          fill="currentColor"
+        >
+          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+        </svg>
+      </button>
+
+      <div
+        className={`overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-out ${
+          isOpen ? 'max-w-[min(780px,calc(100vw-48px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-3'
+        }`}
+      >
+        <div
+          className="overflow-auto px-1.5 py-1 font-mono text-xs whitespace-nowrap"
+          style={{ maxHeight: Math.max(36, paneLayout.height - 12) }}
+        >
+          {groups.map(({ group, label, settings: groupSettings }) => (
+            <IndicatorLegendRow
+              key={group}
+              group={group}
+              label={label}
+              settings={groupSettings}
+              values={values}
+              isHidden={hiddenGroups.includes(group)}
+              onToggleVisibility={onToggleGroupVisibility}
+              onOpenSettings={onOpenSettingsWindow}
+              onDismiss={onDismissGroup}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -161,7 +247,7 @@ function IndicatorSettingsWindow({
     resolvedInitialGroup ? getSettingsTabForGroup(resolvedInitialGroup) : 'main',
   );
   const [draftSettings, setDraftSettings] = useState<IndicatorSetting[]>(() => cloneSettings(settings));
-  const [windowPosition, setWindowPosition] = useState({ x: 360, y: 96 });
+  const [windowPosition, setWindowPosition] = useState(() => getClampedSettingsWindowPosition({ x: 360, y: 96 }));
   const [dragState, setDragState] = useState<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
 
   const activeGroupLabel = INDICATOR_GROUPS.find((item) => item.group === activeGroup)?.label ?? 'Indicator';
@@ -207,10 +293,10 @@ function IndicatorSettingsWindow({
     if (!dragState) return;
 
     const handleMouseMove = (event: MouseEvent) => {
-      setWindowPosition({
+      setWindowPosition(getClampedSettingsWindowPosition({
         x: Math.max(8, dragState.originX + event.clientX - dragState.startX),
         y: Math.max(8, dragState.originY + event.clientY - dragState.startY),
-      });
+      }));
     };
 
     const handleMouseUp = () => setDragState(null);
@@ -223,6 +309,17 @@ function IndicatorSettingsWindow({
       window.removeEventListener('mouseup', handleMouseUp);
     };
   }, [dragState]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setWindowPosition((position) => getClampedSettingsWindowPosition(position));
+    };
+
+    window.addEventListener('resize', handleResize);
+    handleResize();
+
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const handleSettingsTabChange = (tab: IndicatorSettingsTab) => {
     setActiveSettingsTab(tab);
@@ -291,44 +388,43 @@ function IndicatorSettingsWindow({
 
   return (
     <div
-      className="fixed z-50 flex max-h-[min(560px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))] flex-col overflow-hidden rounded-lg border border-[#2f3745] bg-[#1b222d] shadow-2xl shadow-black/60"
+      className="fixed z-50 flex max-h-[min(560px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))] flex-col overflow-hidden rounded-lg border border-[#3f4654] bg-[#10141c] shadow-2xl shadow-black/60"
       style={{ left: windowPosition.x, top: windowPosition.y }}
     >
       <div
-        className="flex h-10 shrink-0 cursor-move select-none items-center justify-between border-b border-[#303846] bg-[#1f2632] px-4"
+        className="flex h-11 shrink-0 cursor-move select-none items-center justify-between border-b border-[#3f4654] bg-[#10141c] px-3"
         onMouseDown={handleHeaderMouseDown}
       >
-        <div className="flex h-full items-end gap-5">
+        <div className="flex gap-4">
           {INDICATOR_SETTINGS_TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => handleSettingsTabChange(tab.id)}
-              className={`relative h-full px-0 text-sm font-semibold transition-colors ${
-                activeSettingsTab === tab.id ? 'text-[#eef2f7]' : 'text-[#8f99a8] hover:text-[#d1d6df]'
+              className={`h-8 rounded px-2 text-sm font-semibold outline-none transition-colors ${
+                activeSettingsTab === tab.id
+                  ? 'text-white'
+                  : 'text-[#9099aa] hover:text-white focus:text-white'
               }`}
             >
               {tab.label}
-              {activeSettingsTab === tab.id && (
-                <span className="absolute bottom-0 left-1/2 h-0.5 w-8 -translate-x-1/2 rounded-full bg-[#f0b90b]" />
-              )}
             </button>
           ))}
         </div>
         <button
           type="button"
           onClick={onClose}
-          className="flex h-9 w-9 items-center justify-center rounded-md border border-transparent text-[#d1d6df] transition-colors hover:border-[#6b7280] hover:text-white"
+          className="flex h-9 w-9 items-center justify-center rounded border border-transparent text-[#9099aa] transition-colors hover:border-[#6b7280] hover:text-white focus:border-[#6b7280] focus:text-white"
           title="Close settings"
         >
           <CloseIcon />
         </button>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[150px_minmax(0,1fr)] bg-[#1b222d]">
-        <div className="min-h-0 overflow-auto border-r border-[#303846] bg-[#202734] py-3">
-          <div className="px-4 pb-2 text-xs font-semibold text-[#d1d6df]">
-            {activeSettingsTab === 'main' ? 'Main' : 'Sub'}
+      <div className="grid min-h-0 flex-1 grid-cols-[154px_minmax(0,1fr)] bg-[#0f1117]">
+        <div className="min-h-0 overflow-auto border-r border-[#3f4654] bg-[#151a23] py-3">
+          <div className="px-3 pb-2 text-xs font-semibold uppercase tracking-wide text-[#9099aa]">
+            {activeSettingsTab === 'main' ? 'Main chart' : 'Sub panels'}
           </div>
           <div className="flex flex-col">
             {activeTabGroups.map(({ group, label, settings: groupSettings }) => {
@@ -338,8 +434,8 @@ function IndicatorSettingsWindow({
               return (
                 <div
                   key={group}
-                  className={`flex h-10 items-center gap-2 px-4 py-2 transition-colors ${
-                    isActive ? 'bg-[#2a3341]' : 'hover:bg-[#252d3a]'
+                  className={`mx-2 flex h-10 items-center gap-2 rounded px-2 py-2 transition-colors ${
+                    isActive ? 'bg-[#24466a]' : 'hover:bg-[#1b2f49]'
                   }`}
                 >
                   <VisibilityCheckbox
@@ -350,7 +446,9 @@ function IndicatorSettingsWindow({
                   <button
                     type="button"
                     onClick={() => setActiveGroup(group)}
-                    className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left text-sm font-semibold text-[#d1d6df]"
+                    className={`flex min-w-0 flex-1 items-center justify-between gap-2 text-left text-sm font-semibold ${
+                      isActive ? 'text-white' : 'text-[#d1d4dc]'
+                    }`}
                   >
                     <span className="truncate">{label}</span>
                     <ChevronRightIcon />
@@ -361,9 +459,9 @@ function IndicatorSettingsWindow({
           </div>
         </div>
 
-        <div className="flex min-w-0 min-h-0 flex-col bg-[#1b222d]">
+        <div className="flex min-w-0 min-h-0 flex-col bg-[#10141c]">
           <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
-            <div className="mb-3 text-sm font-semibold text-[#eef2f7]">{activeGroupLabel}</div>
+            <div className="mb-3 border-b border-[#3f4654] pb-2 text-sm font-semibold text-[#d1d4dc]">{activeGroupLabel}</div>
             <IndicatorSettingsForm
               group={activeGroup}
               groupLabel={activeGroupLabel}
@@ -376,18 +474,18 @@ function IndicatorSettingsWindow({
             />
           </div>
 
-          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[#303846] bg-[#1b222d] px-4 py-2.5">
+          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[#3f4654] bg-[#10141c] px-4 py-2.5">
             <button
               type="button"
               onClick={handleReset}
-              className="h-8 min-w-28 rounded-md bg-[#354050] px-4 text-sm font-semibold text-[#eef2f7] transition-colors hover:bg-[#3f4b5e]"
+              className="h-8 min-w-28 rounded border border-[#3f4654] bg-[#151a23] px-4 text-sm font-semibold text-[#d1d4dc] transition-colors hover:border-[#6b7280] hover:text-white"
             >
               Reset
             </button>
             <button
               type="button"
               onClick={handleApply}
-              className="h-8 min-w-28 rounded-md bg-[#f0b90b] px-4 text-sm font-semibold text-[#111722] transition-colors hover:bg-[#f8d12f]"
+              className="h-8 min-w-28 rounded bg-[#24466a] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#1b2f49]"
             >
               Save
             </button>
@@ -420,10 +518,8 @@ function IndicatorLegendRow({
   onDismiss,
 }: IndicatorLegendRowProps) {
   return (
-    <div className="group min-h-6 flex flex-nowrap items-center gap-x-3 rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
-      <span className="w-16 shrink-0 text-[#d1d4dc]">{label}</span>
-
-      <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-x-3 overflow-hidden">
+    <div className="group min-h-6 flex w-fit max-w-full flex-nowrap items-center rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
+      <div className="flex min-w-0 flex-nowrap items-center gap-x-4 overflow-hidden">
         {group === 'macd'
           ? <MacdLegendValues settings={settings} values={values} />
           : settings.map((setting) => (
@@ -431,7 +527,7 @@ function IndicatorLegendRow({
           ))}
       </div>
 
-      <div className="ml-auto flex shrink-0 items-center gap-1 opacity-0 pointer-events-none transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
+      <div className="ml-2 flex shrink-0 items-center gap-1 opacity-0 pointer-events-none transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
         <button
           type="button"
           onClick={() => onToggleVisibility(group)}
@@ -557,6 +653,8 @@ function SingleSettingsEditor({
   defaultPeriod: number;
   onChange: (setting: SinglePeriodIndicatorSetting) => void;
 }) {
+  const isVolumeMa = setting.group === 'volume-ma';
+
   return (
     <div className="grid grid-cols-[28px_minmax(54px,0.8fr)_72px_92px_104px_44px] items-center gap-2">
       <VisibilityCheckbox
@@ -568,10 +666,14 @@ function SingleSettingsEditor({
         })}
         label={`Show ${rowLabel}`}
       />
-      <span className="text-sm font-semibold text-[#d1d6df]">{rowLabel}</span>
+      <span className="text-sm font-semibold text-[#d1d4dc]">{rowLabel}</span>
       <NumberInput value={setting.period} min={1} max={250} onChange={(period) => onChange({ ...setting, period })} />
-      <StaticSelect label="Close" />
-      <LineStyleSelect />
+      <SourceSelect
+        value={setting.source}
+        isVolumeMa={isVolumeMa}
+        onChange={(source) => onChange({ ...setting, source })}
+      />
+      <LineWidthSelect value={setting.lineWidth} onChange={(lineWidth) => onChange({ ...setting, lineWidth })} />
       <ColorInput value={setting.color} onChange={(color) => onChange({ ...setting, color })} />
     </div>
   );
@@ -592,7 +694,7 @@ function MacdSettingsEditor({
           onChange={(visible) => onChange({ ...setting, visible })}
           label={`Show ${setting.label}`}
         />
-        <span className="text-sm font-semibold text-[#d1d6df]">{setting.label}</span>
+        <span className="text-sm font-semibold text-[#d1d4dc]">{setting.label}</span>
       </div>
       <div className="grid grid-cols-3 gap-3">
         <Field label="Fast">
@@ -605,7 +707,13 @@ function MacdSettingsEditor({
           <NumberInput value={setting.signalPeriod} min={1} max={99} onChange={(signalPeriod) => onChange({ ...setting, signalPeriod })} />
         </Field>
       </div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-4 gap-3">
+        <Field label="Source">
+          <SourceSelect value={setting.source} onChange={(source) => onChange({ ...setting, source })} />
+        </Field>
+        <Field label="Width">
+          <LineWidthSelect value={setting.lineWidth} onChange={(lineWidth) => onChange({ ...setting, lineWidth })} />
+        </Field>
         <Field label="MACD">
           <ColorInput value={setting.macdColor} onChange={(macdColor) => onChange({ ...setting, macdColor })} />
         </Field>
@@ -637,7 +745,7 @@ function VisibilityCheckbox({
       />
       <span className={`flex h-5 w-5 items-center justify-center rounded border transition-colors ${
         checked
-          ? 'border-[#eef2f7] bg-[#eef2f7] text-[#1b222d]'
+          ? 'border-[#6b7280] bg-[#24466a] text-white'
           : 'border-[#748094] bg-transparent text-transparent'
       }`}>
         <CheckIcon />
@@ -661,29 +769,110 @@ function Field({
   );
 }
 
-function StaticSelect({ label }: { label: string }) {
+function SourceSelect({
+  value,
+  isVolumeMa = false,
+  onChange,
+}: {
+  value: IndicatorPriceSource;
+  isVolumeMa?: boolean;
+  onChange: (value: IndicatorPriceSource) => void;
+}) {
+  if (isVolumeMa) {
+    return (
+      <select
+        value="volume"
+        disabled
+        className="h-8 w-full rounded border border-[#3f4654] bg-[#151a23] px-2 text-sm font-semibold text-[#d1d4dc] outline-none opacity-80"
+        aria-label="Source"
+      >
+        <option value="volume">Volume</option>
+      </select>
+    );
+  }
+
   return (
-    <button
-      type="button"
-      className="flex h-8 items-center justify-between rounded-md border border-[#3f4857] bg-[#252e3b] px-2.5 text-sm font-semibold text-[#eef2f7]"
-      tabIndex={-1}
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value as IndicatorPriceSource)}
+      className="h-8 w-full rounded border border-[#3f4654] bg-[#151a23] px-2 text-sm font-semibold text-[#d1d4dc] outline-none transition-colors hover:text-white focus:border-[#6b7280] focus:text-white"
+      aria-label="Source"
     >
-      <span>{label}</span>
-      <ChevronDownIcon />
-    </button>
+      {PRICE_SOURCE_OPTIONS.map((option) => (
+        <option key={option.value} value={option.value}>{option.label}</option>
+      ))}
+    </select>
   );
 }
 
-function LineStyleSelect() {
+function LineWidthSelect({
+  value,
+  onChange,
+}: {
+  value: 1 | 2 | 3 | 4;
+  onChange: (value: 1 | 2 | 3 | 4) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  const handleSelect = (lineWidth: 1 | 2 | 3 | 4) => {
+    onChange(lineWidth);
+    setIsOpen(false);
+  };
+
   return (
-    <button
-      type="button"
-      className="flex h-8 items-center justify-between rounded-md border border-[#3f4857] bg-[#1b222d] px-2.5 text-[#eef2f7]"
-      tabIndex={-1}
+    <div
+      className="relative"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setIsOpen(false);
+        }
+      }}
     >
-      <span className="h-px w-12 bg-current" />
-      <ChevronDownIcon />
-    </button>
+      <button
+        type="button"
+        onClick={() => setIsOpen((current) => !current)}
+        className="flex h-8 w-full items-center justify-between rounded border border-[#3f4654] bg-[#151a23] px-2.5 text-[#d1d4dc] outline-none transition-colors hover:text-white focus:border-[#6b7280] focus:text-white"
+        aria-label="Line width"
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+      >
+        <LineWidthPreview lineWidth={value} />
+        <ChevronDownIcon />
+      </button>
+
+      {isOpen && (
+        <div
+          role="listbox"
+          className="absolute left-0 top-[calc(100%+4px)] z-50 w-full overflow-hidden rounded border border-[#3f4654] bg-[#151a23] shadow-xl shadow-black/40"
+        >
+          {LINE_WIDTH_OPTIONS.map((lineWidth) => (
+            <button
+              key={lineWidth}
+              type="button"
+              role="option"
+              aria-selected={value === lineWidth}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => handleSelect(lineWidth)}
+              className={`flex h-8 w-full items-center px-2.5 transition-colors ${
+                value === lineWidth ? 'bg-[#24466a] text-white' : 'text-[#d1d4dc] hover:bg-[#1b2f49] hover:text-white'
+              }`}
+            >
+              <LineWidthPreview lineWidth={lineWidth} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LineWidthPreview({ lineWidth }: { lineWidth: 1 | 2 | 3 | 4 }) {
+  return (
+    <span
+      className="block w-12 rounded-full bg-current"
+      style={{ height: lineWidth }}
+      aria-hidden="true"
+    />
   );
 }
 
@@ -705,7 +894,7 @@ function NumberInput({
       min={min}
       max={max}
       onChange={(event) => onChange(clampPeriod(Number(event.target.value), min, max))}
-      className="h-8 w-full rounded-md border border-transparent bg-[#252e3b] px-2.5 text-sm font-semibold text-[#eef2f7] outline-none transition-colors focus:border-[#6b7280]"
+      className="h-8 w-full rounded border border-transparent bg-[#151a23] px-2.5 text-sm font-semibold text-[#d1d4dc] outline-none transition-colors hover:text-white focus:border-[#6b7280] focus:text-white"
     />
   );
 }
@@ -722,7 +911,7 @@ function ColorInput({
       type="color"
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      className="h-8 w-8 cursor-pointer rounded-md border border-[#3f4857] bg-[#252e3b] p-0.5"
+      className="h-8 w-8 cursor-pointer rounded border border-[#3f4654] bg-[#151a23] p-0.5"
     />
   );
 }
@@ -753,7 +942,7 @@ function ChevronRightIcon() {
 
 function ChevronDownIcon() {
   return (
-    <svg className="h-4 w-4 shrink-0 text-[#8f99a8]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <svg className="h-4 w-4 shrink-0 text-[#9099aa]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path fillRule="evenodd" d="M5.22 7.22a.75.75 0 011.06 0L10 10.94l3.72-3.72a.75.75 0 111.06 1.06l-4.25 4.25a.75.75 0 01-1.06 0L5.22 8.28a.75.75 0 010-1.06z" clipRule="evenodd" />
     </svg>
   );
@@ -774,6 +963,28 @@ function getSettingsTabForGroup(group: IndicatorGroup): IndicatorSettingsTab {
 function resolveInitialGroup(settings: IndicatorSetting[]): IndicatorGroup | null {
   const groups = new Set(settings.map((setting) => setting.group));
   return INDICATOR_GROUPS.find(({ group }) => groups.has(group))?.group ?? null;
+}
+
+function getLegendPaneIndex(group: IndicatorGroup, activeGroups: Set<IndicatorGroup>): number {
+  if (group === 'volume-ma') return 1;
+  if (group === 'rsi') return 2;
+  if (group === 'macd') return activeGroups.has('rsi') ? 3 : 2;
+  return 0;
+}
+
+function getPaneLegendLayout(paneLayouts: ChartPaneLayout[], paneIndex: number): ChartPaneLayout {
+  const paneLayout = paneLayouts.find((layout) => layout.index === paneIndex);
+
+  if (paneLayout) return paneLayout;
+
+  const fallbackLayout = paneLayouts.at(-1);
+  if (fallbackLayout) return fallbackLayout;
+
+  return {
+    index: 0,
+    top: 0,
+    height: 120,
+  };
 }
 
 function supportsIndicatorSlots(group: IndicatorGroup | null): group is SlotIndicatorGroup {
@@ -803,6 +1014,8 @@ function buildSlotSettings(
       label,
       visible: false,
       period: getDefaultSlotPeriod(group, slot),
+      source: 'close',
+      lineWidth: 1,
       color: getDefaultSlotColor(slot),
     };
   });
@@ -828,4 +1041,19 @@ function cloneSettings(settings: IndicatorSetting[]): IndicatorSetting[] {
 function clampPeriod(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function getClampedSettingsWindowPosition(position: { x: number; y: number }) {
+  if (typeof window === 'undefined') return position;
+
+  const margin = 12;
+  const windowWidth = Math.min(760, Math.max(320, window.innerWidth - (margin * 2)));
+  const windowHeight = Math.min(560, Math.max(320, window.innerHeight - (margin * 2)));
+  const maxX = Math.max(margin, window.innerWidth - windowWidth - margin);
+  const maxY = Math.max(margin, window.innerHeight - windowHeight - margin);
+
+  return {
+    x: Math.min(maxX, Math.max(margin, position.x)),
+    y: Math.min(maxY, Math.max(margin, position.y)),
+  };
 }
