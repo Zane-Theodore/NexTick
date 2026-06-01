@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 
 import { useMarketData } from '../../hooks/useMarketData';
-import type { CursorPosition, IndicatorGroup, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData } from '../../types/chart';
+import type { ChartPaneLayout, CursorPosition, IndicatorGroup, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData } from '../../types/chart';
 import ChartFilterBar from './ChartFilterBar';
 import IndicatorLegend from './IndicatorLegend';
 import OhlcvTooltip from './OhlcvTooltip';
@@ -25,9 +25,9 @@ export default function TradingChart() {
   const [cursorPosition, setCursorPosition] = useState<CursorPosition>({ x: 0, y: 0 });
   const [indicatorValues, setIndicatorValues] = useState<IndicatorValue[]>([]);
   const [hoverIndicatorValues, setHoverIndicatorValues] = useState<IndicatorValue[] | null>(null);
-  const [isIndicatorLegendOpen, setIsIndicatorLegendOpen] = useState<boolean>(true);
   const [indicatorSettingsWindow, setIndicatorSettingsWindow] = useState<{ id: number; initialGroup: IndicatorGroup | null } | null>(null);
   const [hiddenIndicatorGroups, setHiddenIndicatorGroups] = useState<IndicatorGroup[]>(['ma']);
+  const [paneLayouts, setPaneLayouts] = useState<ChartPaneLayout[]>([]);
   const [indicatorSettings, setIndicatorSettings] = useState<IndicatorSetting[]>(() => (
     DEFAULT_INDICATOR_SETTINGS.map((setting) => ({ ...setting }))
   ));
@@ -90,6 +90,7 @@ export default function TradingChart() {
     setLegendData,
     setCursorPosition,
     setHoverIndicatorValues,
+    setPaneLayouts,
   });
 
   useMarketData(
@@ -147,9 +148,8 @@ export default function TradingChart() {
           allDefaultSettings={DEFAULT_INDICATOR_SETTINGS}
           values={visibleIndicatorValues}
           hiddenGroups={hiddenIndicatorGroups}
-          isOpen={isIndicatorLegendOpen}
+          paneLayouts={paneLayouts}
           settingsWindow={indicatorSettingsWindow}
-          onToggleOpen={() => setIsIndicatorLegendOpen((isOpen) => !isOpen)}
           onToggleGroupVisibility={handleToggleIndicatorGroupVisibility}
           onDismissGroup={handleDismissIndicatorGroup}
           onOpenSettingsWindow={handleOpenIndicatorSettingsWindow}
