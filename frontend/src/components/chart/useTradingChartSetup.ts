@@ -3,7 +3,7 @@ import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { createChart, CandlestickSeries, ColorType, LineSeries } from 'lightweight-charts';
 import type { AutoscaleInfoProvider, CandlestickData, IChartApi, ISeriesApi, LineData, MouseEventParams, Time } from 'lightweight-charts';
 
-import type { CursorPosition, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData } from '../../types/chart';
+import type { ChartPaneLayout, CursorPosition, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData } from '../../types/chart';
 import {
   formatChartValue,
   formatTimeScaleCrosshair,
@@ -31,6 +31,7 @@ interface UseTradingChartSetupParams {
   setLegendData: Dispatch<SetStateAction<LegendData | null>>;
   setCursorPosition: Dispatch<SetStateAction<CursorPosition>>;
   setHoverIndicatorValues: Dispatch<SetStateAction<IndicatorValue[] | null>>;
+  setPaneLayouts: Dispatch<SetStateAction<ChartPaneLayout[]>>;
 }
 
 export function useTradingChartSetup({
@@ -45,6 +46,7 @@ export function useTradingChartSetup({
   setLegendData,
   setCursorPosition,
   setHoverIndicatorValues,
+  setPaneLayouts,
 }: UseTradingChartSetupParams) {
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -165,6 +167,21 @@ export function useTradingChartSetup({
     const panes = chart.panes();
     panes[0]?.setStretchFactor(MAIN_CHART_DEFAULT_STRETCH_FACTOR);
     panes[1]?.setStretchFactor(VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
+    let paneLayoutFrameId: number | null = null;
+    let isDisposed = false;
+    const updatePaneLayouts = () => {
+      if (isDisposed) return;
+      setPaneLayouts(getPaneLayouts(chart));
+      paneLayoutFrameId = null;
+    };
+    const schedulePaneLayoutUpdate = () => {
+      if (isDisposed) return;
+      if (paneLayoutFrameId !== null) {
+        cancelAnimationFrame(paneLayoutFrameId);
+      }
+      paneLayoutFrameId = requestAnimationFrame(updatePaneLayouts);
+    };
+    schedulePaneLayoutUpdate();
 
     chartInstanceRef.current = chart;
     candlestickSeriesRef.current = candlestickSeries;
@@ -244,13 +261,25 @@ export function useTradingChartSetup({
         width: entries[0].contentRect.width,
         height: entries[0].contentRect.height,
       });
+      schedulePaneLayoutUpdate();
     });
     resizeObserver.observe(chartContainerRef.current);
 
+    const handlePaneResizeEnd = schedulePaneLayoutUpdate;
+    window.addEventListener('mouseup', handlePaneResizeEnd);
+    window.addEventListener('pointerup', handlePaneResizeEnd);
+
     return () => {
+      isDisposed = true;
+      if (paneLayoutFrameId !== null) {
+        cancelAnimationFrame(paneLayoutFrameId);
+      }
       chart.unsubscribeCrosshairMove(handleCrosshair);
       resizeObserver.disconnect();
+      window.removeEventListener('mouseup', handlePaneResizeEnd);
+      window.removeEventListener('pointerup', handlePaneResizeEnd);
       setIsChartReady(false);
+      setPaneLayouts([]);
       chartInstanceRef.current = null;
       candlestickSeriesRef.current = null;
       volumeSeriesRef.current = null;
@@ -266,6 +295,7 @@ export function useTradingChartSetup({
     setHoverIndicatorValues,
     setIsChartReady,
     setLegendData,
+    setPaneLayouts,
     volumeByTimeRef,
     volumeSeriesRef,
   ]);
@@ -296,6 +326,7 @@ export function useTradingChartSetup({
         Object.assign(existingConfig, config);
         existingConfig.series.applyOptions({
           color: config.color,
+          lineWidth: config.lineWidth,
           visible: true,
         });
         return;
@@ -303,7 +334,7 @@ export function useTradingChartSetup({
 
       currentConfigs.push({
         ...config,
-        series: chart.addSeries(LineSeries, createLineOptions(config.color), paneIndex),
+        series: chart.addSeries(LineSeries, createLineOptions(config.color, config.lineWidth), paneIndex),
       });
     };
 
@@ -319,6 +350,8 @@ export function useTradingChartSetup({
           fastPeriod: setting.fastPeriod,
           slowPeriod: setting.slowPeriod,
           signalPeriod: setting.signalPeriod,
+          source: setting.source,
+          lineWidth: setting.lineWidth,
           color: setting.macdColor,
         }, lowerPaneByGroup.get('macd') ?? 2);
         upsertSeries({
@@ -329,6 +362,8 @@ export function useTradingChartSetup({
           fastPeriod: setting.fastPeriod,
           slowPeriod: setting.slowPeriod,
           signalPeriod: setting.signalPeriod,
+          source: setting.source,
+          lineWidth: setting.lineWidth,
           color: setting.signalColor,
         }, lowerPaneByGroup.get('macd') ?? 2);
         return;
@@ -346,6 +381,8 @@ export function useTradingChartSetup({
         kind: setting.group,
         label: setting.label,
         period: setting.period,
+        source: setting.source,
+        lineWidth: setting.lineWidth,
         color: setting.color,
       }, paneIndex);
     });
@@ -363,16 +400,33 @@ export function useTradingChartSetup({
     panes[1]?.setStretchFactor(VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
     panes[2]?.setStretchFactor(18);
     panes[3]?.setStretchFactor(18);
-  }, [chartInstanceRef, indicatorSeriesRef, indicatorSettings]);
+    const paneLayoutFrameId = requestAnimationFrame(() => setPaneLayouts(getPaneLayouts(chart)));
+    return () => cancelAnimationFrame(paneLayoutFrameId);
+  }, [chartInstanceRef, indicatorSeriesRef, indicatorSettings, setPaneLayouts]);
 }
 
-function createLineOptions(color: string) {
+function createLineOptions(color: string, lineWidth: 1 | 2 | 3 | 4 = 1) {
   return {
     color,
-    lineWidth: 1 as const,
+    lineWidth,
     priceLineVisible: false,
     lastValueVisible: false,
     crosshairMarkerVisible: false,
     visible: true,
   };
+}
+
+function getPaneLayouts(chart: IChartApi): ChartPaneLayout[] {
+  let top = 0;
+
+  return chart.panes().map((pane) => {
+    const height = pane.getHeight();
+    const layout = {
+      index: pane.paneIndex(),
+      top,
+      height,
+    };
+    top += height;
+    return layout;
+  });
 }
