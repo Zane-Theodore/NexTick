@@ -318,12 +318,15 @@ export function useTradingChartSetup({
       lowerPaneByGroup.set('macd', nextLowerPaneIndex);
     }
 
-    const upsertSeries = (config: Omit<IndicatorSeriesConfig, 'series'>, paneIndex: number) => {
+    const upsertSeries = (config: Omit<IndicatorSeriesConfig, 'series' | 'paneIndex'>, paneIndex: number) => {
       desiredIds.add(config.id);
 
       const existingConfig = currentConfigs.find((currentConfig) => currentConfig.id === config.id);
       if (existingConfig) {
-        Object.assign(existingConfig, config);
+        if (existingConfig.paneIndex !== paneIndex) {
+          existingConfig.series.moveToPane(paneIndex);
+        }
+        Object.assign(existingConfig, config, { paneIndex });
         existingConfig.series.applyOptions({
           color: config.color,
           lineWidth: config.lineWidth,
@@ -334,6 +337,7 @@ export function useTradingChartSetup({
 
       currentConfigs.push({
         ...config,
+        paneIndex,
         series: chart.addSeries(LineSeries, createLineOptions(config.color, config.lineWidth), paneIndex),
       });
     };

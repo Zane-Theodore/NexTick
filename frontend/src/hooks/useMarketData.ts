@@ -26,6 +26,16 @@ export const useMarketData = (
   isChartReady: boolean = true
 ) => {
   const candleHistoryRef = useRef<FormattedCandle[]>([]);
+  const indicatorSettingsRef = useRef<IndicatorSetting[]>(indicatorSettings);
+  const onIndicatorValuesChangeRef = useRef(onIndicatorValuesChange);
+
+  useEffect(() => {
+    indicatorSettingsRef.current = indicatorSettings;
+  }, [indicatorSettings]);
+
+  useEffect(() => {
+    onIndicatorValuesChangeRef.current = onIndicatorValuesChange;
+  }, [onIndicatorValuesChange]);
 
   const syncIndicatorSeries = useCallback((history: FormattedCandle[]) => {
     indicatorSeriesRef?.current.forEach((config) => {
@@ -33,10 +43,10 @@ export const useMarketData = (
       config.series.setData(indicatorData);
     });
 
-    const nextValues = getIndicatorValues(indicatorSettings, history);
+    const nextValues = getIndicatorValues(indicatorSettingsRef.current, history);
 
-    onIndicatorValuesChange?.(nextValues);
-  }, [indicatorSeriesRef, indicatorSettings, onIndicatorValuesChange]);
+    onIndicatorValuesChangeRef.current?.(nextValues);
+  }, [indicatorSeriesRef]);
 
   useEffect(() => {
     if (!isChartReady || candleHistoryRef.current.length === 0) return;
@@ -59,7 +69,7 @@ export const useMarketData = (
         volumeSeries.setData([]);
         indicatorSeriesRef?.current.forEach(({ series: indicatorSeries }) => indicatorSeries.setData([]));
         candleHistoryRef.current = [];
-        onIndicatorValuesChange?.([]);
+        onIndicatorValuesChangeRef.current?.([]);
         volumeByTimeRef?.current.clear();
         
         const rawCandles = await getHistoricalCandles(symbol, interval, 1000);
@@ -202,7 +212,6 @@ export const useMarketData = (
     interval,
     volumeByTimeRef,
     indicatorSeriesRef,
-    onIndicatorValuesChange,
     syncIndicatorSeries,
     isChartReady,
   ]);
@@ -286,7 +295,7 @@ function getIndicatorValues(settings: IndicatorSetting[], history: FormattedCand
       return values;
     }
 
-    const config: Omit<IndicatorSeriesConfig, 'series'> = {
+    const config: Omit<IndicatorSeriesConfig, 'series' | 'paneIndex'> = {
       id: setting.id,
       group: setting.group,
       kind: setting.group,

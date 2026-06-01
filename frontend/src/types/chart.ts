@@ -44,6 +44,7 @@ export interface IndicatorSeriesConfig {
   signalPeriod?: number;
   source?: IndicatorPriceSource;
   lineWidth: LineWidth;
+  paneIndex: number;
   color: string;
   series: ISeriesApi<"Line">;
 }

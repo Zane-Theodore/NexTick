@@ -48,14 +48,20 @@ export default function TradingChart() {
     const updatedSettingsById = new Map(updatedSettings.map((setting) => [setting.id, setting]));
     setIndicatorSettings((settings) => {
       const currentSettingIds = new Set(settings.map((setting) => setting.id));
-      return [
+      const nextSettings = [
         ...settings.map((setting) => updatedSettingsById.get(setting.id) ?? setting),
         ...updatedSettings.filter((setting) => !currentSettingIds.has(setting.id)),
       ];
+
+      return areIndicatorSettingsEqual(settings, nextSettings) ? settings : nextSettings;
     });
-    setHiddenIndicatorGroups((groups) => groups.filter((group) => (
-      updatedSettings.some((setting) => setting.group === group && setting.visible)
-    )));
+    setHiddenIndicatorGroups((groups) => {
+      const nextGroups = groups.filter((group) => (
+        updatedSettings.some((setting) => setting.group === group && setting.visible)
+      ));
+
+      return areIndicatorGroupsEqual(groups, nextGroups) ? groups : nextGroups;
+    });
   }, []);
 
   const handleDismissIndicatorGroup = useCallback((group: IndicatorGroup) => {
@@ -161,4 +167,17 @@ export default function TradingChart() {
       </div>
     </div>
   );
+}
+
+function areIndicatorSettingsEqual(currentSettings: IndicatorSetting[], nextSettings: IndicatorSetting[]): boolean {
+  if (currentSettings.length !== nextSettings.length) return false;
+
+  return currentSettings.every((setting, index) => (
+    JSON.stringify(setting) === JSON.stringify(nextSettings[index])
+  ));
+}
+
+function areIndicatorGroupsEqual(currentGroups: IndicatorGroup[], nextGroups: IndicatorGroup[]): boolean {
+  if (currentGroups.length !== nextGroups.length) return false;
+  return currentGroups.every((group, index) => group === nextGroups[index]);
 }
