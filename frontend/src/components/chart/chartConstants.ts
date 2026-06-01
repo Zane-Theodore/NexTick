@@ -1,14 +1,14 @@
 import type { IndicatorSetting } from '../../types/chart';
 
 export const DEFAULT_INDICATOR_SETTINGS: IndicatorSetting[] = [
-  { id: 'ema-7', group: 'ema', label: 'EMA', visible: true, period: 7, color: '#f5d90a' },
-  { id: 'ema-25', group: 'ema', label: 'EMA', visible: true, period: 25, color: '#ff4ecd' },
-  { id: 'ema-99', group: 'ema', label: 'EMA', visible: true, period: 99, color: '#00d4ff' },
-  { id: 'ma-7', group: 'ma', label: 'MA', visible: true, period: 7, color: '#d9e3f0' },
-  { id: 'ma-25', group: 'ma', label: 'MA', visible: true, period: 25, color: '#9ca3af' },
-  { id: 'ma-99', group: 'ma', label: 'MA', visible: true, period: 99, color: '#64748b' },
-  { id: 'volume-ma-20', group: 'volume-ma', label: 'Vol MA', visible: true, period: 20, color: '#f59e0b' },
-  { id: 'rsi-14', group: 'rsi', label: 'RSI', visible: false, period: 14, color: '#a78bfa' },
+  { id: 'ema-7', group: 'ema', label: 'EMA', visible: true, period: 7, source: 'close', lineWidth: 1, color: '#f5d90a' },
+  { id: 'ema-25', group: 'ema', label: 'EMA', visible: true, period: 25, source: 'close', lineWidth: 1, color: '#ff4ecd' },
+  { id: 'ema-99', group: 'ema', label: 'EMA', visible: true, period: 99, source: 'close', lineWidth: 1, color: '#00d4ff' },
+  { id: 'ma-7', group: 'ma', label: 'MA', visible: true, period: 7, source: 'close', lineWidth: 1, color: '#d9e3f0' },
+  { id: 'ma-25', group: 'ma', label: 'MA', visible: true, period: 25, source: 'close', lineWidth: 1, color: '#9ca3af' },
+  { id: 'ma-99', group: 'ma', label: 'MA', visible: true, period: 99, source: 'close', lineWidth: 1, color: '#64748b' },
+  { id: 'volume-ma-20', group: 'volume-ma', label: 'Vol MA', visible: true, period: 20, source: 'close', lineWidth: 1, color: '#f59e0b' },
+  { id: 'rsi-14', group: 'rsi', label: 'RSI', visible: false, period: 14, source: 'close', lineWidth: 1, color: '#a78bfa' },
   {
     id: 'macd',
     group: 'macd',
@@ -17,6 +17,8 @@ export const DEFAULT_INDICATOR_SETTINGS: IndicatorSetting[] = [
     fastPeriod: 12,
     slowPeriod: 26,
     signalPeriod: 9,
+    source: 'close',
+    lineWidth: 1,
     macdColor: '#38bdf8',
     signalColor: '#f97316',
   },
