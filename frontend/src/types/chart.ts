@@ -1,9 +1,10 @@
-import type { ISeriesApi } from 'lightweight-charts';
+import type { ISeriesApi, LineWidth } from 'lightweight-charts';
 
 import type { ChartTime } from '../utils/formatters';
 
 export type IndicatorGroup = 'ema' | 'ma' | 'volume-ma' | 'rsi' | 'macd';
 export type IndicatorKind = IndicatorGroup | 'macd-signal';
+export type IndicatorPriceSource = 'open' | 'high' | 'low' | 'close';
 
 export interface SinglePeriodIndicatorSetting {
   id: string;
@@ -11,6 +12,8 @@ export interface SinglePeriodIndicatorSetting {
   label: string;
   visible: boolean;
   period: number;
+  source: IndicatorPriceSource;
+  lineWidth: LineWidth;
   color: string;
 }
 
@@ -22,6 +25,8 @@ export interface MacdIndicatorSetting {
   fastPeriod: number;
   slowPeriod: number;
   signalPeriod: number;
+  source: IndicatorPriceSource;
+  lineWidth: LineWidth;
   macdColor: string;
   signalColor: string;
 }
@@ -37,6 +42,8 @@ export interface IndicatorSeriesConfig {
   fastPeriod?: number;
   slowPeriod?: number;
   signalPeriod?: number;
+  source?: IndicatorPriceSource;
+  lineWidth: LineWidth;
   color: string;
   series: ISeriesApi<"Line">;
 }
@@ -63,4 +70,10 @@ export interface LegendData {
 export interface CursorPosition {
   x: number;
   y: number;
+}
+
+export interface ChartPaneLayout {
+  index: number;
+  top: number;
+  height: number;
 }
