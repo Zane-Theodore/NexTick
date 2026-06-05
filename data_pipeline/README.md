@@ -12,6 +12,7 @@ This module does not expose browser APIs, render UI, or run the NestJS backend.
 | --- | --- |
 | `producer/binance_producer.py` | Runs `BinanceCombinedProducer`, connects to Binance trade streams, validates raw trade price/volume, and publishes cleaned trades to Kafka. |
 | `processor/candle_processor.py` | Runs `CandleProcessor`, consumes raw trades, aggregates candles by symbol/interval, writes final `1m` candles to QuestDB, and publishes kline updates. |
+| `candle_reconciler.py` | Maintenance script that replaces a closed `1m` candle window from Binance REST klines with backup, staging, and verification. |
 | `config.py` | Loads `data_pipeline/.env`, validates required config, parses symbols and intervals. |
 | `logger_config.py` | Configures stdout logging with timestamp, level, module name, and message. |
 
@@ -97,6 +98,56 @@ macOS/Linux, producer terminal:
 source .venv/bin/activate
 python -m data_pipeline.producer.binance_producer
 ```
+
+## Reconcile Recent Candles
+
+Run this maintenance script when you want to replace the last closed 24 hours of
+stored `1m` candles with Binance REST klines. It excludes the currently
+streaming `1m` candle, validates the full Binance window before touching
+QuestDB, builds a replacement table, verifies it, and swaps it into
+`market_candles` with QuestDB `RENAME TABLE`. This avoids `DELETE`, `UPDATE`,
+and historical inserts on the current `BYPASS WAL` table.
+After a successful run it drops its current old/replacement tables and also
+cleans up old reconciler temporary tables from previous runs. Use `--keep-temp`
+only when you intentionally want to inspect those temporary tables.
+
+The current reconcile window is fixed in code at 24 hours and intentionally
+ends 30 minutes behind the latest Binance server minute. This lag keeps the
+script away from candles that the live processor is still closing while the
+replacement table is being built. Running the script again later reconciles
+those newer candles after they move out of the lag window.
+The script uses Binance server time for the window boundary, so it expects
+exactly 1440 closed `1m` candles from
+`[server_minute - lag - 24h, server_minute - lag)`.
+When it starts inside the first seconds of a fresh minute, it waits briefly
+before resolving the final window to avoid racing the live processor at the
+minute boundary.
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m data_pipeline.candle_reconciler
+```
+
+macOS/Linux:
+
+```bash
+source .venv/bin/activate
+python -m data_pipeline.candle_reconciler
+```
+
+Useful options:
+
+```bash
+python -m data_pipeline.candle_reconciler --dry-run
+python -m data_pipeline.candle_reconciler --symbols BTCUSDT,ETHUSDT
+python -m data_pipeline.candle_reconciler --keep-temp
+```
+
+The script reads QuestDB connection settings and `TRADING_SYMBOLS` from
+`data_pipeline/.env`. `BINANCE_REST_URL` is optional and defaults to
+`https://api.binance.com`.
 
 ## Environment Variables
 

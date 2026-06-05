@@ -1,0 +1,908 @@
+"""Reconcile recent 1-minute candles against Binance REST klines.
+
+This module is intentionally separate from the realtime candle processor. It is
+meant to be run manually as a maintenance task while the system is online. The
+current policy replaces a fixed 24-hour closed window of stored `1m` candles,
+using Binance REST klines as the canonical source and QuestDB backup/staging
+tables as safety rails. QuestDB table-range DELETE is intentionally avoided so
+the script works with the current BYPASS WAL `market_candles` table.
+"""
+
+import argparse
+import json
+import os
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+import psycopg2
+from psycopg2 import OperationalError
+from dotenv import load_dotenv
+
+from data_pipeline.logger_config import get_logger
+
+logger = get_logger(__name__)
+
+TABLE_NAME = "market_candles"
+TEMP_TABLE_PATTERN = re.compile(r"^market_candles_(backup|stage|replace|old|failed)_[A-Z0-9]+_[0-9]+$")
+INTERVAL = "1m"
+INTERVAL_MS = 60_000
+DEFAULT_BINANCE_REST_URL = "https://api.binance.com"
+RECONCILE_WINDOW_HOURS = 24
+DEFAULT_LIMIT = 1000
+DEFAULT_TOLERANCE = Decimal("0.00000001")
+MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
+RECONCILE_END_LAG_MINUTES = 30
+
+
+@dataclass(frozen=True)
+class CandleRow:
+    """Canonical in-memory representation of one closed candle row."""
+
+    symbol: str
+    interval: str
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+
+
+def load_environment() -> None:
+    """Load data_pipeline/.env without overriding values injected by Docker."""
+
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(env_path)
+
+
+def get_env_or_raise(name: str) -> str:
+    """Return a required environment variable or fail with a clear message."""
+
+    value = os.getenv(name)
+    if not value or not value.strip():
+        raise ValueError(f"Environment variable {name} is required")
+    return value.strip()
+
+
+def parse_symbols(value: str | None) -> list[str]:
+    """Parse comma-separated trading symbols into uppercase Binance symbols."""
+
+    symbols = [item.strip().upper() for item in (value or "BTCUSDT").split(",") if item.strip()]
+    if not symbols:
+        raise ValueError("At least one trading symbol is required")
+    return symbols
+
+
+def to_questdb_timestamp(value: datetime) -> str:
+    """Format a UTC timestamp for QuestDB's PostgreSQL wire protocol."""
+
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def normalize_db_timestamp(value) -> datetime:
+    """Normalize a QuestDB timestamp value into a timezone-aware UTC datetime."""
+
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def decimal_from_api(value, field_name: str) -> Decimal:
+    """Convert a Binance numeric string into Decimal for validation."""
+
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"Invalid Binance {field_name}: {value}") from exc
+
+
+def decimal_from_db(value) -> Decimal:
+    """Convert a QuestDB numeric value into Decimal for comparison."""
+
+    return Decimal(str(value))
+
+
+def build_table_name(prefix: str, symbol: str, run_id: str) -> str:
+    """Build a temporary table name using only safe identifier characters."""
+
+    safe_symbol = "".join(ch for ch in symbol.upper() if ch.isalnum())
+    return f"{prefix}_{safe_symbol}_{run_id}"
+
+
+def ensure_safe_table_name(table_name: str) -> None:
+    """Reject dynamic table names that cannot be safely interpolated into SQL."""
+
+    if not table_name.replace("_", "").isalnum():
+        raise ValueError(f"Unsafe internal table name: {table_name}")
+
+
+def is_reconciler_temp_table(table_name: str) -> bool:
+    """Return True only for temporary tables created by this script."""
+
+    return bool(TEMP_TABLE_PATTERN.match(table_name))
+
+
+def request_json(url: str, max_retries: int = 5):
+    """Fetch JSON over HTTP with bounded retries for transient Binance errors."""
+
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "NexTick-candle-reconcile/1.0"})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code in (418, 429) or exc.code >= 500:
+                delay = min(2 ** attempt, 30)
+                logger.warning(f"Binance request failed with HTTP {exc.code}. Retrying in {delay}s...")
+                time.sleep(delay)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+            delay = min(2 ** attempt, 30)
+            logger.warning(f"Binance request failed: {exc}. Retrying in {delay}s...")
+            time.sleep(delay)
+
+    raise RuntimeError(f"Binance request failed after {max_retries} attempts: {last_error}")
+
+
+def fetch_binance_server_time(base_url: str) -> datetime:
+    """Read Binance server time as the exchange clock source."""
+
+    url = f"{base_url.rstrip('/')}/api/v3/time"
+    data = request_json(url)
+
+    if not isinstance(data, dict) or "serverTime" not in data:
+        raise ValueError(f"Unexpected Binance server time response: {data}")
+
+    server_time_ms = int(data["serverTime"])
+    return datetime.fromtimestamp(server_time_ms / 1000, tz=timezone.utc)
+
+
+def resolve_reconcile_window(base_url: str) -> tuple[datetime, datetime]:
+    """Return the fixed 24-hour closed candle window aligned to Binance time.
+
+    The short wait after a fresh minute boundary avoids choosing an unstable
+    exchange boundary. The additional lag keeps the reconciler away from the
+    newest realtime candles so rows written while the script runs are copied
+    into the replacement table instead of being overwritten.
+    """
+
+    server_time = fetch_binance_server_time(base_url)
+    if server_time.second < MIN_SERVER_SECONDS_AFTER_BOUNDARY:
+        wait_seconds = MIN_SERVER_SECONDS_AFTER_BOUNDARY - server_time.second
+        logger.info(
+            f"Binance server time is {server_time.isoformat()}, waiting {wait_seconds}s "
+            "to avoid reconciling during the minute boundary."
+        )
+        time.sleep(wait_seconds)
+        server_time = fetch_binance_server_time(base_url)
+
+    end = server_time.replace(second=0, microsecond=0) - timedelta(minutes=RECONCILE_END_LAG_MINUTES)
+    start = end - timedelta(hours=RECONCILE_WINDOW_HOURS)
+    return start, end
+
+
+def fetch_binance_klines(
+    base_url: str,
+    symbol: str,
+    start_inclusive: datetime,
+    end_exclusive: datetime,
+) -> list[CandleRow]:
+    """Fetch all Binance `1m` klines for [start_inclusive, end_exclusive)."""
+
+    start_ms = int(start_inclusive.timestamp() * 1000)
+    end_exclusive_ms = int(end_exclusive.timestamp() * 1000)
+    cursor_ms = start_ms
+    rows: list[CandleRow] = []
+
+    while cursor_ms < end_exclusive_ms:
+        batch_end_ms = min(cursor_ms + DEFAULT_LIMIT * INTERVAL_MS - 1, end_exclusive_ms - 1)
+        query = urllib.parse.urlencode(
+            {
+                "symbol": symbol,
+                "interval": INTERVAL,
+                "startTime": cursor_ms,
+                "endTime": batch_end_ms,
+                "limit": DEFAULT_LIMIT,
+            }
+        )
+        url = f"{base_url.rstrip('/')}/api/v3/klines?{query}"
+        data = request_json(url)
+
+        if not isinstance(data, list):
+            raise ValueError(f"Unexpected Binance response for {symbol}: {data}")
+        if not data:
+            break
+
+        last_open_time = None
+        for item in data:
+            if not isinstance(item, list) or len(item) < 7:
+                raise ValueError(f"Unexpected Binance kline item for {symbol}: {item}")
+
+            open_time_ms = int(item[0])
+            close_time_ms = int(item[6])
+            last_open_time = open_time_ms
+            if open_time_ms < start_ms or open_time_ms >= end_exclusive_ms:
+                continue
+            if open_time_ms % INTERVAL_MS != 0:
+                raise ValueError(f"{symbol}: Binance kline open time is not minute-aligned: {open_time_ms}")
+            if close_time_ms != open_time_ms + INTERVAL_MS - 1:
+                raise ValueError(
+                    f"{symbol}: Binance kline close time does not match 1m interval: "
+                    f"open={open_time_ms}, close={close_time_ms}"
+                )
+
+            rows.append(
+                CandleRow(
+                    symbol=symbol,
+                    interval=INTERVAL,
+                    timestamp=datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc),
+                    open=decimal_from_api(item[1], "open"),
+                    high=decimal_from_api(item[2], "high"),
+                    low=decimal_from_api(item[3], "low"),
+                    close=decimal_from_api(item[4], "close"),
+                    volume=decimal_from_api(item[5], "volume"),
+                )
+            )
+
+        if last_open_time is None:
+            break
+        next_cursor_ms = last_open_time + INTERVAL_MS
+        if next_cursor_ms <= cursor_ms:
+            raise RuntimeError(f"Binance pagination did not advance for {symbol}")
+        cursor_ms = next_cursor_ms
+
+    return rows
+
+
+def validate_rows(rows: list[CandleRow], symbol: str, start: datetime, end: datetime) -> None:
+    """Validate that Binance returned a complete, continuous, sane candle set."""
+
+    expected_count = int((end - start).total_seconds() // 60)
+    if len(rows) != expected_count:
+        raise ValueError(f"{symbol}: expected {expected_count} Binance candles, got {len(rows)}")
+
+    seen = set()
+    expected_timestamp = start
+    for row in rows:
+        if row.symbol != symbol or row.interval != INTERVAL:
+            raise ValueError(f"{symbol}: invalid row identity: {row}")
+
+        if row.timestamp in seen:
+            raise ValueError(f"{symbol}: duplicate Binance candle at {row.timestamp.isoformat()}")
+        seen.add(row.timestamp)
+
+        if row.timestamp != expected_timestamp:
+            raise ValueError(
+                f"{symbol}: expected candle at {expected_timestamp.isoformat()}, "
+                f"got {row.timestamp.isoformat()}"
+            )
+
+        if row.open <= 0 or row.high <= 0 or row.low <= 0 or row.close <= 0:
+            raise ValueError(f"{symbol}: non-positive OHLC at {row.timestamp.isoformat()}")
+        if row.volume < 0:
+            raise ValueError(f"{symbol}: negative volume at {row.timestamp.isoformat()}")
+        if row.high < max(row.open, row.close) or row.low > min(row.open, row.close) or row.high < row.low:
+            raise ValueError(f"{symbol}: inconsistent OHLC at {row.timestamp.isoformat()}")
+
+        expected_timestamp += timedelta(minutes=1)
+
+
+def create_connection():
+    """Create a QuestDB PostgreSQL wire connection from environment variables.
+
+    If the script is run on the host while `.env` still contains Docker's
+    internal hostname `questdb`, retrying `localhost` makes the standalone
+    `python -m data_pipeline.candle_reconciler` path work with the Compose
+    port mapping.
+    """
+
+    host = get_env_or_raise("QUESTDB_HOST")
+    port = int(get_env_or_raise("QUESTDB_PORT"))
+    database = get_env_or_raise("QUESTDB_DB_NAME")
+    user = get_env_or_raise("QUESTDB_USER")
+    password = get_env_or_raise("QUESTDB_PASSWORD")
+
+    try:
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            database=database,
+            user=user,
+            password=password,
+        )
+    except OperationalError:
+        if host != "questdb":
+            raise
+
+        logger.warning("Could not connect to QuestDB at host 'questdb'. Retrying with 'localhost'.")
+        conn = psycopg2.connect(
+            host="localhost",
+            port=port,
+            database=database,
+            user=user,
+            password=password,
+        )
+
+    conn.autocommit = True
+    return conn
+
+
+def ensure_market_table(cursor) -> None:
+    """Ensure the main candle table exists before reconciliation starts."""
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            symbol SYMBOL,
+            interval SYMBOL,
+            timestamp TIMESTAMP,
+            open DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            close DOUBLE,
+            volume DOUBLE
+        ) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
+        """
+    )
+
+
+def create_candle_table(cursor, table_name: str) -> None:
+    """Create a temporary candle-shaped table for backup or staging data."""
+
+    ensure_safe_table_name(table_name)
+    cursor.execute(
+        f"""
+        CREATE TABLE {table_name} (
+            symbol SYMBOL,
+            interval SYMBOL,
+            timestamp TIMESTAMP,
+            open DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            close DOUBLE,
+            volume DOUBLE
+        ) TIMESTAMP(timestamp) PARTITION BY DAY BYPASS WAL;
+        """
+    )
+
+
+def insert_rows(cursor, table_name: str, rows: list[CandleRow]) -> None:
+    """Insert canonical candle rows into a validated table name."""
+
+    ensure_safe_table_name(table_name)
+    cursor.executemany(
+        f"""
+        INSERT INTO {table_name} (symbol, interval, timestamp, open, high, low, close, volume)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        [
+            (
+                row.symbol,
+                row.interval,
+                to_questdb_timestamp(row.timestamp),
+                float(row.open),
+                float(row.high),
+                float(row.low),
+                float(row.close),
+                float(row.volume),
+            )
+            for row in rows
+        ],
+    )
+
+
+def backup_existing_rows(cursor, backup_table: str, symbol: str, start: datetime, end: datetime) -> int:
+    """Copy existing target-range rows into a backup table for rollback."""
+
+    create_candle_table(cursor, backup_table)
+    cursor.execute(
+        f"""
+        INSERT INTO {backup_table} (symbol, interval, timestamp, open, high, low, close, volume)
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM {TABLE_NAME}
+        WHERE symbol = %s AND interval = %s AND timestamp >= %s AND timestamp < %s
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+    cursor.execute(f"SELECT count() AS count FROM {backup_table}")
+    return int(cursor.fetchone()[0])
+
+
+def copy_rows_except_symbol_window(cursor, target_table: str, symbol: str, start: datetime, end: datetime) -> int:
+    """Copy current market data except the symbol/window being replaced."""
+
+    ensure_safe_table_name(target_table)
+    cursor.execute(
+        f"""
+        INSERT INTO {target_table} (symbol, interval, timestamp, open, high, low, close, volume)
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM {TABLE_NAME}
+        WHERE NOT (
+            symbol = %s
+            AND interval = %s
+            AND timestamp >= %s
+            AND timestamp < %s
+        )
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+    cursor.execute(f"SELECT count() AS count FROM {target_table}")
+    return int(cursor.fetchone()[0])
+
+
+def create_replacement_table_from_staging(
+    cursor,
+    replacement_table: str,
+    staging_table: str,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+) -> int:
+    """Build a full replacement table from existing rows plus staged candles.
+
+    Creating the table from a single ordered query avoids out-of-order inserts
+    into an existing QuestDB table, which is where the previous attempts failed.
+    """
+
+    ensure_safe_table_name(replacement_table)
+    ensure_safe_table_name(staging_table)
+    cursor.execute(
+        f"""
+        CREATE TABLE {replacement_table} AS (
+            SELECT symbol, interval, timestamp, open, high, low, close, volume
+            FROM (
+                SELECT symbol, interval, timestamp, open, high, low, close, volume
+                FROM {TABLE_NAME}
+                WHERE NOT (
+                    symbol = %s
+                    AND interval = %s
+                    AND timestamp >= %s
+                    AND timestamp < %s
+                )
+                UNION ALL
+                SELECT symbol, interval, timestamp, open, high, low, close, volume
+                FROM {staging_table}
+            )
+            ORDER BY timestamp ASC
+        ), CAST(symbol AS SYMBOL), CAST(interval AS SYMBOL)
+        TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+    cursor.execute(f"SELECT count() AS count FROM {replacement_table}")
+    return int(cursor.fetchone()[0])
+
+
+def assert_no_duplicate_target_rows(cursor, symbol: str, start: datetime, end: datetime) -> None:
+    """Fail before writing if the target range already contains duplicate keys."""
+
+    cursor.execute(
+        f"""
+        SELECT timestamp
+        FROM {TABLE_NAME}
+        WHERE symbol = %s AND interval = %s AND timestamp >= %s AND timestamp < %s
+        ORDER BY timestamp ASC
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+    seen = set()
+    duplicates = []
+    for row in cursor.fetchall():
+        timestamp = normalize_db_timestamp(row[0])
+        if timestamp in seen:
+            duplicates.append(timestamp)
+            if len(duplicates) >= 5:
+                break
+        seen.add(timestamp)
+
+    if duplicates:
+        sample = ", ".join(timestamp.isoformat() for timestamp in duplicates)
+        raise RuntimeError(
+            f"{symbol}: duplicate rows already exist in target range. "
+            f"Sample duplicate timestamps: {sample}. "
+            "This table cannot be safely reconciled without DELETE or WAL deduplication."
+        )
+
+
+def create_staging_rows(cursor, staging_table: str, rows: list[CandleRow]) -> None:
+    """Write replacement rows to staging and verify the staged row count."""
+
+    create_candle_table(cursor, staging_table)
+    insert_rows(cursor, staging_table, rows)
+    cursor.execute(f"SELECT count() AS count FROM {staging_table}")
+    staged_count = int(cursor.fetchone()[0])
+    if staged_count != len(rows):
+        raise RuntimeError(f"Staging row count mismatch: expected {len(rows)}, got {staged_count}")
+
+
+def delete_target_range(cursor, symbol: str, start: datetime, end: datetime) -> None:
+    """Delete all existing `1m` rows for one symbol in the reconcile window.
+
+    This helper is kept for manual recovery experiments only. QuestDB may reject
+    `DELETE FROM` for the current BYPASS WAL table, so the normal reconcile path
+    uses update-plus-insert instead.
+    """
+
+    cursor.execute(
+        f"""
+        DELETE FROM {TABLE_NAME}
+        WHERE symbol = %s AND interval = %s AND timestamp >= %s AND timestamp < %s
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+
+
+def insert_from_table(cursor, source_table: str, target_table: str = TABLE_NAME) -> None:
+    """Copy all rows from a temporary table into the target candle table."""
+
+    ensure_safe_table_name(source_table)
+    ensure_safe_table_name(target_table)
+    cursor.execute(
+        f"""
+        INSERT INTO {target_table} (symbol, interval, timestamp, open, high, low, close, volume)
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM {source_table}
+        """
+    )
+
+
+def fetch_existing_timestamps(cursor, symbol: str, start: datetime, end: datetime) -> set[datetime]:
+    """Fetch existing target timestamps for deciding which staged rows to insert."""
+
+    cursor.execute(
+        f"""
+        SELECT timestamp
+        FROM {TABLE_NAME}
+        WHERE symbol = %s AND interval = %s AND timestamp >= %s AND timestamp < %s
+        ORDER BY timestamp ASC
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+    return {normalize_db_timestamp(row[0]) for row in cursor.fetchall()}
+
+
+def fetch_db_rows(cursor, symbol: str, start: datetime, end: datetime) -> list[CandleRow]:
+    """Read target-range rows back from QuestDB for post-write verification."""
+
+    return fetch_rows_from_table(cursor, TABLE_NAME, symbol, start, end)
+
+
+def fetch_rows_from_table(cursor, table_name: str, symbol: str, start: datetime, end: datetime) -> list[CandleRow]:
+    """Read one symbol/window from a validated candle table."""
+
+    ensure_safe_table_name(table_name)
+    cursor.execute(
+        f"""
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM {table_name}
+        WHERE symbol = %s AND interval = %s AND timestamp >= %s AND timestamp < %s
+        ORDER BY timestamp ASC
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+
+    return [
+        CandleRow(
+            symbol=row[0],
+            interval=row[1],
+            timestamp=normalize_db_timestamp(row[2]),
+            open=decimal_from_db(row[3]),
+            high=decimal_from_db(row[4]),
+            low=decimal_from_db(row[5]),
+            close=decimal_from_db(row[6]),
+            volume=decimal_from_db(row[7]),
+        )
+        for row in cursor.fetchall()
+    ]
+
+
+def fetch_all_rows_from_table(cursor, table_name: str) -> list[CandleRow]:
+    """Read all rows from a validated temporary candle table."""
+
+    ensure_safe_table_name(table_name)
+    cursor.execute(
+        f"""
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM {table_name}
+        ORDER BY timestamp ASC
+        """
+    )
+    return [
+        CandleRow(
+            symbol=row[0],
+            interval=row[1],
+            timestamp=normalize_db_timestamp(row[2]),
+            open=decimal_from_db(row[3]),
+            high=decimal_from_db(row[4]),
+            low=decimal_from_db(row[5]),
+            close=decimal_from_db(row[6]),
+            volume=decimal_from_db(row[7]),
+        )
+        for row in cursor.fetchall()
+    ]
+
+
+def assert_rows_match(actual: list[CandleRow], expected: list[CandleRow], tolerance: Decimal, symbol: str) -> None:
+    """Assert that QuestDB rows match Binance rows within DOUBLE tolerance."""
+
+    if len(actual) != len(expected):
+        raise RuntimeError(f"{symbol}: verification count mismatch: expected {len(expected)}, got {len(actual)}")
+
+    for actual_row, expected_row in zip(actual, expected):
+        if actual_row.timestamp != expected_row.timestamp:
+            raise RuntimeError(
+                f"{symbol}: timestamp mismatch: expected {expected_row.timestamp.isoformat()}, "
+                f"got {actual_row.timestamp.isoformat()}"
+            )
+
+        comparisons = (
+            ("open", actual_row.open, expected_row.open),
+            ("high", actual_row.high, expected_row.high),
+            ("low", actual_row.low, expected_row.low),
+            ("close", actual_row.close, expected_row.close),
+            ("volume", actual_row.volume, expected_row.volume),
+        )
+        for field_name, actual_value, expected_value in comparisons:
+            if abs(actual_value - expected_value) > tolerance:
+                raise RuntimeError(
+                    f"{symbol}: {field_name} mismatch at {actual_row.timestamp.isoformat()}: "
+                    f"expected {expected_value}, got {actual_value}"
+                )
+
+
+def drop_table(cursor, table_name: str) -> None:
+    """Drop a temporary table after validating the generated table name."""
+
+    ensure_safe_table_name(table_name)
+    cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def rename_table(cursor, old_name: str, new_name: str) -> None:
+    """Rename a QuestDB table after validating both dynamic names."""
+
+    ensure_safe_table_name(old_name)
+    ensure_safe_table_name(new_name)
+    cursor.execute(f"RENAME TABLE {old_name} TO {new_name}")
+
+
+def list_reconciler_temp_tables(cursor) -> list[str]:
+    """List backup/staging tables left by previous reconciler runs."""
+
+    cursor.execute("SELECT table_name FROM tables()")
+    table_names = []
+    for row in cursor.fetchall():
+        table_name = str(row[0])
+        if is_reconciler_temp_table(table_name):
+            table_names.append(table_name)
+    return sorted(table_names)
+
+
+def cleanup_reconciler_temp_tables(cursor, protected_tables: set[str] | None = None) -> None:
+    """Drop old reconciler temporary tables that are not part of this active run."""
+
+    protected_tables = protected_tables or set()
+    temp_tables = [table for table in list_reconciler_temp_tables(cursor) if table not in protected_tables]
+    if not temp_tables:
+        logger.info("No old reconciler temporary tables to clean up.")
+        return
+
+    dropped_count = 0
+    for table_name in temp_tables:
+        try:
+            drop_table(cursor, table_name)
+            dropped_count += 1
+        except Exception:
+            logger.warning(f"Failed to drop old reconciler temporary table {table_name}", exc_info=True)
+
+    logger.info(f"Dropped {dropped_count}/{len(temp_tables)} old reconciler temporary tables.")
+
+
+def reconcile_symbol(
+    cursor,
+    base_url: str,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    run_id: str,
+    tolerance: Decimal,
+    dry_run: bool,
+    keep_temp: bool,
+) -> None:
+    """Reconcile one symbol from Binance data through staging and verification."""
+
+    logger.info(f"{symbol}: fetching Binance {INTERVAL} candles from {start.isoformat()} to {end.isoformat()}")
+    binance_rows = fetch_binance_klines(base_url, symbol, start, end)
+    validate_rows(binance_rows, symbol, start, end)
+
+    if dry_run:
+        logger.info(f"{symbol}: dry run passed. {len(binance_rows)} Binance candles are complete and valid.")
+        return
+
+    replacement_table = build_table_name("market_candles_replace", symbol, run_id)
+    staging_table = build_table_name("market_candles_stage", symbol, run_id)
+    old_table = build_table_name("market_candles_old", symbol, run_id)
+    failed_table = build_table_name("market_candles_failed", symbol, run_id)
+    replacement_created = False
+    staging_created = False
+    old_table_created = False
+    replacement_is_live = False
+
+    try:
+        create_staging_rows(cursor, staging_table, binance_rows)
+        staging_created = True
+        logger.info(f"{symbol}: staged {len(binance_rows)} replacement rows in {staging_table}")
+
+        replacement_count = create_replacement_table_from_staging(
+            cursor,
+            replacement_table,
+            staging_table,
+            symbol,
+            start,
+            end,
+        )
+        replacement_created = True
+        logger.info(f"{symbol}: built {replacement_table} with {replacement_count} total rows")
+
+        replacement_rows = fetch_rows_from_table(cursor, replacement_table, symbol, start, end)
+        assert_rows_match(replacement_rows, binance_rows, tolerance, symbol)
+        logger.info(f"{symbol}: replacement table verified before swap")
+
+        rename_table(cursor, TABLE_NAME, old_table)
+        old_table_created = True
+        rename_table(cursor, replacement_table, TABLE_NAME)
+        replacement_is_live = True
+
+        actual_rows = fetch_db_rows(cursor, symbol, start, end)
+        assert_rows_match(actual_rows, binance_rows, tolerance, symbol)
+        logger.info(f"{symbol}: swapped and verified {len(binance_rows)} candles")
+    except Exception:
+        logger.error(f"{symbol}: replacement failed. Attempting rollback.", exc_info=True)
+        if replacement_is_live:
+            try:
+                rename_table(cursor, TABLE_NAME, failed_table)
+                rename_table(cursor, old_table, TABLE_NAME)
+                logger.warning(f"{symbol}: rollback completed. Failed table retained as {failed_table}")
+            except Exception:
+                logger.error(
+                    f"{symbol}: rollback failed. Old table retained for manual recovery: {old_table}",
+                    exc_info=True,
+                )
+        elif old_table_created:
+            try:
+                rename_table(cursor, old_table, TABLE_NAME)
+                logger.warning(f"{symbol}: restored original table name from {old_table}")
+            except Exception:
+                logger.error(f"{symbol}: failed to restore original table name from {old_table}", exc_info=True)
+
+        if replacement_created and not replacement_is_live and not keep_temp:
+            try:
+                drop_table(cursor, replacement_table)
+            except Exception:
+                logger.warning(f"{symbol}: failed to drop replacement table {replacement_table}", exc_info=True)
+        if staging_created and not keep_temp:
+            try:
+                drop_table(cursor, staging_table)
+            except Exception:
+                logger.warning(f"{symbol}: failed to drop staging table {staging_table}", exc_info=True)
+        raise
+
+    if not keep_temp:
+        for table_name in (old_table, replacement_table, staging_table):
+            try:
+                drop_table(cursor, table_name)
+            except Exception:
+                logger.warning(f"{symbol}: failed to drop temporary table {table_name}", exc_info=True)
+
+
+def parse_args():
+    """Parse command-line options for the maintenance script."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Overwrite the configured closed 1m market_candles window from Binance REST klines, "
+            "excluding the currently streaming candle."
+        )
+    )
+    parser.add_argument(
+        "--symbols",
+        help="Comma-separated symbols. Defaults to TRADING_SYMBOLS from data_pipeline/.env, or BTCUSDT.",
+    )
+    parser.add_argument(
+        "--binance-rest-url",
+        default=os.getenv("BINANCE_REST_URL") or DEFAULT_BINANCE_REST_URL,
+        help="Binance REST base URL.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Fetch and validate Binance data without writing DB.")
+    parser.add_argument("--keep-temp", action="store_true", help="Keep replacement/old tables after success.")
+    parser.add_argument(
+        "--tolerance",
+        default=str(DEFAULT_TOLERANCE),
+        help="Allowed numeric difference when verifying written DOUBLE values.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Run candle reconciliation for the configured symbols."""
+
+    load_environment()
+    args = parse_args()
+
+    symbols = parse_symbols(args.symbols or os.getenv("TRADING_SYMBOLS"))
+    tolerance = Decimal(str(args.tolerance))
+    start, end = resolve_reconcile_window(args.binance_rest_url)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    active_temp_tables = set()
+    for symbol in symbols:
+        active_temp_tables.update(
+            {
+                build_table_name("market_candles_replace", symbol, run_id),
+                build_table_name("market_candles_stage", symbol, run_id),
+                build_table_name("market_candles_old", symbol, run_id),
+                build_table_name("market_candles_failed", symbol, run_id),
+            }
+        )
+
+    logger.info(
+        f"Reconciling {len(symbols)} symbol(s), interval={INTERVAL}, "
+        f"window=[{start.isoformat()}, {end.isoformat()}); "
+        f"expected_candles={RECONCILE_WINDOW_HOURS * 60}; "
+        f"end_lag_minutes={RECONCILE_END_LAG_MINUTES}"
+    )
+
+    if args.dry_run:
+        for symbol in symbols:
+            reconcile_symbol(
+                cursor=None,
+                base_url=args.binance_rest_url,
+                symbol=symbol,
+                start=start,
+                end=end,
+                run_id=run_id,
+                tolerance=tolerance,
+                dry_run=True,
+                keep_temp=args.keep_temp,
+            )
+        return
+
+    conn = create_connection()
+    try:
+        with conn.cursor() as cursor:
+            ensure_market_table(cursor)
+            for symbol in symbols:
+                reconcile_symbol(
+                    cursor=cursor,
+                    base_url=args.binance_rest_url,
+                    symbol=symbol,
+                    start=start,
+                    end=end,
+                    run_id=run_id,
+                    tolerance=tolerance,
+                    dry_run=args.dry_run,
+                    keep_temp=args.keep_temp,
+                )
+            if not args.keep_temp:
+                cleanup_reconciler_temp_tables(cursor, protected_tables=active_temp_tables)
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
