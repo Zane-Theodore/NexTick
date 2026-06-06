@@ -17,7 +17,7 @@ interface CandlesResponse {
 export const getHistoricalCandles = async (
   symbol: string = 'BTCUSDT',
   interval: string = '1m',
-  limit: number = 1000
+  limit: number = 2000
 ): Promise<MarketCandle[]> => {
   if (!API_URL) {
     throw new Error('VITE_API_URL is not configured');

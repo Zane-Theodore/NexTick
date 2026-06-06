@@ -72,7 +72,7 @@ export const useMarketData = (
         onIndicatorValuesChangeRef.current?.([]);
         volumeByTimeRef?.current.clear();
         
-        const rawCandles = await getHistoricalCandles(symbol, interval, 1000);
+        const rawCandles = await getHistoricalCandles(symbol, interval, 2000);
 
         if (isCancelled) return;
 
