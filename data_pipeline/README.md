@@ -141,11 +141,12 @@ also cleans up old reconciler temporary tables from previous runs. Use
 `--keep-temp` only when you intentionally want to inspect those temporary
 tables.
 
-The default startup reconcile window is 24 hours and ends 2 minutes behind
-Binance's current minute floor. The script runs one pass only; it does not chase
-newly closed tail candles while the processor is live. With defaults, each
+The default startup reconcile window is 24 hours and ends at Binance's current
+minute floor, so it includes every closed candle and excludes only the currently
+open minute. The script runs one pass only; it does not chase newly closed tail
+candles while the processor is live. With defaults, each
 symbol expects exactly 1440 closed `1m` candles from
-`[safe_end - 24h, safe_end)`, where `safe_end = current_minute_floor - 2m`.
+`[safe_end - 24h, safe_end)`, where `safe_end = current_minute_floor`.
 When it starts inside the first seconds of a fresh minute, it waits briefly
 before resolving the window to avoid unstable exchange boundaries.
 
@@ -216,7 +217,7 @@ These names match `data_pipeline/.env.example` and `common/config.py`. The examp
 | `STARTUP_RECONCILE_BINANCE_REST_URL` | No | `https://api.binance.com` | Optional startup-only REST endpoint override. |
 | `STARTUP_RECONCILE_TOLERANCE` | No | `0.00000001` | Optional startup verification tolerance override. |
 | `STARTUP_RECONCILE_WINDOW_HOURS` | No | `24` | Number of closed hours to fill in the one-shot startup pass. |
-| `STARTUP_RECONCILE_END_LAG_MINUTES` | No | `2` | Safety lag before the live processor's newest write targets. |
+| `STARTUP_RECONCILE_END_LAG_MINUTES` | No | `0` | Optional lag behind Binance's current minute floor. Keep `0` for startup so DB has no handoff gap before the processor starts. |
 | `STARTUP_BACKFILL_STATE_FILE` | No | `/tmp/nextick/startup-backfill.json` in Docker | Shared marker file containing the startup backfill watermark for the processor; blank uses the OS temp directory. |
 
 Supported intervals:

@@ -37,7 +37,7 @@ RECONCILE_WINDOW_HOURS = 24
 DEFAULT_LIMIT = 1000
 DEFAULT_TOLERANCE = Decimal("0.00000001")
 MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
-RECONCILE_END_LAG_MINUTES = 2
+RECONCILE_END_LAG_MINUTES = 0
 DDL_RETRY_ATTEMPTS = 30
 DDL_RETRY_DELAY_SECONDS = 1.0
 
@@ -220,8 +220,9 @@ def resolve_latest_closed_end(base_url: str, end_lag_minutes: int | None = None)
 
     The short wait after a fresh minute boundary avoids choosing an unstable
     exchange boundary. The returned value is the current Binance minute floor
-    minus the configured safety lag, so the open in-progress candle and the
-    newest live-processor write targets are excluded.
+    minus the configured lag. Startup backfill normally uses zero lag because
+    the realtime processor has not started yet; the open in-progress candle is
+    still excluded by the minute floor.
     """
 
     server_time = fetch_binance_server_time(base_url)

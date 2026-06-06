@@ -310,9 +310,9 @@ LIMIT 20;
 ## Reconcile Missing Candles
 
 Use the pipeline reconciler when recent stored `1m` candles are missing or need
-to be filled from Binance REST data. The startup backfill repairs one closed
-24-hour window and writes a watermark so the processor does not overwrite that
-window while draining buffered trades.
+to be filled from Binance REST data. The startup backfill repairs one 24-hour
+window through Binance's latest closed minute and writes a watermark so the
+processor does not overwrite that window while draining buffered trades.
 
 Docker Compose starts reconciliation automatically after `CandleProcessor`
 initialized. The startup path replaces the target window in `market_candles`

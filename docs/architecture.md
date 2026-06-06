@@ -190,11 +190,12 @@ Current storage rules:
 Maintenance reconciliation is handled by `data_pipeline.backfill.reconciler`. In
 Docker startup, `data-producer` runs first so raw trades are buffered in Kafka,
 `data-backfill` runs one Binance REST replacement backfill pass, and only then
-`data-processor` starts `CandleProcessor`. The backfill service writes a shared
-watermark file; while draining the Kafka backlog, the processor skips final `1m`
-DB upserts before that watermark so partial replay candles cannot overwrite the
-canonical REST rows. The live table is WAL/dedup with `UPSERT KEYS(timestamp,
-symbol, interval)`.
+`data-processor` starts `CandleProcessor`. Startup backfill ends at Binance's
+current minute floor, so only the open in-progress minute is excluded. The
+backfill service writes a shared watermark file; while draining the Kafka
+backlog, the processor skips final `1m` DB upserts before that watermark so
+partial replay candles cannot overwrite the canonical REST rows. The live table
+is WAL/dedup with `UPSERT KEYS(timestamp, symbol, interval)`.
 
 ## Backend Layer
 
