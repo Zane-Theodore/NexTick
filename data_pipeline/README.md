@@ -12,7 +12,7 @@ This module does not expose browser APIs, render UI, or run the NestJS backend.
 | --- | --- |
 | `producer/binance_producer.py` | Runs `BinanceCombinedProducer`, connects to Binance trade streams, validates raw trade price/volume, and publishes cleaned trades to Kafka. |
 | `processor/candle_processor.py` | Runs `CandleProcessor`, consumes raw trades, aggregates candles by symbol/interval, writes final `1m` candles to QuestDB, and publishes kline updates. |
-| `candle_reconciler.py` | Maintenance script that replaces a closed `1m` candle window from Binance REST klines with backup, staging, and verification. |
+| `candle_reconciler.py` | Maintenance script that rebuilds a closed `1m` candle window from Binance REST klines with staging, full-table backup, verification, and recovery. |
 | `config.py` | Loads `data_pipeline/.env`, validates required config, parses symbols and intervals. |
 | `logger_config.py` | Configures stdout logging with timestamp, level, module name, and message. |
 
@@ -101,21 +101,30 @@ python -m data_pipeline.producer.binance_producer
 
 ## Reconcile Recent Candles
 
-Run this maintenance script when you want to replace the last closed 24 hours of
-stored `1m` candles with Binance REST klines. It excludes the currently
-streaming `1m` candle, validates the full Binance window before touching
-QuestDB, builds a replacement table, verifies it, and swaps it into
-`market_candles` with QuestDB `RENAME TABLE`. This avoids `DELETE`, `UPDATE`,
-and historical inserts on the current `BYPASS WAL` table.
-After a successful run it drops its current old/replacement tables and also
-cleans up old reconciler temporary tables from previous runs. Use `--keep-temp`
-only when you intentionally want to inspect those temporary tables.
+Run this maintenance script when you want to repair recent missing or incorrect
+stored `1m` candles with Binance REST klines. It validates a full Binance
+window, writes the canonical rows to a staging table, builds a full replacement
+table from existing QuestDB rows plus staged Binance rows, verifies the target
+window, backs up the current live table, drops `market_candles`, and recreates
+`market_candles` from the replacement table with `CREATE TABLE AS SELECT`.
+This avoids range `DELETE`, `UPDATE`, and historical inserts on the current
+`BYPASS WAL` table.
+
+If a previous failed run dropped `market_candles` but left a
+`market_candles_old_*` backup table, startup recovery recreates `market_candles`
+from the newest backup before continuing. If replacement verification or swap
+verification fails, rollback recreates `market_candles` from the full backup.
+After a successful run it drops its current old/replacement/staging tables and
+also cleans up old reconciler temporary tables from previous runs. Use
+`--keep-temp` only when you intentionally want to inspect those temporary
+tables.
 
 The current reconcile window is fixed in code at 24 hours and intentionally
-ends 30 minutes behind the latest Binance server minute. This lag keeps the
-script away from candles that the live processor is still closing while the
-replacement table is being built. Running the script again later reconciles
-those newer candles after they move out of the lag window.
+ends 30 minutes behind the latest Binance server minute. It does not fill the
+latest 30 minutes during that run. This lag keeps the script away from candles
+that the live processor is still closing while the replacement table is being
+built. Running the script again later reconciles those newer candles after they
+move out of the lag window.
 The script uses Binance server time for the window boundary, so it expects
 exactly 1440 closed `1m` candles from
 `[server_minute - lag - 24h, server_minute - lag)`.
@@ -148,6 +157,16 @@ python -m data_pipeline.candle_reconciler --keep-temp
 The script reads QuestDB connection settings and `TRADING_SYMBOLS` from
 `data_pipeline/.env`. `BINANCE_REST_URL` is optional and defaults to
 `https://api.binance.com`.
+
+Operational notes:
+
+| Behavior | Detail |
+| --- | --- |
+| Live writer | Prefer stopping `data-processor` before running the reconciler because the script drops and recreates `market_candles`. |
+| Reconcile lag | The newest 30 minutes are intentionally skipped and handled by a later run. |
+| Backup names | Full backups use `market_candles_old_<SYMBOL>_<RUN_ID>`. |
+| Replacement names | Replacement tables use `market_candles_replace_<SYMBOL>_<RUN_ID>`. |
+| Recovery | If `market_candles` is missing and an old backup exists, the script restores from the newest backup automatically. |
 
 ## Environment Variables
 

@@ -292,6 +292,35 @@ ORDER BY timestamp DESC
 LIMIT 20;
 ```
 
+## Reconcile Missing Candles
+
+Use the pipeline reconciler when recent stored `1m` candles are missing or need
+to be rebuilt from Binance REST data. The reconciler repairs a closed 24-hour
+window that ends 30 minutes behind Binance server time, so the latest 30 minutes
+are intentionally left to the live processor or a later reconcile run.
+
+Prefer stopping the live writer before running it because the current
+`market_candles` table is `BYPASS WAL` and the reconciler repairs data by
+backing up, dropping, and recreating `market_candles`.
+
+```bash
+docker compose stop data-processor
+python -m data_pipeline.candle_reconciler
+docker compose start data-processor
+```
+
+Useful dry-run and inspection modes:
+
+```bash
+python -m data_pipeline.candle_reconciler --dry-run
+python -m data_pipeline.candle_reconciler --symbols BTCUSDT,ETHUSDT
+python -m data_pipeline.candle_reconciler --keep-temp
+```
+
+If a previous reconcile failed after dropping `market_candles`, run the same
+command again. The script restores `market_candles` from the newest
+`market_candles_old_*` backup before continuing.
+
 ## Troubleshooting
 
 | Problem | Likely cause | Fix |
@@ -304,6 +333,7 @@ LIMIT 20;
 | Footer shows `Offline` | `VITE_API_HEALTH_URL` is missing or backend `/health` is unreachable | Set `VITE_API_HEALTH_URL=http://localhost:3000/health` and restart Vite. |
 | Socket.IO CORS error | `FRONTEND_URL` or `BACKEND_URL` does not match the browser/backend origin | Update `backend/.env` and restart NestJS. |
 | `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after trades start. |
+| `market_candles` is missing after reconciliation | A reconcile run failed after dropping the live table but before recreating it | Run `python -m data_pipeline.candle_reconciler` again to restore from the newest `market_candles_old_*` backup, or restart QuestDB first if QuestDB still holds table metadata. |
 | Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs; Compose sets DNS to `8.8.8.8` and `8.8.4.4`. |
 | Interval returns 400 | Interval is not in backend `VALID_INTERVALS` | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
 | Chart fails during startup | `VITE_TRADING_SYMBOLS` or `VITE_CANDLE_INTERVALS` is blank or undefined | Fill both frontend env values and restart Vite. |
