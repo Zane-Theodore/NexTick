@@ -124,9 +124,43 @@ services:
     depends_on:
       kafka-setup:
         condition: service_completed_successfully
-      data-processor:
-        condition: service_healthy
     restart: unless-stopped
+
+  data-backfill:
+    build: .
+    container_name: nextick-data-backfill
+    command: >
+      bash -c "
+      echo 'Waiting for QuestDB to be ready...';
+      while ! python -c 'import socket; socket.create_connection((\"questdb\", 8812))' 2>/dev/null; do
+        sleep 2;
+      done;
+      echo 'QuestDB is ready! Running startup candle backfill...';
+      python -m data_pipeline.backfill.runner
+      "
+    env_file:
+      - data_pipeline/.env
+    environment:
+      - KAFKA_BROKER=kafka:29092
+      - KAFKA_SERVER=kafka:29092
+      - QUESTDB_HOST=questdb
+      - STARTUP_BACKFILL_STATE_FILE=/tmp/nextick/startup-backfill.json
+      - STARTUP_RECONCILE_ENABLED=true
+      - STARTUP_RECONCILE_REQUIRED=true
+      - STARTUP_RECONCILE_MAX_ATTEMPTS=3
+      - STARTUP_RECONCILE_RETRY_DELAY_SECONDS=5
+      - STARTUP_RECONCILE_WINDOW_HOURS=24
+      - STARTUP_RECONCILE_END_LAG_MINUTES=2
+    networks:
+      - nextick_net
+    volumes:
+      - pipeline_state:/tmp/nextick
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+      questdb:
+        condition: service_healthy
+    restart: "no"
 
   data-processor:
     build: .
@@ -137,29 +171,32 @@ services:
       while ! python -c 'import socket; socket.create_connection((\"questdb\", 8812))' 2>/dev/null; do
         sleep 2;
       done;
-      echo 'QuestDB is ready! Running startup reconciliation before Processor...';
-      python -m data_pipeline.pipeline_runner
+      echo 'QuestDB is ready! Starting realtime candle processor...';
+      python -m data_pipeline.processor.runner
       "
     env_file:
       - data_pipeline/.env
     environment:
       - KAFKA_BROKER=kafka:29092
       - KAFKA_SERVER=kafka:29092
+      - KAFKA_CONSUMER_GROUP_ID=candle-processor-group
+      - KAFKA_AUTO_OFFSET_RESET=earliest
       - QUESTDB_HOST=questdb
-      - PROCESSOR_READY_FILE=/tmp/nextick-processor-ready
-      - STARTUP_RECONCILE_ENABLED=true
-      - STARTUP_RECONCILE_REQUIRED=true
-      - STARTUP_RECONCILE_MAX_ATTEMPTS=3
-      - STARTUP_RECONCILE_RETRY_DELAY_SECONDS=5
+      - PROCESSOR_READY_FILE=/tmp/nextick/processor-ready
+      - STARTUP_BACKFILL_STATE_FILE=/tmp/nextick/startup-backfill.json
     networks:
       - nextick_net
+    volumes:
+      - pipeline_state:/tmp/nextick
     depends_on:
       kafka-setup:
         condition: service_completed_successfully
       questdb:
         condition: service_healthy
+      data-backfill:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/nextick-processor-ready"]
+      test: ["CMD-SHELL", "test -f /tmp/nextick/processor-ready"]
       interval: 5s
       timeout: 3s
       retries: 240
@@ -172,3 +209,4 @@ networks:
 
 volumes:
   kafka_data:
+  pipeline_state:
