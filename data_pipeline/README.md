@@ -12,9 +12,12 @@ This module does not expose browser APIs, render UI, or run the NestJS backend.
 | --- | --- |
 | `producer/binance_producer.py` | Runs `BinanceCombinedProducer`, connects to Binance trade streams, validates raw trade price/volume, and publishes cleaned trades to Kafka. |
 | `processor/candle_processor.py` | Runs `CandleProcessor`, consumes raw trades, aggregates candles by symbol/interval, writes final `1m` candles to QuestDB, and publishes kline updates. |
-| `candle_reconciler.py` | Maintenance script that rebuilds a closed `1m` candle window from Binance REST klines with staging, full-table backup, verification, and recovery. |
-| `config.py` | Loads `data_pipeline/.env`, validates required config, parses symbols and intervals. |
-| `logger_config.py` | Configures stdout logging with timestamp, level, module name, and message. |
+| `processor/runner.py` | Processor service entrypoint with signal handling and health marker management. |
+| `backfill/runner.py` | Startup backfill service entrypoint with retry policy and failure behavior. |
+| `backfill/reconciler.py` | Maintenance script that validates Binance REST klines and replaces a closed `1m` candle window in QuestDB. |
+| `backfill/state.py` | Shared backfill watermark reader/writer used by backfill and processor services. |
+| `common/config.py` | Loads `data_pipeline/.env`, validates required config, parses symbols and intervals. |
+| `common/logger.py` | Configures stdout logging with timestamp, level, module name, and message. |
 
 ## Run with Docker Compose
 
@@ -33,7 +36,7 @@ Copy-Item data_pipeline\.env.example data_pipeline\.env
 Fill `data_pipeline/.env`, then start the infrastructure and pipeline:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
 Compose behavior:
@@ -44,13 +47,14 @@ Compose behavior:
 | `kafka-ui` | Exposes topic and consumer inspection at `http://localhost:8080`. |
 | `kafka-setup` | Reads `data_pipeline/.env`, waits for Kafka, creates raw trade and kline topics with 3 partitions. |
 | `questdb` | Exposes the web console on `9000` and PostgreSQL wire on `8812`. |
-| `data-processor` | Overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb`, waits for QuestDB, runs startup reconciliation, then starts `CandleProcessor`. |
-| `data-producer` | Overrides `KAFKA_BROKER=kafka:29092`, starts only after `data-processor` is healthy, then runs `python -m data_pipeline.producer.binance_producer`. |
+| `data-producer` | Overrides `KAFKA_BROKER=kafka:29092`, starts as soon as Kafka topics exist, then streams live Binance trades into Kafka. |
+| `data-backfill` | Runs `data_pipeline.backfill.runner`, repairs the closed startup window, and writes a shared watermark. |
+| `data-processor` | Starts after `data-backfill` completes, drains buffered raw trades, and skips DB upserts for candles before the watermark. |
 
 Check logs:
 
 ```bash
-docker compose logs -f data-producer data-processor
+docker compose logs -f data-producer data-backfill data-processor
 ```
 
 ## Run Manually
@@ -69,53 +73,64 @@ Create a virtual environment from the repository root:
 python -m venv .venv
 ```
 
-Windows PowerShell, processor terminal:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python -m data_pipeline.pipeline_runner
-```
-
 Windows PowerShell, producer terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 python -m data_pipeline.producer.binance_producer
 ```
 
-macOS/Linux, processor terminal:
+Windows PowerShell, backfill terminal:
 
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m data_pipeline.pipeline_runner
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m data_pipeline.backfill.runner
+```
+
+Windows PowerShell, processor terminal:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m data_pipeline.processor.runner
 ```
 
 macOS/Linux, producer terminal:
 
 ```bash
 source .venv/bin/activate
+pip install -r requirements.txt
 python -m data_pipeline.producer.binance_producer
+```
+
+macOS/Linux, backfill terminal:
+
+```bash
+source .venv/bin/activate
+python -m data_pipeline.backfill.runner
+```
+
+macOS/Linux, processor terminal:
+
+```bash
+source .venv/bin/activate
+python -m data_pipeline.processor.runner
 ```
 
 ## Reconcile Recent Candles
 
-At normal startup, `data_pipeline.pipeline_runner` runs this reconciliation
-before constructing `CandleProcessor`. That keeps the reconciler and the live
-processor from writing `market_candles` at the same time. Docker Compose also
-keeps `data-producer` waiting until the processor has finished reconciliation
-and marked itself healthy.
+At normal Docker startup, `data-producer` starts first and buffers raw trades in
+Kafka. `data-backfill` then runs `data_pipeline.backfill.runner` as a separate
+one-shot service before `data-processor` starts. After backfill succeeds, the
+processor reads the shared `STARTUP_BACKFILL_STATE_FILE` watermark and refuses
+to upsert final `1m` candles older than that watermark while it drains the Kafka
+backlog.
 
-Run `data_pipeline.candle_reconciler` directly when you want to repair recent
-missing or incorrect stored `1m` candles outside normal startup. It validates a
-full Binance window, writes the canonical rows to a staging table, builds a full
-replacement table from existing QuestDB rows plus staged Binance rows, verifies
-the target window, backs up the current live table, drops `market_candles`, and
-recreates `market_candles` from the replacement table with `CREATE TABLE AS
-SELECT`.
-This avoids range `DELETE`, `UPDATE`, and historical inserts on the current
-`BYPASS WAL` table.
+Run `data_pipeline.backfill.reconciler` directly when you want to repair recent
+missing or incorrect stored `1m` candles outside normal startup. The normal path
+validates a bounded Binance window, builds a replacement table that excludes
+stale rows in that window, and swaps it into `market_candles` before the
+processor starts.
 
 If a previous failed run dropped `market_candles` but left a
 `market_candles_old_*` backup table, startup recovery recreates `market_candles`
@@ -126,40 +141,35 @@ also cleans up old reconciler temporary tables from previous runs. Use
 `--keep-temp` only when you intentionally want to inspect those temporary
 tables.
 
-The initial reconcile window is 24 hours and ends at Binance's latest closed
-minute. It excludes only the currently open `1m` candle. After each pass, the
-script checks Binance server time again; if reconciliation took long enough for
-more minutes to close, it immediately appends the missing tail window before
-the processor starts. Tail catch-up uses ordered inserts instead of another
-full table swap, so a long startup run does not keep falling behind by
-rebuilding the table for each newly closed candle.
-The script uses Binance server time for the window boundary, so the first pass
-expects exactly 1440 closed `1m` candles from
-`[latest_closed_minute - 24h, latest_closed_minute)`.
+The default startup reconcile window is 24 hours and ends 2 minutes behind
+Binance's current minute floor. The script runs one pass only; it does not chase
+newly closed tail candles while the processor is live. With defaults, each
+symbol expects exactly 1440 closed `1m` candles from
+`[safe_end - 24h, safe_end)`, where `safe_end = current_minute_floor - 2m`.
 When it starts inside the first seconds of a fresh minute, it waits briefly
-before resolving the final window to avoid racing the live processor at the
-minute boundary.
+before resolving the window to avoid unstable exchange boundaries.
 
 Windows PowerShell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python -m data_pipeline.candle_reconciler
+python -m data_pipeline.backfill.reconciler
 ```
 
 macOS/Linux:
 
 ```bash
 source .venv/bin/activate
-python -m data_pipeline.candle_reconciler
+python -m data_pipeline.backfill.reconciler
 ```
 
 Useful options:
 
 ```bash
-python -m data_pipeline.candle_reconciler --dry-run
-python -m data_pipeline.candle_reconciler --symbols BTCUSDT,ETHUSDT
-python -m data_pipeline.candle_reconciler --keep-temp
+python -m data_pipeline.backfill.reconciler --dry-run
+python -m data_pipeline.backfill.reconciler --symbols BTCUSDT,ETHUSDT
+python -m data_pipeline.backfill.reconciler --window-hours 24 --end-lag-minutes 2
+python -m data_pipeline.backfill.reconciler --keep-temp
 ```
 
 The script reads QuestDB connection settings and `TRADING_SYMBOLS` from
@@ -170,17 +180,17 @@ Operational notes:
 
 | Behavior | Detail |
 | --- | --- |
-| Startup order | `pipeline_runner` runs the reconciler first and only starts `CandleProcessor` after reconciliation succeeds. |
-| Startup failure | `STARTUP_RECONCILE_REQUIRED=true` fails the processor container if reconciliation cannot complete after retries. Set it to `false` only when you intentionally prefer live processing over startup repair. |
-| Manual live writer | Stop `data-processor` before running `python -m data_pipeline.candle_reconciler` manually because the script drops and recreates `market_candles`. |
-| Reconcile end | The startup run fills through Binance's latest closed candle and appends tail windows if new candles close while reconciliation is still running. |
+| Startup order | `data-producer` runs continuously, `data-backfill` completes, then `data-processor` starts. |
+| Startup failure | `data-backfill` retries according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, `data-processor` does not start if backfill fails. |
+| Manual full repair | Stop `data-processor` before running any repair workflow that drops, recreates, or migrates `market_candles`. |
+| Reconcile end | The startup run fills one 24-hour window and writes the exclusive end timestamp to `STARTUP_BACKFILL_STATE_FILE`. |
 | Backup names | Full backups use `market_candles_old_<SYMBOL>_<RUN_ID>`. |
 | Replacement names | Replacement tables use `market_candles_replace_<SYMBOL>_<RUN_ID>`. |
 | Recovery | If `market_candles` is missing and an old backup exists, the script restores from the newest backup automatically. |
 
 ## Environment Variables
 
-These names match `data_pipeline/.env.example` and `config.py`. The example file intentionally contains blank values; local `.env` must be filled before startup.
+These names match `data_pipeline/.env.example` and `common/config.py`. The example file intentionally contains blank values; local `.env` must be filled before startup.
 
 | Variable | Required by code | Example | Notes |
 | --- | --- | --- | --- |
@@ -196,15 +206,18 @@ These names match `data_pipeline/.env.example` and `config.py`. The example file
 | `TRADING_SYMBOLS` | Effectively required in `.env` | `BTCUSDT,ETHUSDT` | If unset, defaults to `BTCUSDT`; if present but blank, no symbols are produced. |
 | `CANDLE_INTERVALS` | Effectively required in `.env` | `1m,3m,5m,15m,30m,1h` | If unset, defaults to all supported intervals; if present but blank, no interval managers are created. |
 | `CANDLE_UPDATE_INTERVAL_MS` | No | `500` | Defaults to `500`. Controls non-final candle publish cadence. |
-| `STARTUP_RECONCILE_ENABLED` | No | `true` | Runs startup reconciliation before processor startup when enabled. |
-| `STARTUP_RECONCILE_REQUIRED` | No | `true` | If true, processor startup stops when reconciliation fails after retries. |
-| `STARTUP_RECONCILE_MAX_ATTEMPTS` | No | `3` | Number of full startup reconciliation attempts before applying the failure policy. |
+| `STARTUP_RECONCILE_ENABLED` | No | `true` | Runs the standalone startup backfill service when enabled. |
+| `STARTUP_RECONCILE_REQUIRED` | No | `true` | Blocks processor startup if startup backfill fails after all retries. |
+| `STARTUP_RECONCILE_MAX_ATTEMPTS` | No | `3` | Number of startup reconciliation attempts before applying the failure policy. |
 | `STARTUP_RECONCILE_RETRY_DELAY_SECONDS` | No | `5` | Initial startup reconciliation retry delay with exponential backoff capped at 60 seconds. |
 | `STARTUP_RECONCILE_SYMBOLS` | No | `BTCUSDT,ETHUSDT` | Optional startup-only symbol override; defaults to `TRADING_SYMBOLS`. |
 | `STARTUP_RECONCILE_DRY_RUN` | No | `false` | Validates Binance data at startup without writing QuestDB when true. |
 | `STARTUP_RECONCILE_KEEP_TEMP` | No | `false` | Keeps startup reconciliation temp tables for inspection when true. |
 | `STARTUP_RECONCILE_BINANCE_REST_URL` | No | `https://api.binance.com` | Optional startup-only REST endpoint override. |
 | `STARTUP_RECONCILE_TOLERANCE` | No | `0.00000001` | Optional startup verification tolerance override. |
+| `STARTUP_RECONCILE_WINDOW_HOURS` | No | `24` | Number of closed hours to fill in the one-shot startup pass. |
+| `STARTUP_RECONCILE_END_LAG_MINUTES` | No | `2` | Safety lag before the live processor's newest write targets. |
+| `STARTUP_BACKFILL_STATE_FILE` | No | `/tmp/nextick/startup-backfill.json` in Docker | Shared marker file containing the startup backfill watermark for the processor; blank uses the OS temp directory. |
 
 Supported intervals:
 
@@ -304,7 +317,9 @@ CREATE TABLE IF NOT EXISTS market_candles (
   low DOUBLE,
   close DOUBLE,
   volume DOUBLE
-) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
+) TIMESTAMP(timestamp)
+PARTITION BY MONTH
+DEDUP UPSERT KEYS(timestamp, symbol, interval);
 ```
 
 Insert behavior:
@@ -312,7 +327,7 @@ Insert behavior:
 | Rule | Current behavior |
 | --- | --- |
 | Stored candles | Final `1m` candles only. |
-| Insert method | `psycopg2` through QuestDB PostgreSQL wire protocol. |
+| Insert method | `psycopg2` through QuestDB PostgreSQL wire protocol into a WAL/dedup table, so inserts with the same timestamp/symbol/interval become upserts. |
 | Values | Bound as query parameters. |
 | Offset commit | `consumer.commit()` runs after the insert succeeds. |
 | Failed insert | Retries 3 times; if still failing, the final `1m` candle is not published to the kline topic. |

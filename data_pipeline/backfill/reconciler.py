@@ -1,12 +1,9 @@
-"""Reconcile recent 1-minute candles against Binance REST klines.
+"""Reconcile closed 1-minute candles against Binance REST klines.
 
-This module is intentionally separate from the realtime candle processor. The
-startup runner executes it before the processor is constructed, so it can repair
-through the newest closed Binance candle without racing the live writer. The
-current policy replaces recent closed `1m` candles using Binance REST klines as
-the canonical source and QuestDB backup/staging tables as safety rails. QuestDB
-table-range DELETE is intentionally avoided so the script works with the current
-BYPASS WAL `market_candles` table.
+The startup backfill service runs this before the realtime processor starts. It
+upserts a closed window into the WAL/dedup candle table, then the processor uses
+the reconciled window end as a write fence while it drains buffered Kafka trades.
+The full table replacement helpers remain for manual repair workflows.
 """
 
 import argparse
@@ -26,8 +23,7 @@ import psycopg2
 from psycopg2 import OperationalError
 from dotenv import load_dotenv
 
-from data_pipeline.logger_config import get_logger
-
+from data_pipeline.common.logger import get_logger
 logger = get_logger(__name__)
 
 TABLE_NAME = "market_candles"
@@ -35,12 +31,13 @@ TEMP_TABLE_PATTERN = re.compile(r"^market_candles_(backup|stage|replace|old|fail
 OLD_TABLE_PATTERN = re.compile(r"^market_candles_old_[A-Z0-9]+_([0-9]+)$")
 INTERVAL = "1m"
 INTERVAL_MS = 60_000
+UPSERT_KEYS = "(timestamp, symbol, interval)"
 DEFAULT_BINANCE_REST_URL = "https://api.binance.com"
 RECONCILE_WINDOW_HOURS = 24
 DEFAULT_LIMIT = 1000
 DEFAULT_TOLERANCE = Decimal("0.00000001")
 MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
-RECONCILE_END_LAG_MINUTES = 0
+RECONCILE_END_LAG_MINUTES = 2
 DDL_RETRY_ATTEMPTS = 30
 DDL_RETRY_DELAY_SECONDS = 1.0
 
@@ -59,10 +56,22 @@ class CandleRow:
     volume: Decimal
 
 
+@dataclass(frozen=True)
+class ReconciliationResult:
+    """Summary of one bounded reconciliation run."""
+
+    symbols: list[str]
+    interval: str
+    start: datetime
+    end: datetime
+    expected_count: int
+    dry_run: bool
+
+
 def load_environment() -> None:
     """Load data_pipeline/.env without overriding values injected by Docker."""
 
-    env_path = Path(__file__).parent / ".env"
+    env_path = Path(__file__).resolve().parents[1] / ".env"
     load_dotenv(env_path)
 
 
@@ -73,6 +82,19 @@ def get_env_or_raise(name: str) -> str:
     if not value or not value.strip():
         raise ValueError(f"Environment variable {name} is required")
     return value.strip()
+
+
+def parse_positive_int(value: str | int | None, default: int, minimum: int = 1) -> int:
+    """Parse a positive integer config value with a lower bound."""
+
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid integer value {value!r}; using {default}.")
+        return default
+    return max(parsed, minimum)
 
 
 def parse_symbols(value: str | None) -> list[str]:
@@ -116,6 +138,21 @@ def decimal_from_db(value) -> Decimal:
     """Convert a QuestDB numeric value into Decimal for comparison."""
 
     return Decimal(str(value))
+
+
+def is_valid_candle_row(row: CandleRow) -> bool:
+    """Return whether a candle row has sane OHLCV values."""
+
+    return (
+        row.open > 0
+        and row.high > 0
+        and row.low > 0
+        and row.close > 0
+        and row.volume >= 0
+        and row.high >= max(row.open, row.close)
+        and row.low <= min(row.open, row.close)
+        and row.high >= row.low
+    )
 
 
 def build_table_name(prefix: str, symbol: str, run_id: str) -> str:
@@ -178,13 +215,13 @@ def fetch_binance_server_time(base_url: str) -> datetime:
     return datetime.fromtimestamp(server_time_ms / 1000, tz=timezone.utc)
 
 
-def resolve_latest_closed_end(base_url: str) -> datetime:
+def resolve_latest_closed_end(base_url: str, end_lag_minutes: int | None = None) -> datetime:
     """Return the exclusive end timestamp after Binance's newest closed candle.
 
     The short wait after a fresh minute boundary avoids choosing an unstable
-    exchange boundary. The returned value is the current Binance minute floor,
-    so the open in-progress candle is excluded while the newest closed candle
-    is included.
+    exchange boundary. The returned value is the current Binance minute floor
+    minus the configured safety lag, so the open in-progress candle and the
+    newest live-processor write targets are excluded.
     """
 
     server_time = fetch_binance_server_time(base_url)
@@ -197,14 +234,20 @@ def resolve_latest_closed_end(base_url: str) -> datetime:
         time.sleep(wait_seconds)
         server_time = fetch_binance_server_time(base_url)
 
-    return server_time.replace(second=0, microsecond=0) - timedelta(minutes=RECONCILE_END_LAG_MINUTES)
+    safe_lag = parse_positive_int(end_lag_minutes, RECONCILE_END_LAG_MINUTES, minimum=0)
+    return server_time.replace(second=0, microsecond=0) - timedelta(minutes=safe_lag)
 
 
-def resolve_reconcile_window(base_url: str) -> tuple[datetime, datetime]:
-    """Return the initial 24-hour closed candle window aligned to Binance time."""
+def resolve_reconcile_window(
+    base_url: str,
+    window_hours: int | None = None,
+    end_lag_minutes: int | None = None,
+) -> tuple[datetime, datetime]:
+    """Return the one-shot closed candle window aligned to Binance time."""
 
-    end = resolve_latest_closed_end(base_url)
-    start = end - timedelta(hours=RECONCILE_WINDOW_HOURS)
+    hours = parse_positive_int(window_hours, RECONCILE_WINDOW_HOURS)
+    end = resolve_latest_closed_end(base_url, end_lag_minutes=end_lag_minutes)
+    start = end - timedelta(hours=hours)
     return start, end
 
 
@@ -319,7 +362,7 @@ def create_connection():
 
     If the script is run on the host while `.env` still contains Docker's
     internal hostname `questdb`, retrying `localhost` makes the standalone
-    `python -m data_pipeline.candle_reconciler` path work with the Compose
+    `python -m data_pipeline.backfill.reconciler` path work with the Compose
     port mapping.
     """
 
@@ -354,8 +397,8 @@ def create_connection():
     return conn
 
 
-def ensure_market_table(cursor) -> None:
-    """Ensure the main candle table exists before reconciliation starts."""
+def ensure_market_table(cursor, allow_migration: bool = True) -> None:
+    """Ensure the main candle table exists and is configured for upserts."""
 
     for attempt in range(1, DDL_RETRY_ATTEMPTS + 1):
         try:
@@ -370,9 +413,12 @@ def ensure_market_table(cursor) -> None:
                     low DOUBLE,
                     close DOUBLE,
                     volume DOUBLE
-                ) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
+                ) TIMESTAMP(timestamp)
+                PARTITION BY MONTH
+                DEDUP UPSERT KEYS {UPSERT_KEYS};
                 """
             )
+            cursor.execute(f"ALTER TABLE {TABLE_NAME} DEDUP ENABLE UPSERT KEYS {UPSERT_KEYS}")
             wait_for_table_state(cursor, TABLE_NAME, should_exist=True)
             return
         except psycopg2.DatabaseError as exc:
@@ -382,6 +428,18 @@ def ensure_market_table(cursor) -> None:
                 logger.warning("Failed to rollback connection after market table DDL error", exc_info=True)
 
             if table_exists(cursor, TABLE_NAME):
+                if not allow_migration:
+                    raise RuntimeError(
+                        f"{TABLE_NAME} exists but cannot enable DEDUP UPSERT KEYS {UPSERT_KEYS}. "
+                        "The concurrent startup reconciler will not migrate/drop the live table while "
+                        "the processor may be writing. Run a manual full repair with the processor stopped."
+                    )
+                logger.warning(
+                    f"{TABLE_NAME} exists but cannot enable DEDUP UPSERT KEYS {UPSERT_KEYS}. "
+                    "Attempting one-time WAL/dedup table migration before reconciliation."
+                )
+                migrate_market_table_to_dedup(cursor)
+                cursor.execute(f"ALTER TABLE {TABLE_NAME} DEDUP ENABLE UPSERT KEYS {UPSERT_KEYS}")
                 return
 
             if attempt == DDL_RETRY_ATTEMPTS:
@@ -394,10 +452,60 @@ def ensure_market_table(cursor) -> None:
             time.sleep(DDL_RETRY_DELAY_SECONDS)
 
 
-def create_candle_table(cursor, table_name: str) -> None:
-    """Create a temporary candle-shaped table for backup or staging data."""
+def migrate_market_table_to_dedup(cursor) -> None:
+    """Recreate an existing live table as WAL/dedup, keeping a rollback copy."""
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    old_table = build_table_name("market_candles_old", "SCHEMA", run_id)
+    failed_table = build_table_name("market_candles_failed", "SCHEMA", run_id)
+    old_created = False
+    live_dropped = False
+
+    try:
+        old_count = create_table_from_source(cursor, old_table, TABLE_NAME)
+        old_created = True
+        logger.warning(
+            f"Backed up existing {TABLE_NAME} to {old_table} with {old_count} row(s) "
+            "before WAL/dedup migration."
+        )
+
+        drop_table(cursor, TABLE_NAME)
+        wait_for_table_state(cursor, TABLE_NAME, should_exist=False)
+        live_dropped = True
+
+        migrated_count = create_table_from_source(cursor, TABLE_NAME, old_table, dedup=True)
+        logger.warning(
+            f"Migrated {TABLE_NAME} to WAL DEDUP UPSERT KEYS {UPSERT_KEYS} "
+            f"with {migrated_count} row(s). Backup retained as {old_table}."
+        )
+    except Exception:
+        logger.error(f"Failed to migrate {TABLE_NAME} to WAL/dedup.", exc_info=True)
+        if old_created:
+            try:
+                if table_exists(cursor, TABLE_NAME):
+                    create_table_from_source(cursor, failed_table, TABLE_NAME)
+                    drop_table(cursor, TABLE_NAME)
+                    wait_for_table_state(cursor, TABLE_NAME, should_exist=False)
+                if live_dropped:
+                    create_table_from_source(cursor, TABLE_NAME, old_table, dedup=True)
+                    logger.warning(f"Restored {TABLE_NAME} from {old_table} after migration failure.")
+            except Exception:
+                logger.error(
+                    f"Rollback failed after WAL/dedup migration error. Backup table: {old_table}",
+                    exc_info=True,
+                )
+        raise
+
+
+def create_candle_table(cursor, table_name: str, dedup: bool = False) -> None:
+    """Create a candle-shaped table.
+
+    Temporary reconciler tables stay BYPASS WAL so row-count verification is
+    synchronous. The live table uses WAL dedup so repeated candle keys upsert.
+    """
 
     ensure_safe_table_name(table_name)
+    wal_clause = f"DEDUP UPSERT KEYS {UPSERT_KEYS}" if dedup else "BYPASS WAL"
     cursor.execute(
         f"""
         CREATE TABLE {table_name} (
@@ -409,7 +517,9 @@ def create_candle_table(cursor, table_name: str) -> None:
             low DOUBLE,
             close DOUBLE,
             volume DOUBLE
-        ) TIMESTAMP(timestamp) PARTITION BY DAY BYPASS WAL;
+        ) TIMESTAMP(timestamp)
+        PARTITION BY DAY
+        {wal_clause};
         """
     )
 
@@ -418,6 +528,25 @@ def insert_rows(cursor, table_name: str, rows: list[CandleRow]) -> None:
     """Insert canonical candle rows into a validated table name."""
 
     ensure_safe_table_name(table_name)
+    invalid_rows = [row for row in rows if not is_valid_candle_row(row)]
+    if invalid_rows:
+        samples = [
+            {
+                "symbol": row.symbol,
+                "interval": row.interval,
+                "timestamp": row.timestamp.isoformat(),
+                "open": str(row.open),
+                "high": str(row.high),
+                "low": str(row.low),
+                "close": str(row.close),
+                "volume": str(row.volume),
+            }
+            for row in invalid_rows[:5]
+        ]
+        raise ValueError(
+            f"Refusing to insert {len(invalid_rows)} invalid candle row(s) into {table_name}: {samples}"
+        )
+
     cursor.executemany(
         f"""
         INSERT INTO {table_name} (symbol, interval, timestamp, open, high, low, close, volume)
@@ -456,6 +585,35 @@ def backup_existing_rows(cursor, backup_table: str, symbol: str, start: datetime
     return int(cursor.fetchone()[0])
 
 
+def count_invalid_target_rows(cursor, symbol: str, start: datetime, end: datetime) -> int:
+    """Count invalid candle rows in the live target window."""
+
+    cursor.execute(
+        f"""
+        SELECT count() AS count
+        FROM {TABLE_NAME}
+        WHERE symbol = %s
+          AND interval = %s
+          AND timestamp >= %s
+          AND timestamp < %s
+          AND NOT (
+            open > 0
+            AND high > 0
+            AND low > 0
+            AND close > 0
+            AND volume >= 0
+            AND high >= open
+            AND high >= close
+            AND low <= open
+            AND low <= close
+            AND high >= low
+          )
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+    )
+    return int(cursor.fetchone()[0])
+
+
 def copy_rows_except_symbol_window(cursor, target_table: str, symbol: str, start: datetime, end: datetime) -> int:
     """Copy current market data except the symbol/window being replaced."""
 
@@ -485,21 +643,53 @@ def create_full_backup_table(cursor, backup_table: str) -> int:
     return create_table_from_source(cursor, backup_table, TABLE_NAME)
 
 
-def create_table_from_source(cursor, target_table: str, source_table: str) -> int:
+def create_table_from_source(cursor, target_table: str, source_table: str, dedup: bool = False) -> int:
     """Create a candle table by copying all rows from another candle-shaped table."""
 
     ensure_safe_table_name(target_table)
     ensure_safe_table_name(source_table)
+    cursor.execute(f"SELECT count() AS count FROM {source_table}")
+    source_count = int(cursor.fetchone()[0])
+    wal_clause = f"DEDUP UPSERT KEYS {UPSERT_KEYS}" if dedup else "BYPASS WAL"
     cursor.execute(
         f"""
-        CREATE TABLE {target_table} AS (
-            SELECT symbol, interval, timestamp, open, high, low, close, volume
-            FROM {source_table}
-            ORDER BY timestamp ASC
-        ), CAST(symbol AS SYMBOL), CAST(interval AS SYMBOL)
-        TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL
+        CREATE TABLE {target_table} (
+            symbol SYMBOL,
+            interval SYMBOL,
+            timestamp TIMESTAMP,
+            open DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            close DOUBLE,
+            volume DOUBLE
+        ) TIMESTAMP(timestamp)
+        PARTITION BY MONTH
+        {wal_clause};
         """
     )
+    cursor.execute(
+        f"""
+        INSERT INTO {target_table} (symbol, interval, timestamp, open, high, low, close, volume)
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM {source_table}
+        WHERE open > 0
+          AND high > 0
+          AND low > 0
+          AND close > 0
+          AND volume >= 0
+          AND high >= open
+          AND high >= close
+          AND low <= open
+          AND low <= close
+          AND high >= low
+        ORDER BY timestamp ASC
+        """
+    )
+    if dedup and source_count > 0:
+        return wait_for_non_empty_table(cursor, target_table)
+    if dedup:
+        return 0
+
     cursor.execute(f"SELECT count() AS count FROM {target_table}")
     return int(cursor.fetchone()[0])
 
@@ -514,32 +704,56 @@ def create_replacement_table_from_staging(
 ) -> int:
     """Build a full replacement table from existing rows plus staged candles.
 
-    Creating the table from a single ordered query avoids out-of-order inserts
-    into an existing QuestDB table, which is where the previous attempts failed.
+    The replacement table is temporary and synchronous. The live table receives
+    this data through WAL dedup during the final swap.
     """
 
     ensure_safe_table_name(replacement_table)
     ensure_safe_table_name(staging_table)
     cursor.execute(
         f"""
-        CREATE TABLE {replacement_table} AS (
+        CREATE TABLE {replacement_table} (
+            symbol SYMBOL,
+            interval SYMBOL,
+            timestamp TIMESTAMP,
+            open DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            close DOUBLE,
+            volume DOUBLE
+        ) TIMESTAMP(timestamp)
+        PARTITION BY MONTH
+        BYPASS WAL;
+        """
+    )
+    cursor.execute(
+        f"""
+        INSERT INTO {replacement_table} (symbol, interval, timestamp, open, high, low, close, volume)
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM (
             SELECT symbol, interval, timestamp, open, high, low, close, volume
-            FROM (
-                SELECT symbol, interval, timestamp, open, high, low, close, volume
-                FROM {TABLE_NAME}
-                WHERE NOT (
-                    symbol = %s
-                    AND interval = %s
-                    AND timestamp >= %s
-                    AND timestamp < %s
-                )
-                UNION ALL
-                SELECT symbol, interval, timestamp, open, high, low, close, volume
-                FROM {staging_table}
+            FROM {TABLE_NAME}
+            WHERE NOT (
+                symbol = %s
+                AND interval = %s
+                AND timestamp >= %s
+                AND timestamp < %s
             )
-            ORDER BY timestamp ASC
-        ), CAST(symbol AS SYMBOL), CAST(interval AS SYMBOL)
-        TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL
+            AND open > 0
+            AND high > 0
+            AND low > 0
+            AND close > 0
+            AND volume >= 0
+            AND high >= open
+            AND high >= close
+            AND low <= open
+            AND low <= close
+            AND high >= low
+            UNION ALL
+            SELECT symbol, interval, timestamp, open, high, low, close, volume
+            FROM {staging_table}
+        ) AS replacement_rows
+        ORDER BY timestamp ASC
         """,
         (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
     )
@@ -574,7 +788,7 @@ def assert_no_duplicate_target_rows(cursor, symbol: str, start: datetime, end: d
         raise RuntimeError(
             f"{symbol}: duplicate rows already exist in target range. "
             f"Sample duplicate timestamps: {sample}. "
-            "This table cannot be safely reconciled without DELETE or WAL deduplication."
+            "This table requires a full replacement reconcile so stale duplicates are excluded."
         )
 
 
@@ -587,23 +801,6 @@ def create_staging_rows(cursor, staging_table: str, rows: list[CandleRow]) -> No
     staged_count = int(cursor.fetchone()[0])
     if staged_count != len(rows):
         raise RuntimeError(f"Staging row count mismatch: expected {len(rows)}, got {staged_count}")
-
-
-def delete_target_range(cursor, symbol: str, start: datetime, end: datetime) -> None:
-    """Delete all existing `1m` rows for one symbol in the reconcile window.
-
-    This helper is kept for manual recovery experiments only. QuestDB may reject
-    `DELETE FROM` for the current BYPASS WAL table, so the normal reconcile path
-    uses update-plus-insert instead.
-    """
-
-    cursor.execute(
-        f"""
-        DELETE FROM {TABLE_NAME}
-        WHERE symbol = %s AND interval = %s AND timestamp >= %s AND timestamp < %s
-        """,
-        (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
-    )
 
 
 def insert_from_table(cursor, source_table: str, target_table: str = TABLE_NAME) -> None:
@@ -696,19 +893,53 @@ def fetch_all_rows_from_table(cursor, table_name: str) -> list[CandleRow]:
     ]
 
 
+def rows_match(actual_row: CandleRow, expected_row: CandleRow, tolerance: Decimal) -> bool:
+    """Return whether one DB row matches one Binance canonical row."""
+
+    if actual_row.timestamp != expected_row.timestamp:
+        return False
+
+    comparisons = (
+        (actual_row.open, expected_row.open),
+        (actual_row.high, expected_row.high),
+        (actual_row.low, expected_row.low),
+        (actual_row.close, expected_row.close),
+        (actual_row.volume, expected_row.volume),
+    )
+    return all(abs(actual_value - expected_value) <= tolerance for actual_value, expected_value in comparisons)
+
+
 def assert_rows_match(actual: list[CandleRow], expected: list[CandleRow], tolerance: Decimal, symbol: str) -> None:
-    """Assert that QuestDB rows match Binance rows within DOUBLE tolerance."""
+    """Assert that QuestDB contains Binance rows, tolerating duplicate stale rows."""
 
-    if len(actual) != len(expected):
-        raise RuntimeError(f"{symbol}: verification count mismatch: expected {len(expected)}, got {len(actual)}")
+    actual_by_timestamp: dict[datetime, list[CandleRow]] = {}
+    for actual_row in actual:
+        actual_by_timestamp.setdefault(actual_row.timestamp, []).append(actual_row)
 
-    for actual_row, expected_row in zip(actual, expected):
-        if actual_row.timestamp != expected_row.timestamp:
-            raise RuntimeError(
-                f"{symbol}: timestamp mismatch: expected {expected_row.timestamp.isoformat()}, "
-                f"got {actual_row.timestamp.isoformat()}"
-            )
+    duplicate_timestamps = [
+        timestamp for timestamp, rows in actual_by_timestamp.items() if len(rows) > 1
+    ]
+    if duplicate_timestamps:
+        logger.warning(
+            f"{symbol}: duplicate candle rows detected during verification; "
+            f"duplicate_count={len(duplicate_timestamps)}, "
+            f"samples={[timestamp.isoformat() for timestamp in duplicate_timestamps[:5]]}"
+        )
 
+    if len(actual_by_timestamp) != len(expected):
+        raise RuntimeError(
+            f"{symbol}: verification key count mismatch: "
+            f"expected={len(expected)}, got_distinct={len(actual_by_timestamp)}, got_rows={len(actual)}"
+        )
+
+    for expected_row in expected:
+        candidate_rows = actual_by_timestamp.get(expected_row.timestamp)
+        if not candidate_rows:
+            raise RuntimeError(f"{symbol}: missing candle at {expected_row.timestamp.isoformat()}")
+        if any(rows_match(actual_row, expected_row, tolerance) for actual_row in candidate_rows):
+            continue
+
+        actual_row = candidate_rows[-1]
         comparisons = (
             ("open", actual_row.open, expected_row.open),
             ("high", actual_row.high, expected_row.high),
@@ -720,7 +951,8 @@ def assert_rows_match(actual: list[CandleRow], expected: list[CandleRow], tolera
             if abs(actual_value - expected_value) > tolerance:
                 raise RuntimeError(
                     f"{symbol}: {field_name} mismatch at {actual_row.timestamp.isoformat()}: "
-                    f"expected {expected_value}, got {actual_value}"
+                    f"expected {expected_value}, got {actual_value}; "
+                    f"candidate_rows={len(candidate_rows)}"
                 )
 
 
@@ -749,6 +981,61 @@ def wait_for_table_state(cursor, table_name: str, should_exist: bool) -> None:
         if time.monotonic() >= deadline:
             state = "visible" if should_exist else "absent"
             raise RuntimeError(f"Timed out waiting for {table_name} to become {state}")
+        time.sleep(DDL_RETRY_DELAY_SECONDS)
+
+
+def wait_for_non_empty_table(cursor, table_name: str) -> int:
+    """Wait for at least one row to become visible after a WAL insert."""
+
+    ensure_safe_table_name(table_name)
+    deadline = time.monotonic() + (DDL_RETRY_ATTEMPTS * DDL_RETRY_DELAY_SECONDS)
+    last_count = 0
+
+    while True:
+        cursor.execute(f"SELECT count() AS count FROM {table_name}")
+        last_count = int(cursor.fetchone()[0])
+        if last_count > 0:
+            return last_count
+        if time.monotonic() >= deadline:
+            logger.warning(f"Timed out waiting for WAL rows in {table_name}; latest visible count={last_count}")
+            return last_count
+        time.sleep(DDL_RETRY_DELAY_SECONDS)
+
+
+def wait_for_symbol_window_count(cursor, symbol: str, start: datetime, end: datetime, expected_count: int) -> None:
+    """Wait for reconciled WAL candle keys to become visible before verification."""
+
+    deadline = time.monotonic() + (DDL_RETRY_ATTEMPTS * DDL_RETRY_DELAY_SECONDS)
+    last_row_count = 0
+    last_key_count = 0
+
+    while True:
+        cursor.execute(
+            f"""
+            SELECT timestamp
+            FROM {TABLE_NAME}
+            WHERE symbol = %s AND interval = %s AND timestamp >= %s AND timestamp < %s
+            """,
+            (symbol, INTERVAL, to_questdb_timestamp(start), to_questdb_timestamp(end)),
+        )
+        timestamps = [normalize_db_timestamp(row[0]) for row in cursor.fetchall()]
+        last_row_count = len(timestamps)
+        last_key_count = len(set(timestamps))
+
+        if last_key_count >= expected_count:
+            if last_row_count > last_key_count:
+                logger.warning(
+                    f"{symbol}: duplicate rows visible in reconciled WAL window; "
+                    f"distinct_keys={last_key_count}, raw_rows={last_row_count}, "
+                    f"window=[{start.isoformat()}, {end.isoformat()})"
+                )
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"{symbol}: timed out waiting for reconciled WAL rows to become visible; "
+                f"expected_keys={expected_count}, got_distinct={last_key_count}, "
+                f"got_rows={last_row_count}, window=[{start.isoformat()}, {end.isoformat()})"
+            )
         time.sleep(DDL_RETRY_DELAY_SECONDS)
 
 
@@ -836,7 +1123,7 @@ def recover_missing_live_table(cursor) -> None:
             "Manual QuestDB recovery is required before reconciliation can continue."
         )
 
-    restored_count = create_table_from_source(cursor, TABLE_NAME, backup_table)
+    restored_count = create_table_from_source(cursor, TABLE_NAME, backup_table, dedup=True)
     logger.warning(f"Restored missing {TABLE_NAME} from {backup_table} with {restored_count} rows.")
 
 
@@ -913,10 +1200,11 @@ def reconcile_symbol(
         swap_conn = create_connection()
         try:
             with swap_conn.cursor() as cursor:
-                live_count = create_table_from_source(cursor, TABLE_NAME, replacement_table)
+                live_count = create_table_from_source(cursor, TABLE_NAME, replacement_table, dedup=True)
                 replacement_is_live = True
                 logger.info(f"{symbol}: created live table from {replacement_table} with {live_count} rows")
 
+                wait_for_symbol_window_count(cursor, symbol, start, end, len(binance_rows))
                 actual_rows = fetch_db_rows(cursor, symbol, start, end)
                 assert_rows_match(actual_rows, binance_rows, tolerance, symbol)
                 logger.info(f"{symbol}: swapped and verified {len(binance_rows)} candles")
@@ -935,7 +1223,7 @@ def reconcile_symbol(
                             create_table_from_source(cursor, failed_table, TABLE_NAME)
                             drop_table(cursor, TABLE_NAME)
                             wait_for_table_state(cursor, TABLE_NAME, should_exist=False)
-                        create_table_from_source(cursor, TABLE_NAME, old_table)
+                        create_table_from_source(cursor, TABLE_NAME, old_table, dedup=True)
                         logger.warning(f"{symbol}: rollback completed. Failed table retained as {failed_table}")
                     except Exception:
                         logger.error(
@@ -944,7 +1232,7 @@ def reconcile_symbol(
                         )
                 elif old_table_created and live_table_dropped:
                     try:
-                        create_table_from_source(cursor, TABLE_NAME, old_table)
+                        create_table_from_source(cursor, TABLE_NAME, old_table, dedup=True)
                         logger.warning(f"{symbol}: restored original table name from {old_table}")
                     except Exception:
                         logger.error(f"{symbol}: failed to restore original table name from {old_table}", exc_info=True)
@@ -989,48 +1277,76 @@ def reconcile_tail_append(
     tolerance: Decimal,
     dry_run: bool,
 ) -> None:
-    """Append newly closed catch-up candles without rebuilding the full table.
-
-    The startup runner has not started the live processor yet, so candles that
-    close while the full repair is running can only be missing from QuestDB.
-    They are newer than the repaired table's max timestamp, which makes an
-    ordered append much cheaper than another full drop/create swap.
-    """
-
-    rows_by_symbol: dict[str, list[CandleRow]] = {}
-    for symbol in symbols:
-        logger.info(f"{symbol}: fetching Binance {INTERVAL} tail candles from {start.isoformat()} to {end.isoformat()}")
-        rows = fetch_binance_klines(base_url, symbol, start, end)
-        validate_rows(rows, symbol, start, end)
-        rows_by_symbol[symbol] = rows
+    """Replace a closed catch-up window using the full replacement path."""
 
     if dry_run:
-        for symbol, rows in rows_by_symbol.items():
+        for symbol in symbols:
+            logger.info(
+                f"{symbol}: fetching Binance {INTERVAL} tail candles from "
+                f"{start.isoformat()} to {end.isoformat()}"
+            )
+            rows = fetch_binance_klines(base_url, symbol, start, end)
+            validate_rows(rows, symbol, start, end)
             logger.info(f"{symbol}: tail dry run passed. {len(rows)} Binance candles are complete and valid.")
         return
 
-    missing_rows: list[CandleRow] = []
-    conn = create_connection()
-    try:
-        with conn.cursor() as cursor:
-            ensure_market_table(cursor)
-            for symbol, rows in rows_by_symbol.items():
-                existing_timestamps = fetch_existing_timestamps(cursor, symbol, start, end)
-                missing_rows.extend(row for row in rows if row.timestamp not in existing_timestamps)
+    total_rows = 0
+    expected_count = int((end - start).total_seconds() // 60)
+    for symbol in symbols:
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        logger.info(
+            f"{symbol}: replacing REST reconcile window via table rebuild; "
+            f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}"
+        )
+        reconcile_symbol(
+            base_url=base_url,
+            symbol=symbol,
+            start=start,
+            end=end,
+            run_id=run_id,
+            tolerance=tolerance,
+            dry_run=False,
+            keep_temp=False,
+        )
+        total_rows += expected_count
 
-            missing_rows.sort(key=lambda row: (row.timestamp, row.symbol))
-            if missing_rows:
-                insert_rows(cursor, TABLE_NAME, missing_rows)
-                logger.info(f"Appended {len(missing_rows)} tail candle row(s) to {TABLE_NAME}.")
-            else:
-                logger.info("No missing tail candle rows to append.")
+    if total_rows:
+        logger.info(f"Replaced {total_rows} REST reconcile candle row(s) in {TABLE_NAME}.")
+    else:
+        logger.info("No REST reconcile candle rows to replace.")
 
-            for symbol, expected_rows in rows_by_symbol.items():
-                actual_rows = fetch_db_rows(cursor, symbol, start, end)
-                assert_rows_match(actual_rows, expected_rows, tolerance, symbol)
-                logger.info(f"{symbol}: appended tail verified {len(expected_rows)} candles")
-    finally:
-        conn.close()
+
+def run_recent_reconciliation(
+    lookback_minutes: int = 30,
+    symbols_arg: str | None = None,
+    binance_rest_url: str | None = None,
+    dry_run: bool = False,
+    tolerance_arg: str | Decimal | None = None,
+) -> None:
+    """Replace a short closed-candle window after the live processor has started."""
+
+    load_environment()
+
+    base_url = binance_rest_url or os.getenv("BINANCE_REST_URL") or DEFAULT_BINANCE_REST_URL
+    symbols = parse_symbols(symbols_arg or os.getenv("TRADING_SYMBOLS"))
+    tolerance = Decimal(str(tolerance_arg or DEFAULT_TOLERANCE))
+    end = resolve_latest_closed_end(base_url)
+    start = end - timedelta(minutes=max(1, lookback_minutes))
+    expected_count = int((end - start).total_seconds() // 60)
+
+    logger.info(
+        f"Recent REST reconcile started: symbols={symbols}, interval={INTERVAL}, "
+        f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}"
+    )
+    reconcile_tail_append(
+        base_url=base_url,
+        symbols=symbols,
+        start=start,
+        end=end,
+        tolerance=tolerance,
+        dry_run=dry_run,
+    )
+    logger.info("Recent REST reconcile completed.")
 
 
 def parse_args():
@@ -1054,6 +1370,21 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true", help="Fetch and validate Binance data without writing DB.")
     parser.add_argument("--keep-temp", action="store_true", help="Keep replacement/old tables after success.")
     parser.add_argument(
+        "--window-hours",
+        type=int,
+        default=None,
+        help=f"Closed 1m lookback window to reconcile. Defaults to {RECONCILE_WINDOW_HOURS}.",
+    )
+    parser.add_argument(
+        "--end-lag-minutes",
+        type=int,
+        default=None,
+        help=(
+            "Minutes to leave between the reconcile end and Binance's current minute floor. "
+            f"Defaults to {RECONCILE_END_LAG_MINUTES}."
+        ),
+    )
+    parser.add_argument(
         "--tolerance",
         default=str(DEFAULT_TOLERANCE),
         help="Allowed numeric difference when verifying written DOUBLE values.",
@@ -1067,12 +1398,14 @@ def run_reconciliation(
     dry_run: bool = False,
     keep_temp: bool = False,
     tolerance_arg: str | Decimal | None = None,
-) -> None:
+    window_hours: int | None = None,
+    end_lag_minutes: int | None = None,
+) -> ReconciliationResult:
     """Run candle reconciliation for the configured symbols.
 
     This function is used by both the CLI maintenance command and the pipeline
-    startup runner. It intentionally completes before the realtime processor is
-    constructed so both paths cannot write `market_candles` at the same time.
+    startup runner. It runs a single bounded window and leaves a safety lag so
+    it does not target candles the realtime processor is currently closing.
     """
 
     load_environment()
@@ -1080,86 +1413,56 @@ def run_reconciliation(
     base_url = binance_rest_url or os.getenv("BINANCE_REST_URL") or DEFAULT_BINANCE_REST_URL
     symbols = parse_symbols(symbols_arg or os.getenv("TRADING_SYMBOLS"))
     tolerance = Decimal(str(tolerance_arg or DEFAULT_TOLERANCE))
-    start, end = resolve_reconcile_window(base_url)
-    active_temp_tables = set()
-    use_full_replacement = True
+    resolved_window_hours = parse_positive_int(
+        window_hours if window_hours is not None else os.getenv("STARTUP_RECONCILE_WINDOW_HOURS"),
+        RECONCILE_WINDOW_HOURS,
+    )
+    resolved_end_lag_minutes = parse_positive_int(
+        end_lag_minutes if end_lag_minutes is not None else os.getenv("STARTUP_RECONCILE_END_LAG_MINUTES"),
+        RECONCILE_END_LAG_MINUTES,
+        minimum=0,
+    )
+    start, end = resolve_reconcile_window(
+        base_url,
+        window_hours=resolved_window_hours,
+        end_lag_minutes=resolved_end_lag_minutes,
+    )
+    expected_count = int((end - start).total_seconds() // 60)
+    logger.info(
+        f"Reconciling {len(symbols)} symbol(s), interval={INTERVAL}, "
+        f"window=[{start.isoformat()}, {end.isoformat()}); "
+        f"expected_candles={expected_count}; "
+        f"window_hours={resolved_window_hours}; "
+        f"end_lag_minutes={resolved_end_lag_minutes}; "
+        "mode=ONE_SHOT_REPLACE"
+    )
+    active_temp_tables: set[str] = set()
 
-    while True:
+    if not dry_run:
+        conn = create_connection()
+        try:
+            with conn.cursor() as cursor:
+                if table_exists(cursor, TABLE_NAME):
+                    ensure_market_table(cursor, allow_migration=True)
+                elif find_latest_old_table(cursor):
+                    recover_missing_live_table(cursor)
+                else:
+                    ensure_market_table(cursor, allow_migration=True)
+        finally:
+            conn.close()
+
+    for symbol in symbols:
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-        for symbol in symbols:
-            active_temp_tables.update(
-                {
-                    build_table_name("market_candles_replace", symbol, run_id),
-                    build_table_name("market_candles_stage", symbol, run_id),
-                    build_table_name("market_candles_old", symbol, run_id),
-                    build_table_name("market_candles_failed", symbol, run_id),
-                }
-            )
-
-        expected_count = int((end - start).total_seconds() // 60)
-        logger.info(
-            f"Reconciling {len(symbols)} symbol(s), interval={INTERVAL}, "
-            f"window=[{start.isoformat()}, {end.isoformat()}); "
-            f"expected_candles={expected_count}; "
-            f"end_lag_minutes={RECONCILE_END_LAG_MINUTES}"
+        reconcile_symbol(
+            base_url=base_url,
+            symbol=symbol,
+            start=start,
+            end=end,
+            run_id=run_id,
+            tolerance=tolerance,
+            dry_run=dry_run,
+            keep_temp=keep_temp,
         )
-
-        if not use_full_replacement:
-            reconcile_tail_append(
-                base_url=base_url,
-                symbols=symbols,
-                start=start,
-                end=end,
-                tolerance=tolerance,
-                dry_run=dry_run,
-            )
-        elif dry_run:
-            for symbol in symbols:
-                reconcile_symbol(
-                    base_url=base_url,
-                    symbol=symbol,
-                    start=start,
-                    end=end,
-                    run_id=run_id,
-                    tolerance=tolerance,
-                    dry_run=True,
-                    keep_temp=keep_temp,
-                )
-        else:
-            conn = create_connection()
-            try:
-                with conn.cursor() as cursor:
-                    if table_exists(cursor, TABLE_NAME):
-                        ensure_market_table(cursor)
-                    elif find_latest_old_table(cursor):
-                        recover_missing_live_table(cursor)
-                    else:
-                        ensure_market_table(cursor)
-            finally:
-                conn.close()
-
-            for symbol in symbols:
-                reconcile_symbol(
-                    base_url=base_url,
-                    symbol=symbol,
-                    start=start,
-                    end=end,
-                    run_id=run_id,
-                    tolerance=tolerance,
-                    dry_run=dry_run,
-                    keep_temp=keep_temp,
-                )
-
-        latest_end = resolve_latest_closed_end(base_url)
-        if latest_end <= end:
-            break
-
-        logger.info(
-            f"Reconciliation took long enough for newer candles to close. "
-            f"Catching up tail window=[{end.isoformat()}, {latest_end.isoformat()})."
-        )
-        start, end = end, latest_end
-        use_full_replacement = False
 
     if not keep_temp and not dry_run:
         conn = create_connection()
@@ -1168,6 +1471,15 @@ def run_reconciliation(
                 cleanup_reconciler_temp_tables(cursor, protected_tables=active_temp_tables)
         finally:
             conn.close()
+
+    return ReconciliationResult(
+        symbols=symbols,
+        interval=INTERVAL,
+        start=start,
+        end=end,
+        expected_count=expected_count,
+        dry_run=dry_run,
+    )
 
 
 def main() -> None:
@@ -1181,6 +1493,8 @@ def main() -> None:
         dry_run=args.dry_run,
         keep_temp=args.keep_temp,
         tolerance_arg=args.tolerance,
+        window_hours=args.window_hours,
+        end_lag_minutes=args.end_lag_minutes,
     )
 
 

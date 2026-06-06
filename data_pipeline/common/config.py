@@ -2,11 +2,11 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env from data_pipeline directory
-env_path = Path(__file__).parent / '.env'
+# Load .env from data_pipeline directory.
+env_path = Path(__file__).resolve().parents[1] / '.env'
 load_dotenv(env_path)
 
-from data_pipeline.logger_config import get_logger
+from data_pipeline.common.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -46,6 +46,12 @@ def _split_env_list(var_name: str, default: str = "") -> list[str]:
 KAFKA_SERVER = get_env_or_raise('KAFKA_BROKER')
 TOPIC_RAW_TRADES = get_env_or_raise('KAFKA_TOPIC_RAW_TRADES')
 TOPIC_KLINE_STREAM = get_env_or_raise('KAFKA_TOPIC_KLINE_STREAM')
+KAFKA_CONSUMER_GROUP_ID = os.getenv('KAFKA_CONSUMER_GROUP_ID', 'candle-processor-group').strip() or 'candle-processor-group'
+KAFKA_AUTO_OFFSET_RESET = os.getenv('KAFKA_AUTO_OFFSET_RESET', 'earliest').strip().lower() or 'earliest'
+
+if KAFKA_AUTO_OFFSET_RESET not in {'earliest', 'latest'}:
+    logger.warning(f"Invalid KAFKA_AUTO_OFFSET_RESET={KAFKA_AUTO_OFFSET_RESET!r}; using 'earliest'.")
+    KAFKA_AUTO_OFFSET_RESET = 'earliest'
 
 # QUESTDB
 QUESTDB_HOST = get_env_or_raise('QUESTDB_HOST')

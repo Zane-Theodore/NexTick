@@ -6,8 +6,8 @@ import websocket
 from kafka import KafkaProducer
 from kafka.errors import KafkaError, NoBrokersAvailable
 
-from data_pipeline import config
-from data_pipeline.logger_config import get_logger
+from data_pipeline.common import config
+from data_pipeline.common.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -96,6 +96,11 @@ class BinanceCombinedProducer:
             record: Trade record to publish.
         """
         try:
+            logger.debug(
+                f"Producer publishing trade: symbol={record['symbol']}, "
+                f"trade_id={record['trade_id']}, event_time={record['timestamp']}, "
+                f"topic={config.TOPIC_RAW_TRADES}"
+            )
             future = self.producer.send(
                 config.TOPIC_RAW_TRADES,
                 value=record,
@@ -209,6 +214,10 @@ class BinanceCombinedProducer:
 
     def run(self):
         """Start the WebSocket connection and run the producer loop."""
+        logger.info(
+            f"Producer starting Binance WebSocket stream for "
+            f"{', '.join(symbol.upper() for symbol in self.symbols)}"
+        )
         while self.is_running:
             try:
                 self.ws = websocket.WebSocketApp(

@@ -9,8 +9,9 @@ import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import NoBrokersAvailable
 
-from data_pipeline import config
-from data_pipeline.logger_config import get_logger
+from data_pipeline.backfill.state import read_backfill_end
+from data_pipeline.common import config
+from data_pipeline.common.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -261,6 +262,12 @@ class CandleProcessor:
         """Initialize the candle processor with Kafka and database connections."""
         self.table_name = "market_candles"
         self.managers = {}  # Dict[symbol] -> MultiTimeframeManager
+        self.backfill_write_fence = read_backfill_end()
+        if self.backfill_write_fence is not None:
+            logger.info(
+                "Processor DB write fence is active for startup-backfilled candles: "
+                f"skip final 1m upserts before {self.backfill_write_fence.isoformat()}"
+            )
         
         logger.info("Starting multi-symbol multi-timeframe candle processor with O(1) complexity and synchronous database operations")
         
@@ -287,10 +294,16 @@ class CandleProcessor:
                     low DOUBLE,
                     close DOUBLE,
                     volume DOUBLE
-                ) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
+                ) TIMESTAMP(timestamp)
+                PARTITION BY MONTH
+                DEDUP UPSERT KEYS(timestamp, symbol, interval);
                 """
             )
-            logger.info(f"Verified/Created table {self.table_name} with BYPASS WAL strategy.")
+            self._ensure_dedup_enabled()
+            logger.info(
+                f"Verified/Created table {self.table_name} with WAL dedup upsert keys "
+                "(timestamp, symbol, interval)."
+            )
         except Exception as e:
             logger.error(f"Failed to connect to QuestDB: {e}", exc_info=True)
             raise
@@ -300,14 +313,19 @@ class CandleProcessor:
                 config.TOPIC_RAW_TRADES,
                 bootstrap_servers=[config.KAFKA_SERVER],
                 api_version=(3, 4, 0),
-                auto_offset_reset='latest',
+                auto_offset_reset=config.KAFKA_AUTO_OFFSET_RESET,
                 enable_auto_commit=False,
                 consumer_timeout_ms=1000,
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-                group_id='candle-processor-group'
+                group_id=config.KAFKA_CONSUMER_GROUP_ID
             )
         
         self.consumer = retry_with_backoff(_create_consumer, operation_name='Kafka consumer creation')
+        logger.info(
+            f"Kafka raw trade consumer initialized: topic={config.TOPIC_RAW_TRADES}, "
+            f"groupId={config.KAFKA_CONSUMER_GROUP_ID}, "
+            f"autoOffsetReset={config.KAFKA_AUTO_OFFSET_RESET}"
+        )
         
         def _create_producer():
             return KafkaProducer(
@@ -322,8 +340,61 @@ class CandleProcessor:
         self.producer = retry_with_backoff(_create_producer, operation_name='Kafka producer creation')
         self.running = True
 
+    def _is_valid_candle(self, candle: dict) -> bool:
+        try:
+            open_price = float(candle["open"])
+            high = float(candle["high"])
+            low = float(candle["low"])
+            close = float(candle["close"])
+            volume = float(candle["volume"])
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        return (
+            open_price > 0
+            and high > 0
+            and low > 0
+            and close > 0
+            and volume >= 0
+            and high >= max(open_price, close)
+            and low <= min(open_price, close)
+            and high >= low
+        )
+
+    def _is_before_backfill_fence(self, candle: dict) -> bool:
+        timestamp = candle.get("timestamp")
+        return (
+            self.backfill_write_fence is not None
+            and isinstance(timestamp, datetime)
+            and timestamp < self.backfill_write_fence
+        )
+
+    def _commit_consumer_offset(self, reason: str) -> bool:
+        try:
+            self.consumer.commit()
+            return True
+        except Exception:
+            logger.warning(f"Failed to commit Kafka offset after {reason}.", exc_info=True)
+            return False
+
+    def _ensure_dedup_enabled(self) -> None:
+        """Enable QuestDB deduplication when the table is WAL-capable."""
+
+        try:
+            self.db_cursor.execute(
+                f"ALTER TABLE {self.table_name} DEDUP ENABLE UPSERT KEYS(timestamp, symbol, interval)"
+            )
+        except Exception as exc:
+            logger.error(
+                f"{self.table_name} does not accept DEDUP UPSERT KEYS(timestamp, symbol, interval). "
+                "If this is an existing BYPASS WAL table, migrate it to a WAL table before running "
+                "the live processor to prevent duplicate candles.",
+                exc_info=True,
+            )
+            raise exc
+
     def save_to_db(self, candle: dict) -> bool:
-        """Persist a candle to QuestDB.
+        """Upsert a candle to QuestDB.
         
         Args:
             candle: Candle data dictionary with OHLCV information.
@@ -331,7 +402,16 @@ class CandleProcessor:
         Returns:
             True if successfully persisted, False otherwise.
         """
-        def _insert():
+        if not self._is_valid_candle(candle):
+            logger.error(
+                f"Refusing to upsert invalid candle: symbol={candle.get('symbol')}, "
+                f"interval={candle.get('interval')}, open_time={candle.get('timestamp')}, "
+                f"open={candle.get('open')}, high={candle.get('high')}, "
+                f"low={candle.get('low')}, close={candle.get('close')}, volume={candle.get('volume')}"
+            )
+            return False
+
+        def _upsert():
             db_timestamp_str = candle['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
             self.db_cursor.execute(
                 f"""
@@ -352,11 +432,18 @@ class CandleProcessor:
             self.consumer.commit()
 
         try:
-            retry_with_backoff(_insert, max_retries=3, operation_name='QuestDB insert')
-            logger.info(f"Persisted 1m candle for {candle['symbol']} at {candle['timestamp'].strftime('%H:%M:%S')}")
+            retry_with_backoff(_upsert, max_retries=3, operation_name='QuestDB candle upsert')
+            logger.info(
+                f"Upserted candle: symbol={candle['symbol']}, interval={candle['interval']}, "
+                f"open_time={candle['timestamp'].isoformat()}, source=LIVE_PROCESSOR"
+            )
             return True
         except Exception:
-            logger.error(f"Failed to persist candle after retries: {candle}", exc_info=True)
+            logger.error(
+                f"Failed to upsert candle after retries: symbol={candle.get('symbol')}, "
+                f"interval={candle.get('interval')}, open_time={candle.get('timestamp')}",
+                exc_info=True,
+            )
             return False
 
     def _send_to_topic(self, topic: str, value: dict):
@@ -386,6 +473,16 @@ class CandleProcessor:
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
 
         # Only persist to DB for final 1m candles
+        if is_final and self._is_before_backfill_fence(candle):
+            logger.info(
+                f"Skipping final candle before startup backfill watermark: symbol={candle['symbol']}, "
+                f"interval={candle['interval']}, open_time={candle['timestamp'].isoformat()}, "
+                f"backfill_end={self.backfill_write_fence.isoformat()}"
+            )
+            if candle["interval"] == "1m":
+                self._commit_consumer_offset("skipping startup-backfilled final candle")
+            return
+
         if is_final and candle['interval'] == '1m':
             if not self.save_to_db(candle):
                 logger.warning(f"Skipping final candle publish for {candle['symbol']} because DB persistence failed.")
@@ -398,7 +495,10 @@ class CandleProcessor:
 
     def run(self):
         """Start processing raw trades and generating multi-timeframe candles."""
-        logger.info("Starting multi-timeframe processor loop")
+        logger.info(
+            f"Processor started; consuming Kafka topic={config.TOPIC_RAW_TRADES}, "
+            f"groupId={config.KAFKA_CONSUMER_GROUP_ID}"
+        )
         try:
             while self.running:
                 raw_messages = self.consumer.poll(timeout_ms=1000)
@@ -408,6 +508,10 @@ class CandleProcessor:
                         raw_trade = message.value
                         
                         try:
+                            logger.debug(
+                                f"Processor consumed Kafka message: topic={message.topic}, "
+                                f"partition={message.partition}, offset={message.offset}"
+                            )
                             trade = raw_trade.get('data', raw_trade)
                             symbol = trade.get('s') or trade.get('symbol')
                             
@@ -438,9 +542,17 @@ class CandleProcessor:
                             # Process trade across all timeframes
                             manager = self.managers[symbol]
                             manager.process_trade(price, volume, trade_time)
+                            logger.debug(
+                                f"Candle aggregated from trade: symbol={symbol.upper()}, "
+                                f"event_time={trade_time.isoformat()}, price={price}, volume={volume}"
+                            )
                                     
                         except Exception as e:
-                            logger.error(f"Error processing individual trade: {e}", exc_info=True)
+                            logger.error(
+                                f"Error processing individual trade from Kafka "
+                                f"topic={message.topic}, partition={message.partition}, offset={message.offset}: {e}",
+                                exc_info=True,
+                            )
                             
         except KeyboardInterrupt:
             logger.info("Shutdown signal received")
