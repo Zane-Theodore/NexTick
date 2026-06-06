@@ -57,7 +57,7 @@ backend/
 Start Docker infrastructure from the repository root before starting the backend:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
 Create and fill the backend env file:

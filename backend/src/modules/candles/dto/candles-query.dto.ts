@@ -30,9 +30,9 @@ export class CandlesQueryDto {
 
 
   @ApiPropertyOptional({
-    description: 'The maximum number of candles to return (1-1000). Default is 100.',
+    description: 'The maximum number of candles to return (1-2000). Default is 100.',
     minimum: 1,
-    maximum: 1000,
+    maximum: 2000,
     default: 100,
     example: 100,
   })
@@ -42,6 +42,6 @@ export class CandlesQueryDto {
   )
   @IsInt()
   @Min(1)
-  @Max(1000)
+  @Max(2000)
   limit?: number = 100;
 }

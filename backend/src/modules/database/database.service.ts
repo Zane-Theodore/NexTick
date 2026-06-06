@@ -3,8 +3,11 @@ import {
   Injectable, 
   OnModuleInit, 
   OnModuleDestroy } from '@nestjs/common';
-import { Pool } from 'pg';
+import { Pool, types } from 'pg';
 import { AppLogger } from '../../common/logger';
+
+types.setTypeParser(1114, (value: string) => value);
+types.setTypeParser(1184, (value: string) => value);
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
