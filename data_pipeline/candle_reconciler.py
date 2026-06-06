@@ -31,6 +31,7 @@ logger = get_logger(__name__)
 
 TABLE_NAME = "market_candles"
 TEMP_TABLE_PATTERN = re.compile(r"^market_candles_(backup|stage|replace|old|failed)_[A-Z0-9]+_[0-9]+$")
+OLD_TABLE_PATTERN = re.compile(r"^market_candles_old_[A-Z0-9]+_([0-9]+)$")
 INTERVAL = "1m"
 INTERVAL_MS = 60_000
 DEFAULT_BINANCE_REST_URL = "https://api.binance.com"
@@ -39,6 +40,8 @@ DEFAULT_LIMIT = 1000
 DEFAULT_TOLERANCE = Decimal("0.00000001")
 MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
 RECONCILE_END_LAG_MINUTES = 30
+DDL_RETRY_ATTEMPTS = 10
+DDL_RETRY_DELAY_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -447,6 +450,32 @@ def copy_rows_except_symbol_window(cursor, target_table: str, symbol: str, start
     return int(cursor.fetchone()[0])
 
 
+def create_full_backup_table(cursor, backup_table: str) -> int:
+    """Create a full copy of the live candle table for rollback before drop/swap."""
+
+    ensure_safe_table_name(backup_table)
+    return create_table_from_source(cursor, backup_table, TABLE_NAME)
+
+
+def create_table_from_source(cursor, target_table: str, source_table: str) -> int:
+    """Create a candle table by copying all rows from another candle-shaped table."""
+
+    ensure_safe_table_name(target_table)
+    ensure_safe_table_name(source_table)
+    cursor.execute(
+        f"""
+        CREATE TABLE {target_table} AS (
+            SELECT symbol, interval, timestamp, open, high, low, close, volume
+            FROM {source_table}
+            ORDER BY timestamp ASC
+        ), CAST(symbol AS SYMBOL), CAST(interval AS SYMBOL)
+        TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL
+        """
+    )
+    cursor.execute(f"SELECT count() AS count FROM {target_table}")
+    return int(cursor.fetchone()[0])
+
+
 def create_replacement_table_from_staging(
     cursor,
     replacement_table: str,
@@ -674,12 +703,50 @@ def drop_table(cursor, table_name: str) -> None:
     cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
 
 
+def table_exists(cursor, table_name: str) -> bool:
+    """Return whether QuestDB currently exposes a table in metadata."""
+
+    ensure_safe_table_name(table_name)
+    cursor.execute("SELECT count() AS count FROM tables() WHERE table_name = %s", (table_name,))
+    return int(cursor.fetchone()[0]) > 0
+
+
+def wait_for_table_state(cursor, table_name: str, should_exist: bool) -> None:
+    """Wait briefly for QuestDB table metadata to reflect a DDL operation."""
+
+    deadline = time.monotonic() + (DDL_RETRY_ATTEMPTS * DDL_RETRY_DELAY_SECONDS)
+    while True:
+        if table_exists(cursor, table_name) == should_exist:
+            return
+        if time.monotonic() >= deadline:
+            state = "visible" if should_exist else "absent"
+            raise RuntimeError(f"Timed out waiting for {table_name} to become {state}")
+        time.sleep(DDL_RETRY_DELAY_SECONDS)
+
+
 def rename_table(cursor, old_name: str, new_name: str) -> None:
     """Rename a QuestDB table after validating both dynamic names."""
 
     ensure_safe_table_name(old_name)
     ensure_safe_table_name(new_name)
-    cursor.execute(f"RENAME TABLE {old_name} TO {new_name}")
+    for attempt in range(1, DDL_RETRY_ATTEMPTS + 1):
+        try:
+            cursor.execute(f"RENAME TABLE {old_name} TO {new_name}")
+            wait_for_table_state(cursor, old_name, should_exist=False)
+            wait_for_table_state(cursor, new_name, should_exist=True)
+            return
+        except psycopg2.DatabaseError as exc:
+            if attempt == DDL_RETRY_ATTEMPTS:
+                raise
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                logger.warning("Failed to rollback connection after rename error", exc_info=True)
+            logger.warning(
+                f"RENAME TABLE {old_name} TO {new_name} failed on attempt "
+                f"{attempt}/{DDL_RETRY_ATTEMPTS}: {exc}. Retrying..."
+            )
+            time.sleep(DDL_RETRY_DELAY_SECONDS)
 
 
 def list_reconciler_temp_tables(cursor) -> list[str]:
@@ -714,8 +781,38 @@ def cleanup_reconciler_temp_tables(cursor, protected_tables: set[str] | None = N
     logger.info(f"Dropped {dropped_count}/{len(temp_tables)} old reconciler temporary tables.")
 
 
+def find_latest_old_table(cursor) -> str | None:
+    """Find the newest full live-table backup left by the reconciler."""
+
+    candidates: list[tuple[str, str]] = []
+    for table_name in list_reconciler_temp_tables(cursor):
+        match = OLD_TABLE_PATTERN.match(table_name)
+        if match:
+            candidates.append((match.group(1), table_name))
+
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def recover_missing_live_table(cursor) -> None:
+    """Restore `market_candles` from the newest backup if a previous swap lost it."""
+
+    if table_exists(cursor, TABLE_NAME):
+        return
+
+    backup_table = find_latest_old_table(cursor)
+    if not backup_table:
+        raise RuntimeError(
+            f"{TABLE_NAME} is missing and no reconciler backup table was found. "
+            "Manual QuestDB recovery is required before reconciliation can continue."
+        )
+
+    restored_count = create_table_from_source(cursor, TABLE_NAME, backup_table)
+    logger.warning(f"Restored missing {TABLE_NAME} from {backup_table} with {restored_count} rows.")
+
+
 def reconcile_symbol(
-    cursor,
     base_url: str,
     symbol: str,
     start: datetime,
@@ -742,73 +839,118 @@ def reconcile_symbol(
     replacement_created = False
     staging_created = False
     old_table_created = False
+    live_table_dropped = False
     replacement_is_live = False
+    build_conn = None
 
     try:
-        create_staging_rows(cursor, staging_table, binance_rows)
-        staging_created = True
-        logger.info(f"{symbol}: staged {len(binance_rows)} replacement rows in {staging_table}")
+        build_conn = create_connection()
+        with build_conn.cursor() as cursor:
+            ensure_market_table(cursor)
+            create_staging_rows(cursor, staging_table, binance_rows)
+            staging_created = True
+            logger.info(f"{symbol}: staged {len(binance_rows)} replacement rows in {staging_table}")
 
-        replacement_count = create_replacement_table_from_staging(
-            cursor,
-            replacement_table,
-            staging_table,
-            symbol,
-            start,
-            end,
-        )
-        replacement_created = True
-        logger.info(f"{symbol}: built {replacement_table} with {replacement_count} total rows")
+            replacement_count = create_replacement_table_from_staging(
+                cursor,
+                replacement_table,
+                staging_table,
+                symbol,
+                start,
+                end,
+            )
+            replacement_created = True
+            logger.info(f"{symbol}: built {replacement_table} with {replacement_count} total rows")
 
-        replacement_rows = fetch_rows_from_table(cursor, replacement_table, symbol, start, end)
-        assert_rows_match(replacement_rows, binance_rows, tolerance, symbol)
-        logger.info(f"{symbol}: replacement table verified before swap")
+            replacement_rows = fetch_rows_from_table(cursor, replacement_table, symbol, start, end)
+            assert_rows_match(replacement_rows, binance_rows, tolerance, symbol)
+            logger.info(f"{symbol}: replacement table verified before swap")
+        build_conn.close()
+        build_conn = None
 
-        rename_table(cursor, TABLE_NAME, old_table)
-        old_table_created = True
-        rename_table(cursor, replacement_table, TABLE_NAME)
-        replacement_is_live = True
+        backup_conn = create_connection()
+        try:
+            with backup_conn.cursor() as cursor:
+                backup_count = create_full_backup_table(cursor, old_table)
+                old_table_created = True
+                logger.info(f"{symbol}: backed up live table to {old_table} with {backup_count} rows")
 
-        actual_rows = fetch_db_rows(cursor, symbol, start, end)
-        assert_rows_match(actual_rows, binance_rows, tolerance, symbol)
-        logger.info(f"{symbol}: swapped and verified {len(binance_rows)} candles")
+                drop_table(cursor, TABLE_NAME)
+                wait_for_table_state(cursor, TABLE_NAME, should_exist=False)
+                live_table_dropped = True
+                logger.info(f"{symbol}: dropped live table before replacement swap")
+        finally:
+            backup_conn.close()
+
+        swap_conn = create_connection()
+        try:
+            with swap_conn.cursor() as cursor:
+                live_count = create_table_from_source(cursor, TABLE_NAME, replacement_table)
+                replacement_is_live = True
+                logger.info(f"{symbol}: created live table from {replacement_table} with {live_count} rows")
+
+                actual_rows = fetch_db_rows(cursor, symbol, start, end)
+                assert_rows_match(actual_rows, binance_rows, tolerance, symbol)
+                logger.info(f"{symbol}: swapped and verified {len(binance_rows)} candles")
+        finally:
+            swap_conn.close()
     except Exception:
+        if build_conn is not None:
+            build_conn.close()
         logger.error(f"{symbol}: replacement failed. Attempting rollback.", exc_info=True)
-        if replacement_is_live:
-            try:
-                rename_table(cursor, TABLE_NAME, failed_table)
-                rename_table(cursor, old_table, TABLE_NAME)
-                logger.warning(f"{symbol}: rollback completed. Failed table retained as {failed_table}")
-            except Exception:
-                logger.error(
-                    f"{symbol}: rollback failed. Old table retained for manual recovery: {old_table}",
-                    exc_info=True,
-                )
-        elif old_table_created:
-            try:
-                rename_table(cursor, old_table, TABLE_NAME)
-                logger.warning(f"{symbol}: restored original table name from {old_table}")
-            except Exception:
-                logger.error(f"{symbol}: failed to restore original table name from {old_table}", exc_info=True)
+        rollback_conn = create_connection()
+        try:
+            with rollback_conn.cursor() as cursor:
+                if replacement_is_live:
+                    try:
+                        if table_exists(cursor, TABLE_NAME):
+                            create_table_from_source(cursor, failed_table, TABLE_NAME)
+                            drop_table(cursor, TABLE_NAME)
+                            wait_for_table_state(cursor, TABLE_NAME, should_exist=False)
+                        create_table_from_source(cursor, TABLE_NAME, old_table)
+                        logger.warning(f"{symbol}: rollback completed. Failed table retained as {failed_table}")
+                    except Exception:
+                        logger.error(
+                            f"{symbol}: rollback failed. Old table retained for manual recovery: {old_table}",
+                            exc_info=True,
+                        )
+                elif old_table_created and live_table_dropped:
+                    try:
+                        create_table_from_source(cursor, TABLE_NAME, old_table)
+                        logger.warning(f"{symbol}: restored original table name from {old_table}")
+                    except Exception:
+                        logger.error(f"{symbol}: failed to restore original table name from {old_table}", exc_info=True)
+                elif old_table_created and not keep_temp:
+                    try:
+                        drop_table(cursor, old_table)
+                    except Exception:
+                        logger.warning(f"{symbol}: failed to drop unused backup table {old_table}", exc_info=True)
 
-        if replacement_created and not replacement_is_live and not keep_temp:
-            try:
-                drop_table(cursor, replacement_table)
-            except Exception:
-                logger.warning(f"{symbol}: failed to drop replacement table {replacement_table}", exc_info=True)
-        if staging_created and not keep_temp:
-            try:
-                drop_table(cursor, staging_table)
-            except Exception:
-                logger.warning(f"{symbol}: failed to drop staging table {staging_table}", exc_info=True)
+                if replacement_created and not replacement_is_live and not keep_temp:
+                    try:
+                        drop_table(cursor, replacement_table)
+                    except Exception:
+                        logger.warning(f"{symbol}: failed to drop replacement table {replacement_table}", exc_info=True)
+                if staging_created and not keep_temp:
+                    try:
+                        drop_table(cursor, staging_table)
+                    except Exception:
+                        logger.warning(f"{symbol}: failed to drop staging table {staging_table}", exc_info=True)
+        finally:
+            rollback_conn.close()
         raise
 
     if not keep_temp:
-        for table_name in (old_table, replacement_table, staging_table):
-            try:
-                drop_table(cursor, table_name)
-            except Exception:
-                logger.warning(f"{symbol}: failed to drop temporary table {table_name}", exc_info=True)
+        cleanup_conn = create_connection()
+        try:
+            with cleanup_conn.cursor() as cursor:
+                for table_name in (old_table, replacement_table, staging_table):
+                    try:
+                        drop_table(cursor, table_name)
+                    except Exception:
+                        logger.warning(f"{symbol}: failed to drop temporary table {table_name}", exc_info=True)
+        finally:
+            cleanup_conn.close()
 
 
 def parse_args():
@@ -870,7 +1012,6 @@ def main() -> None:
     if args.dry_run:
         for symbol in symbols:
             reconcile_symbol(
-                cursor=None,
                 base_url=args.binance_rest_url,
                 symbol=symbol,
                 start=start,
@@ -885,23 +1026,34 @@ def main() -> None:
     conn = create_connection()
     try:
         with conn.cursor() as cursor:
-            ensure_market_table(cursor)
-            for symbol in symbols:
-                reconcile_symbol(
-                    cursor=cursor,
-                    base_url=args.binance_rest_url,
-                    symbol=symbol,
-                    start=start,
-                    end=end,
-                    run_id=run_id,
-                    tolerance=tolerance,
-                    dry_run=args.dry_run,
-                    keep_temp=args.keep_temp,
-                )
-            if not args.keep_temp:
-                cleanup_reconciler_temp_tables(cursor, protected_tables=active_temp_tables)
+            if table_exists(cursor, TABLE_NAME):
+                ensure_market_table(cursor)
+            elif find_latest_old_table(cursor):
+                recover_missing_live_table(cursor)
+            else:
+                ensure_market_table(cursor)
     finally:
         conn.close()
+
+    for symbol in symbols:
+        reconcile_symbol(
+            base_url=args.binance_rest_url,
+            symbol=symbol,
+            start=start,
+            end=end,
+            run_id=run_id,
+            tolerance=tolerance,
+            dry_run=args.dry_run,
+            keep_temp=args.keep_temp,
+        )
+
+    if not args.keep_temp:
+        conn = create_connection()
+        try:
+            with conn.cursor() as cursor:
+                cleanup_reconciler_temp_tables(cursor, protected_tables=active_temp_tables)
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
