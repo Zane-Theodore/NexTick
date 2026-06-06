@@ -35,7 +35,7 @@ flowchart LR
 | --- | --- | --- |
 | Binance to raw Kafka | Python producer | Normalized raw trade JSON in `KAFKA_TOPIC_RAW_TRADES`. |
 | Raw Kafka to candle state | Python processor | `CandleProcessor` consumes raw trades and updates active candles. |
-| Candle state to QuestDB | Python processor | Final `1m` candles inserted into `market_candles`. |
+| Candle state to QuestDB | Python processor | Final `1m` candles upserted into `market_candles`. |
 | Candle state to kline Kafka | Python processor | Final and non-final candle JSON in `KAFKA_TOPIC_KLINE_STREAM`. |
 | QuestDB to REST | NestJS backend | `GET /candles` response DTO. |
 | Kline Kafka to Socket.IO | NestJS backend | `candle.update` internal event to `kline_update` room broadcast. |
@@ -69,8 +69,8 @@ wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade
 Current behavior:
 
 1. Connects to QuestDB through PostgreSQL wire protocol.
-2. Creates `market_candles` if it does not exist.
-3. Consumes `KAFKA_TOPIC_RAW_TRADES` with group id `candle-processor-group`.
+2. Creates `market_candles` as a WAL/dedup table if it does not exist.
+3. Consumes `KAFKA_TOPIC_RAW_TRADES` with group id `candle-processor-group` by default.
 4. Creates one `MultiTimeframeManager` per detected symbol.
 5. Creates one `SingleCandleManager` per configured interval.
 6. Emits non-final candles every `CANDLE_UPDATE_INTERVAL_MS`.
@@ -172,7 +172,9 @@ CREATE TABLE IF NOT EXISTS market_candles (
   low DOUBLE,
   close DOUBLE,
   volume DOUBLE
-) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
+) TIMESTAMP(timestamp)
+PARTITION BY MONTH
+DEDUP UPSERT KEYS(timestamp, symbol, interval);
 ```
 
 Current storage rules:
@@ -183,23 +185,16 @@ Current storage rules:
 | Historical larger intervals | Built by backend SQL using QuestDB `SAMPLE BY`. |
 | Table partitioning | Monthly. |
 | Timestamp column | Designated QuestDB timestamp. |
-| Insert path | Python processor only. |
+| Insert path | Python processor and one startup REST reconciler pass. |
 
-Maintenance reconciliation is handled by `data_pipeline.candle_reconciler`. At
-startup, `data_pipeline.pipeline_runner` runs the reconciler before constructing
-the realtime `CandleProcessor`, so the reconciler and processor do not write
-`market_candles` concurrently. The reconciler fetches a closed 24-hour `1m`
-window from Binance REST through Binance's latest closed minute, then builds a
-full replacement table from existing QuestDB rows plus the canonical Binance
-rows. After each pass, it checks Binance server time again and appends any tail
-window that closed while the repair was running. Because the live
-`market_candles` table is currently `BYPASS WAL`, the main repair avoids range
-`DELETE`, `UPDATE`, and historical append repairs. Instead, it creates a full
-`market_candles_old_*` backup, drops `market_candles`, recreates it from the
-replacement table with `CREATE TABLE AS SELECT`, verifies the repaired window,
-and can recreate `market_candles` from the newest backup if a previous swap
-failed after the live table was dropped. Tail catch-up is append-only because
-those rows are newer than the repaired table.
+Maintenance reconciliation is handled by `data_pipeline.backfill.reconciler`. In
+Docker startup, `data-producer` runs first so raw trades are buffered in Kafka,
+`data-backfill` runs one Binance REST replacement backfill pass, and only then
+`data-processor` starts `CandleProcessor`. The backfill service writes a shared
+watermark file; while draining the Kafka backlog, the processor skips final `1m`
+DB upserts before that watermark so partial replay candles cannot overwrite the
+canonical REST rows. The live table is WAL/dedup with `UPSERT KEYS(timestamp,
+symbol, interval)`.
 
 ## Backend Layer
 
@@ -325,8 +320,8 @@ Indicator groups:
 | Processor Kafka startup | Retry with exponential backoff. |
 | Invalid raw trade | Skip missing symbol, timestamp, price, volume, non-positive values, or pre-2020 timestamps. |
 | Processor QuestDB startup | Startup fails if connection cannot be opened. |
-| Processor QuestDB insert | Retry 3 times. If final `1m` persistence fails, skip publishing that final candle. |
-| Startup reconciler failure | Retry the full reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, the processor does not start after retries are exhausted. |
+| Processor QuestDB upsert | Retry 3 times. If final `1m` persistence fails, skip publishing that final candle. |
+| Startup reconciler failure | Retry the one-shot reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; live processing continues after retries are exhausted. |
 | Candle reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
 | Backend QuestDB startup | Runs `SELECT 1`; startup fails if QuestDB is unreachable. |
 | Backend Kafka startup | Startup fails if consumer cannot connect or subscribe. |
@@ -359,7 +354,7 @@ Indicator groups:
 
 | Change | Update these places |
 | --- | --- |
-| Add interval | `data_pipeline/config.py`, `backend/src/modules/candles/enum/candle-interval.enum.ts`, `data_pipeline/.env`, `frontend/.env`, docs. |
+| Add interval | `data_pipeline/common/config.py`, `backend/src/modules/candles/enum/candle-interval.enum.ts`, `data_pipeline/.env`, `frontend/.env`, docs. |
 | Add symbol | `data_pipeline/.env`, `frontend/.env`, docs/examples if needed. |
 | Rename topics | `data_pipeline/.env`, `backend/.env`, `docker-compose.yml`, docs. |
 | Change kline payload | Python `broadcast_candle`, backend DTOs, frontend `MarketCandle` and `KlineUpdate`, docs. |

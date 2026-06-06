@@ -8,7 +8,7 @@ The repository has no root `package.json`. Run backend and frontend commands ins
 
 | Tool | Required for |
 | --- | --- |
-| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, and `data-processor`. |
+| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, and `data-processor`. |
 | Node.js and npm | NestJS backend and Vite frontend. |
 | Python 3.10+ | Manual data pipeline runs without pipeline containers. |
 | PowerShell, Git Bash, or another shell | Copying env files and running commands. |
@@ -102,7 +102,7 @@ VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 From the repository root:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
 Check containers:
@@ -114,7 +114,7 @@ docker compose ps
 View logs:
 
 ```bash
-docker compose logs -f kafka-setup data-processor data-producer
+docker compose logs -f kafka-setup data-producer data-backfill data-processor
 ```
 
 Local service URLs:
@@ -131,9 +131,9 @@ Expected service order:
 1. `kafka` becomes healthy.
 2. `kafka-setup` creates `raw-trades` and `kline-stream`.
 3. `questdb` becomes healthy.
-4. `data-processor` runs startup reconciliation before constructing `CandleProcessor`.
-5. `data-processor` becomes healthy after `CandleProcessor` has initialized QuestDB and Kafka.
-6. `data-producer` starts and connects to Binance.
+4. `data-producer` starts after Kafka topics exist and connects to Binance.
+5. `data-backfill` repairs the closed startup candle window and writes a shared watermark.
+6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered raw trades.
 
 ## 4. Start the Backend
 
@@ -211,34 +211,48 @@ Create a virtual environment from the repository root:
 python -m venv .venv
 ```
 
-Windows PowerShell, processor terminal:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python -m data_pipeline.pipeline_runner
-```
-
 Windows PowerShell, producer terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 python -m data_pipeline.producer.binance_producer
 ```
 
-macOS/Linux, processor terminal:
+Windows PowerShell, backfill terminal:
 
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m data_pipeline.pipeline_runner
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m data_pipeline.backfill.runner
+```
+
+Windows PowerShell, processor terminal:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m data_pipeline.processor.runner
 ```
 
 macOS/Linux, producer terminal:
 
 ```bash
 source .venv/bin/activate
+pip install -r requirements.txt
 python -m data_pipeline.producer.binance_producer
+```
+
+macOS/Linux, backfill terminal:
+
+```bash
+source .venv/bin/activate
+python -m data_pipeline.backfill.runner
+```
+
+macOS/Linux, processor terminal:
+
+```bash
+source .venv/bin/activate
+python -m data_pipeline.processor.runner
 ```
 
 ## Test and Build Commands
@@ -270,7 +284,7 @@ python -m compileall data_pipeline
 Pipeline operational checks:
 
 ```bash
-docker compose logs -f data-producer data-processor
+docker compose logs -f data-producer data-backfill data-processor
 ```
 
 Use Kafka UI to inspect topics:
@@ -296,30 +310,28 @@ LIMIT 20;
 ## Reconcile Missing Candles
 
 Use the pipeline reconciler when recent stored `1m` candles are missing or need
-to be rebuilt from Binance REST data. The startup reconciler repairs a closed
-24-hour window that ends at Binance's latest closed minute, excluding only the
-currently open `1m` candle. If the repair takes long enough for another minute
-to close, it immediately appends the new tail window before the processor
-starts instead of rebuilding the full table again.
+to be filled from Binance REST data. The startup backfill repairs one closed
+24-hour window and writes a watermark so the processor does not overwrite that
+window while draining buffered trades.
 
-Docker Compose runs reconciliation automatically before `CandleProcessor`
-starts, so the startup path does not write `market_candles` concurrently with
-the live processor. For manual reconciliation, stop the live writer first
-because the current `market_candles` table is `BYPASS WAL` and the reconciler
-repairs data by backing up, dropping, and recreating `market_candles`.
+Docker Compose starts reconciliation automatically after `CandleProcessor`
+initialized. The startup path replaces the target window in `market_candles`
+and runs once. Stop the live writer before any manual repair workflow that
+drops, recreates, or migrates `market_candles`.
 
 ```bash
 docker compose stop data-processor
-python -m data_pipeline.candle_reconciler
+python -m data_pipeline.backfill.reconciler
 docker compose start data-processor
 ```
 
 Useful dry-run and inspection modes:
 
 ```bash
-python -m data_pipeline.candle_reconciler --dry-run
-python -m data_pipeline.candle_reconciler --symbols BTCUSDT,ETHUSDT
-python -m data_pipeline.candle_reconciler --keep-temp
+python -m data_pipeline.backfill.reconciler --dry-run
+python -m data_pipeline.backfill.reconciler --symbols BTCUSDT,ETHUSDT
+python -m data_pipeline.backfill.reconciler --window-hours 24 --end-lag-minutes 2
+python -m data_pipeline.backfill.reconciler --keep-temp
 ```
 
 If a previous reconcile failed after dropping `market_candles`, run the same
@@ -334,12 +346,12 @@ command again. The script restores `market_candles` from the newest
 | Topics are missing | `data_pipeline/.env` topic names are blank or `kafka-setup` did not finish | Fill env values and run `docker compose up -d kafka-setup`. |
 | QuestDB is not ready | QuestDB healthcheck has not passed | Check `http://localhost:9000` or `docker compose logs -f questdb`. |
 | Backend startup failed | Kafka or QuestDB is unavailable, or env values are blank | Confirm Docker services are healthy and `backend/.env` is filled. |
-| `data-producer` does not start | `data-processor` is still reconciling or startup reconciliation failed | Check `docker compose logs -f data-processor`; by default the processor will not become healthy until reconciliation succeeds. |
+| `data-producer` does not start | Kafka topics are not ready or Binance WebSocket connection failed | Check `docker compose logs -f kafka-setup data-producer`. |
 | Frontend does not load data | Backend is down, `VITE_API_URL` is wrong, or no candles exist yet | Check `/health`, `/candles`, and frontend `.env`; wait for a final `1m` candle. |
 | Footer shows `Offline` | `VITE_API_HEALTH_URL` is missing or backend `/health` is unreachable | Set `VITE_API_HEALTH_URL=http://localhost:3000/health` and restart Vite. |
 | Socket.IO CORS error | `FRONTEND_URL` or `BACKEND_URL` does not match the browser/backend origin | Update `backend/.env` and restart NestJS. |
 | `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after trades start. |
-| `market_candles` is missing after reconciliation | A reconcile run failed after dropping the live table but before recreating it | Run `python -m data_pipeline.candle_reconciler` again to restore from the newest `market_candles_old_*` backup, or restart QuestDB first if QuestDB still holds table metadata. |
+| `market_candles` is missing after reconciliation | A previous manual full repair failed after dropping the live table | Stop `data-processor`, then run `python -m data_pipeline.backfill.reconciler` to restore from the newest `market_candles_old_*` backup. |
 | Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs; Compose sets DNS to `8.8.8.8` and `8.8.4.4`. |
 | Interval returns 400 | Interval is not in backend `VALID_INTERVALS` | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
 | Chart fails during startup | `VITE_TRADING_SYMBOLS` or `VITE_CANDLE_INTERVALS` is blank or undefined | Fill both frontend env values and restart Vite. |

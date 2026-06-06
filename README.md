@@ -15,7 +15,7 @@ NexTick is not a trading bot and does not provide financial, investment, tax, or
 | Storage | QuestDB stores final `1m` candles in `market_candles`; larger historical intervals are aggregated at read time. |
 | Backend | NestJS validates REST and Socket.IO payloads, reads QuestDB, consumes Kafka kline updates, and fans out room updates. |
 | Frontend | React + Lightweight Charts loads history, joins Socket.IO rooms, and renders candles, volume, tooltip data, and indicators. |
-| Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, and `data-processor`. |
+| Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, and `data-processor`. |
 
 Kafka is the service boundary between the Python pipeline and the backend. QuestDB is the time-series contract for historical candle reads.
 
@@ -54,15 +54,16 @@ flowchart LR
 
 ## Runtime Flow
 
-1. `data_pipeline.pipeline_runner` reconciles recent closed `1m` candles before the realtime processor starts.
-2. Binance emits trade ticks through combined trade streams.
-3. `BinanceCombinedProducer` normalizes each trade and publishes to `KAFKA_TOPIC_RAW_TRADES`.
-4. `CandleProcessor` consumes raw trades and updates active candles for configured intervals.
-5. Final `1m` candles are inserted into QuestDB table `market_candles`.
-6. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
-7. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
-8. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
-9. React loads history through `GET /candles`, joins the matching Socket.IO room, and updates Lightweight Charts.
+1. Binance emits trade ticks through combined trade streams.
+2. `BinanceCombinedProducer` normalizes each trade and publishes to `KAFKA_TOPIC_RAW_TRADES`.
+3. `data-producer` keeps publishing raw trades to Kafka while startup backfill runs.
+4. `data-backfill` replaces a 24-hour closed `1m` window from Binance REST and writes a backfill watermark.
+5. `CandleProcessor` starts after backfill succeeds, consumes the buffered raw trades, and skips DB writes before the watermark.
+6. Final `1m` candles are inserted into QuestDB table `market_candles`.
+7. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
+8. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
+9. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
+10. React loads history through `GET /candles`, joins the matching Socket.IO room, and updates Lightweight Charts.
 
 ## Local Quickstart
 
@@ -133,7 +134,7 @@ VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 Start infrastructure and the Python pipeline:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-processor data-producer
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
 Start the backend:
@@ -184,12 +185,18 @@ NexTick/
 |   |-- package.json
 |   `-- README.md
 |-- data_pipeline/
+|   |-- backfill/
+|   |   |-- reconciler.py
+|   |   |-- runner.py
+|   |   `-- state.py
+|   |-- common/
+|   |   |-- config.py
+|   |   `-- logger.py
 |   |-- producer/
 |   |   `-- binance_producer.py
 |   |-- processor/
-|   |   `-- candle_processor.py
-|   |-- config.py
-|   |-- logger_config.py
+|   |   |-- candle_processor.py
+|   |   `-- runner.py
 |   `-- README.md
 |-- docs/
 |   |-- architecture.md
@@ -243,7 +250,7 @@ Pipeline operational checks:
 
 ```bash
 docker compose ps
-docker compose logs -f data-producer data-processor
+docker compose logs -f data-producer data-backfill data-processor
 ```
 
 ## Documentation Index
