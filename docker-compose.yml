@@ -125,7 +125,7 @@ services:
       kafka-setup:
         condition: service_completed_successfully
       data-processor:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   data-processor:
@@ -137,8 +137,8 @@ services:
       while ! python -c 'import socket; socket.create_connection((\"questdb\", 8812))' 2>/dev/null; do
         sleep 2;
       done;
-      echo 'QuestDB is ready! Starting Processor...';
-      python -m data_pipeline.processor.candle_processor
+      echo 'QuestDB is ready! Running startup reconciliation before Processor...';
+      python -m data_pipeline.pipeline_runner
       "
     env_file:
       - data_pipeline/.env
@@ -146,6 +146,11 @@ services:
       - KAFKA_BROKER=kafka:29092
       - KAFKA_SERVER=kafka:29092
       - QUESTDB_HOST=questdb
+      - PROCESSOR_READY_FILE=/tmp/nextick-processor-ready
+      - STARTUP_RECONCILE_ENABLED=true
+      - STARTUP_RECONCILE_REQUIRED=true
+      - STARTUP_RECONCILE_MAX_ATTEMPTS=3
+      - STARTUP_RECONCILE_RETRY_DELAY_SECONDS=5
     networks:
       - nextick_net
     depends_on:
@@ -153,6 +158,12 @@ services:
         condition: service_completed_successfully
       questdb:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/nextick-processor-ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 240
+      start_period: 10s
     restart: unless-stopped
 
 networks:

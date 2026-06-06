@@ -185,16 +185,21 @@ Current storage rules:
 | Timestamp column | Designated QuestDB timestamp. |
 | Insert path | Python processor only. |
 
-Maintenance reconciliation is handled by `data_pipeline.candle_reconciler`. The
-reconciler fetches a closed 24-hour `1m` window from Binance REST, ending 30
-minutes behind Binance server time, then builds a full replacement table from
-existing QuestDB rows plus the canonical Binance rows. Because the live
-`market_candles` table is currently `BYPASS WAL`, the reconciler avoids range
+Maintenance reconciliation is handled by `data_pipeline.candle_reconciler`. At
+startup, `data_pipeline.pipeline_runner` runs the reconciler before constructing
+the realtime `CandleProcessor`, so the reconciler and processor do not write
+`market_candles` concurrently. The reconciler fetches a closed 24-hour `1m`
+window from Binance REST through Binance's latest closed minute, then builds a
+full replacement table from existing QuestDB rows plus the canonical Binance
+rows. After each pass, it checks Binance server time again and appends any tail
+window that closed while the repair was running. Because the live
+`market_candles` table is currently `BYPASS WAL`, the main repair avoids range
 `DELETE`, `UPDATE`, and historical append repairs. Instead, it creates a full
 `market_candles_old_*` backup, drops `market_candles`, recreates it from the
 replacement table with `CREATE TABLE AS SELECT`, verifies the repaired window,
 and can recreate `market_candles` from the newest backup if a previous swap
-failed after the live table was dropped.
+failed after the live table was dropped. Tail catch-up is append-only because
+those rows are newer than the repaired table.
 
 ## Backend Layer
 
@@ -321,6 +326,7 @@ Indicator groups:
 | Invalid raw trade | Skip missing symbol, timestamp, price, volume, non-positive values, or pre-2020 timestamps. |
 | Processor QuestDB startup | Startup fails if connection cannot be opened. |
 | Processor QuestDB insert | Retry 3 times. If final `1m` persistence fails, skip publishing that final candle. |
+| Startup reconciler failure | Retry the full reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, the processor does not start after retries are exhausted. |
 | Candle reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
 | Backend QuestDB startup | Runs `SELECT 1`; startup fails if QuestDB is unreachable. |
 | Backend Kafka startup | Startup fails if consumer cannot connect or subscribe. |

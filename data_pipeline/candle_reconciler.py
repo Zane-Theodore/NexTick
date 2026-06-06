@@ -1,11 +1,12 @@
 """Reconcile recent 1-minute candles against Binance REST klines.
 
-This module is intentionally separate from the realtime candle processor. It is
-meant to be run manually as a maintenance task while the system is online. The
-current policy replaces a fixed 24-hour closed window of stored `1m` candles,
-using Binance REST klines as the canonical source and QuestDB backup/staging
-tables as safety rails. QuestDB table-range DELETE is intentionally avoided so
-the script works with the current BYPASS WAL `market_candles` table.
+This module is intentionally separate from the realtime candle processor. The
+startup runner executes it before the processor is constructed, so it can repair
+through the newest closed Binance candle without racing the live writer. The
+current policy replaces recent closed `1m` candles using Binance REST klines as
+the canonical source and QuestDB backup/staging tables as safety rails. QuestDB
+table-range DELETE is intentionally avoided so the script works with the current
+BYPASS WAL `market_candles` table.
 """
 
 import argparse
@@ -39,8 +40,8 @@ RECONCILE_WINDOW_HOURS = 24
 DEFAULT_LIMIT = 1000
 DEFAULT_TOLERANCE = Decimal("0.00000001")
 MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
-RECONCILE_END_LAG_MINUTES = 30
-DDL_RETRY_ATTEMPTS = 10
+RECONCILE_END_LAG_MINUTES = 0
+DDL_RETRY_ATTEMPTS = 30
 DDL_RETRY_DELAY_SECONDS = 1.0
 
 
@@ -177,13 +178,13 @@ def fetch_binance_server_time(base_url: str) -> datetime:
     return datetime.fromtimestamp(server_time_ms / 1000, tz=timezone.utc)
 
 
-def resolve_reconcile_window(base_url: str) -> tuple[datetime, datetime]:
-    """Return the fixed 24-hour closed candle window aligned to Binance time.
+def resolve_latest_closed_end(base_url: str) -> datetime:
+    """Return the exclusive end timestamp after Binance's newest closed candle.
 
     The short wait after a fresh minute boundary avoids choosing an unstable
-    exchange boundary. The additional lag keeps the reconciler away from the
-    newest realtime candles so rows written while the script runs are copied
-    into the replacement table instead of being overwritten.
+    exchange boundary. The returned value is the current Binance minute floor,
+    so the open in-progress candle is excluded while the newest closed candle
+    is included.
     """
 
     server_time = fetch_binance_server_time(base_url)
@@ -196,7 +197,13 @@ def resolve_reconcile_window(base_url: str) -> tuple[datetime, datetime]:
         time.sleep(wait_seconds)
         server_time = fetch_binance_server_time(base_url)
 
-    end = server_time.replace(second=0, microsecond=0) - timedelta(minutes=RECONCILE_END_LAG_MINUTES)
+    return server_time.replace(second=0, microsecond=0) - timedelta(minutes=RECONCILE_END_LAG_MINUTES)
+
+
+def resolve_reconcile_window(base_url: str) -> tuple[datetime, datetime]:
+    """Return the initial 24-hour closed candle window aligned to Binance time."""
+
+    end = resolve_latest_closed_end(base_url)
     start = end - timedelta(hours=RECONCILE_WINDOW_HOURS)
     return start, end
 
@@ -350,20 +357,41 @@ def create_connection():
 def ensure_market_table(cursor) -> None:
     """Ensure the main candle table exists before reconciliation starts."""
 
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-            symbol SYMBOL,
-            interval SYMBOL,
-            timestamp TIMESTAMP,
-            open DOUBLE,
-            high DOUBLE,
-            low DOUBLE,
-            close DOUBLE,
-            volume DOUBLE
-        ) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
-        """
-    )
+    for attempt in range(1, DDL_RETRY_ATTEMPTS + 1):
+        try:
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                    symbol SYMBOL,
+                    interval SYMBOL,
+                    timestamp TIMESTAMP,
+                    open DOUBLE,
+                    high DOUBLE,
+                    low DOUBLE,
+                    close DOUBLE,
+                    volume DOUBLE
+                ) TIMESTAMP(timestamp) PARTITION BY MONTH BYPASS WAL;
+                """
+            )
+            wait_for_table_state(cursor, TABLE_NAME, should_exist=True)
+            return
+        except psycopg2.DatabaseError as exc:
+            try:
+                cursor.connection.rollback()
+            except Exception:
+                logger.warning("Failed to rollback connection after market table DDL error", exc_info=True)
+
+            if table_exists(cursor, TABLE_NAME):
+                return
+
+            if attempt == DDL_RETRY_ATTEMPTS:
+                raise
+
+            logger.warning(
+                f"Ensuring {TABLE_NAME} failed on attempt {attempt}/{DDL_RETRY_ATTEMPTS}: "
+                f"{exc}. Retrying..."
+            )
+            time.sleep(DDL_RETRY_DELAY_SECONDS)
 
 
 def create_candle_table(cursor, table_name: str) -> None:
@@ -953,6 +981,58 @@ def reconcile_symbol(
             cleanup_conn.close()
 
 
+def reconcile_tail_append(
+    base_url: str,
+    symbols: list[str],
+    start: datetime,
+    end: datetime,
+    tolerance: Decimal,
+    dry_run: bool,
+) -> None:
+    """Append newly closed catch-up candles without rebuilding the full table.
+
+    The startup runner has not started the live processor yet, so candles that
+    close while the full repair is running can only be missing from QuestDB.
+    They are newer than the repaired table's max timestamp, which makes an
+    ordered append much cheaper than another full drop/create swap.
+    """
+
+    rows_by_symbol: dict[str, list[CandleRow]] = {}
+    for symbol in symbols:
+        logger.info(f"{symbol}: fetching Binance {INTERVAL} tail candles from {start.isoformat()} to {end.isoformat()}")
+        rows = fetch_binance_klines(base_url, symbol, start, end)
+        validate_rows(rows, symbol, start, end)
+        rows_by_symbol[symbol] = rows
+
+    if dry_run:
+        for symbol, rows in rows_by_symbol.items():
+            logger.info(f"{symbol}: tail dry run passed. {len(rows)} Binance candles are complete and valid.")
+        return
+
+    missing_rows: list[CandleRow] = []
+    conn = create_connection()
+    try:
+        with conn.cursor() as cursor:
+            ensure_market_table(cursor)
+            for symbol, rows in rows_by_symbol.items():
+                existing_timestamps = fetch_existing_timestamps(cursor, symbol, start, end)
+                missing_rows.extend(row for row in rows if row.timestamp not in existing_timestamps)
+
+            missing_rows.sort(key=lambda row: (row.timestamp, row.symbol))
+            if missing_rows:
+                insert_rows(cursor, TABLE_NAME, missing_rows)
+                logger.info(f"Appended {len(missing_rows)} tail candle row(s) to {TABLE_NAME}.")
+            else:
+                logger.info("No missing tail candle rows to append.")
+
+            for symbol, expected_rows in rows_by_symbol.items():
+                actual_rows = fetch_db_rows(cursor, symbol, start, end)
+                assert_rows_match(actual_rows, expected_rows, tolerance, symbol)
+                logger.info(f"{symbol}: appended tail verified {len(expected_rows)} candles")
+    finally:
+        conn.close()
+
+
 def parse_args():
     """Parse command-line options for the maintenance script."""
 
@@ -981,79 +1061,127 @@ def parse_args():
     return parser.parse_args()
 
 
-def main() -> None:
-    """Run candle reconciliation for the configured symbols."""
+def run_reconciliation(
+    symbols_arg: str | None = None,
+    binance_rest_url: str | None = None,
+    dry_run: bool = False,
+    keep_temp: bool = False,
+    tolerance_arg: str | Decimal | None = None,
+) -> None:
+    """Run candle reconciliation for the configured symbols.
+
+    This function is used by both the CLI maintenance command and the pipeline
+    startup runner. It intentionally completes before the realtime processor is
+    constructed so both paths cannot write `market_candles` at the same time.
+    """
 
     load_environment()
-    args = parse_args()
 
-    symbols = parse_symbols(args.symbols or os.getenv("TRADING_SYMBOLS"))
-    tolerance = Decimal(str(args.tolerance))
-    start, end = resolve_reconcile_window(args.binance_rest_url)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    base_url = binance_rest_url or os.getenv("BINANCE_REST_URL") or DEFAULT_BINANCE_REST_URL
+    symbols = parse_symbols(symbols_arg or os.getenv("TRADING_SYMBOLS"))
+    tolerance = Decimal(str(tolerance_arg or DEFAULT_TOLERANCE))
+    start, end = resolve_reconcile_window(base_url)
     active_temp_tables = set()
-    for symbol in symbols:
-        active_temp_tables.update(
-            {
-                build_table_name("market_candles_replace", symbol, run_id),
-                build_table_name("market_candles_stage", symbol, run_id),
-                build_table_name("market_candles_old", symbol, run_id),
-                build_table_name("market_candles_failed", symbol, run_id),
-            }
+    use_full_replacement = True
+
+    while True:
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        for symbol in symbols:
+            active_temp_tables.update(
+                {
+                    build_table_name("market_candles_replace", symbol, run_id),
+                    build_table_name("market_candles_stage", symbol, run_id),
+                    build_table_name("market_candles_old", symbol, run_id),
+                    build_table_name("market_candles_failed", symbol, run_id),
+                }
+            )
+
+        expected_count = int((end - start).total_seconds() // 60)
+        logger.info(
+            f"Reconciling {len(symbols)} symbol(s), interval={INTERVAL}, "
+            f"window=[{start.isoformat()}, {end.isoformat()}); "
+            f"expected_candles={expected_count}; "
+            f"end_lag_minutes={RECONCILE_END_LAG_MINUTES}"
         )
 
-    logger.info(
-        f"Reconciling {len(symbols)} symbol(s), interval={INTERVAL}, "
-        f"window=[{start.isoformat()}, {end.isoformat()}); "
-        f"expected_candles={RECONCILE_WINDOW_HOURS * 60}; "
-        f"end_lag_minutes={RECONCILE_END_LAG_MINUTES}"
-    )
-
-    if args.dry_run:
-        for symbol in symbols:
-            reconcile_symbol(
-                base_url=args.binance_rest_url,
-                symbol=symbol,
+        if not use_full_replacement:
+            reconcile_tail_append(
+                base_url=base_url,
+                symbols=symbols,
                 start=start,
                 end=end,
-                run_id=run_id,
                 tolerance=tolerance,
-                dry_run=True,
-                keep_temp=args.keep_temp,
+                dry_run=dry_run,
             )
-        return
+        elif dry_run:
+            for symbol in symbols:
+                reconcile_symbol(
+                    base_url=base_url,
+                    symbol=symbol,
+                    start=start,
+                    end=end,
+                    run_id=run_id,
+                    tolerance=tolerance,
+                    dry_run=True,
+                    keep_temp=keep_temp,
+                )
+        else:
+            conn = create_connection()
+            try:
+                with conn.cursor() as cursor:
+                    if table_exists(cursor, TABLE_NAME):
+                        ensure_market_table(cursor)
+                    elif find_latest_old_table(cursor):
+                        recover_missing_live_table(cursor)
+                    else:
+                        ensure_market_table(cursor)
+            finally:
+                conn.close()
 
-    conn = create_connection()
-    try:
-        with conn.cursor() as cursor:
-            if table_exists(cursor, TABLE_NAME):
-                ensure_market_table(cursor)
-            elif find_latest_old_table(cursor):
-                recover_missing_live_table(cursor)
-            else:
-                ensure_market_table(cursor)
-    finally:
-        conn.close()
+            for symbol in symbols:
+                reconcile_symbol(
+                    base_url=base_url,
+                    symbol=symbol,
+                    start=start,
+                    end=end,
+                    run_id=run_id,
+                    tolerance=tolerance,
+                    dry_run=dry_run,
+                    keep_temp=keep_temp,
+                )
 
-    for symbol in symbols:
-        reconcile_symbol(
-            base_url=args.binance_rest_url,
-            symbol=symbol,
-            start=start,
-            end=end,
-            run_id=run_id,
-            tolerance=tolerance,
-            dry_run=args.dry_run,
-            keep_temp=args.keep_temp,
+        latest_end = resolve_latest_closed_end(base_url)
+        if latest_end <= end:
+            break
+
+        logger.info(
+            f"Reconciliation took long enough for newer candles to close. "
+            f"Catching up tail window=[{end.isoformat()}, {latest_end.isoformat()})."
         )
+        start, end = end, latest_end
+        use_full_replacement = False
 
-    if not args.keep_temp:
+    if not keep_temp and not dry_run:
         conn = create_connection()
         try:
             with conn.cursor() as cursor:
                 cleanup_reconciler_temp_tables(cursor, protected_tables=active_temp_tables)
         finally:
             conn.close()
+
+
+def main() -> None:
+    """Run candle reconciliation from the command line."""
+
+    load_environment()
+    args = parse_args()
+    run_reconciliation(
+        symbols_arg=args.symbols,
+        binance_rest_url=args.binance_rest_url,
+        dry_run=args.dry_run,
+        keep_temp=args.keep_temp,
+        tolerance_arg=args.tolerance,
+    )
 
 
 if __name__ == "__main__":

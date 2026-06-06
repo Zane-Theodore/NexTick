@@ -54,14 +54,15 @@ flowchart LR
 
 ## Runtime Flow
 
-1. Binance emits trade ticks through combined trade streams.
-2. `BinanceCombinedProducer` normalizes each trade and publishes to `KAFKA_TOPIC_RAW_TRADES`.
-3. `CandleProcessor` consumes raw trades and updates active candles for configured intervals.
-4. Final `1m` candles are inserted into QuestDB table `market_candles`.
-5. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
-6. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
-7. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
-8. React loads history through `GET /candles`, joins the matching Socket.IO room, and updates Lightweight Charts.
+1. `data_pipeline.pipeline_runner` reconciles recent closed `1m` candles before the realtime processor starts.
+2. Binance emits trade ticks through combined trade streams.
+3. `BinanceCombinedProducer` normalizes each trade and publishes to `KAFKA_TOPIC_RAW_TRADES`.
+4. `CandleProcessor` consumes raw trades and updates active candles for configured intervals.
+5. Final `1m` candles are inserted into QuestDB table `market_candles`.
+6. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
+7. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
+8. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
+9. React loads history through `GET /candles`, joins the matching Socket.IO room, and updates Lightweight Charts.
 
 ## Local Quickstart
 
