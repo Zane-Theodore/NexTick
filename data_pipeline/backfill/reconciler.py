@@ -38,6 +38,8 @@ DEFAULT_LIMIT = 1000
 DEFAULT_TOLERANCE = Decimal("0.00000001")
 MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
 RECONCILE_END_LAG_MINUTES = 0
+RECENT_RECONCILE_END_LAG_MINUTES = 3
+WAL_APPLY_TIMEOUT_SECONDS = 120.0
 DDL_RETRY_ATTEMPTS = 30
 DDL_RETRY_DELAY_SECONDS = 1.0
 
@@ -237,6 +239,26 @@ def resolve_latest_closed_end(base_url: str, end_lag_minutes: int | None = None)
 
     safe_lag = parse_positive_int(end_lag_minutes, RECONCILE_END_LAG_MINUTES, minimum=0)
     return server_time.replace(second=0, microsecond=0) - timedelta(minutes=safe_lag)
+
+
+def wait_for_open_candle_close(base_url: str) -> datetime:
+    """Wait until the candle open at startup has closed and REST data is stable."""
+
+    server_time = fetch_binance_server_time(base_url)
+    stable_next_boundary = (
+        server_time.replace(second=0, microsecond=0)
+        + timedelta(minutes=1, seconds=MIN_SERVER_SECONDS_AFTER_BOUNDARY)
+    )
+    wait_seconds = max(0.0, (stable_next_boundary - server_time).total_seconds())
+
+    if wait_seconds > 0:
+        logger.info(
+            f"Binance server time is {server_time.isoformat()}; waiting {wait_seconds:.1f}s "
+            "so startup backfill includes the candle that was open when the pipeline started."
+        )
+        time.sleep(wait_seconds)
+
+    return fetch_binance_server_time(base_url)
 
 
 def resolve_reconcile_window(
@@ -551,7 +573,7 @@ def insert_rows(cursor, table_name: str, rows: list[CandleRow]) -> None:
     cursor.executemany(
         f"""
         INSERT INTO {table_name} (symbol, interval, timestamp, open, high, low, close, volume)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, to_timestamp(%s, 'yyyy-MM-dd HH:mm:ss'), %s, %s, %s, %s, %s)
         """,
         [
             (
@@ -678,6 +700,7 @@ def create_table_from_source(cursor, target_table: str, source_table: str, dedup
           AND low > 0
           AND close > 0
           AND volume >= 0
+          AND timestamp >= to_timestamp('2020-01-01 00:00:00', 'yyyy-MM-dd HH:mm:ss')
           AND high >= open
           AND high >= close
           AND low <= open
@@ -745,6 +768,7 @@ def create_replacement_table_from_staging(
             AND low > 0
             AND close > 0
             AND volume >= 0
+            AND timestamp >= to_timestamp('2020-01-01 00:00:00', 'yyyy-MM-dd HH:mm:ss')
             AND high >= open
             AND high >= close
             AND low <= open
@@ -910,7 +934,13 @@ def rows_match(actual_row: CandleRow, expected_row: CandleRow, tolerance: Decima
     return all(abs(actual_value - expected_value) <= tolerance for actual_value, expected_value in comparisons)
 
 
-def assert_rows_match(actual: list[CandleRow], expected: list[CandleRow], tolerance: Decimal, symbol: str) -> None:
+def assert_rows_match(
+    actual: list[CandleRow],
+    expected: list[CandleRow],
+    tolerance: Decimal,
+    symbol: str,
+    log_duplicates: bool = True,
+) -> None:
     """Assert that QuestDB contains Binance rows, tolerating duplicate stale rows."""
 
     actual_by_timestamp: dict[datetime, list[CandleRow]] = {}
@@ -920,7 +950,7 @@ def assert_rows_match(actual: list[CandleRow], expected: list[CandleRow], tolera
     duplicate_timestamps = [
         timestamp for timestamp, rows in actual_by_timestamp.items() if len(rows) > 1
     ]
-    if duplicate_timestamps:
+    if duplicate_timestamps and log_duplicates:
         logger.warning(
             f"{symbol}: duplicate candle rows detected during verification; "
             f"duplicate_count={len(duplicate_timestamps)}, "
@@ -1037,6 +1067,37 @@ def wait_for_symbol_window_count(cursor, symbol: str, start: datetime, end: date
                 f"expected_keys={expected_count}, got_distinct={last_key_count}, "
                 f"got_rows={last_row_count}, window=[{start.isoformat()}, {end.isoformat()})"
             )
+        time.sleep(DDL_RETRY_DELAY_SECONDS)
+
+
+def wait_for_symbol_window_match(
+    cursor,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    expected: list[CandleRow],
+    tolerance: Decimal,
+    timeout_seconds: float = WAL_APPLY_TIMEOUT_SECONDS,
+) -> None:
+    """Wait until WAL/dedup upserts are visible with the expected OHLCV values."""
+
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+
+    while True:
+        actual_rows = fetch_db_rows(cursor, symbol, start, end)
+        try:
+            assert_rows_match(actual_rows, expected, tolerance, symbol, log_duplicates=False)
+            return
+        except Exception as exc:
+            last_error = exc
+
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"{symbol}: timed out waiting for REST reconcile upsert values to become visible; "
+                f"window=[{start.isoformat()}, {end.isoformat()}), last_error={last_error}"
+            ) from last_error
+
         time.sleep(DDL_RETRY_DELAY_SECONDS)
 
 
@@ -1277,9 +1338,12 @@ def reconcile_tail_append(
     end: datetime,
     tolerance: Decimal,
     dry_run: bool,
+    wal_apply_timeout_seconds: float = WAL_APPLY_TIMEOUT_SECONDS,
+    verify_after_write: bool = False,
 ) -> None:
-    """Replace a closed catch-up window using the full replacement path."""
+    """Upsert a closed catch-up window into the WAL/dedup live table."""
 
+    total_rows = 0
     if dry_run:
         for symbol in symbols:
             logger.info(
@@ -1291,30 +1355,46 @@ def reconcile_tail_append(
             logger.info(f"{symbol}: tail dry run passed. {len(rows)} Binance candles are complete and valid.")
         return
 
-    total_rows = 0
     expected_count = int((end - start).total_seconds() // 60)
-    for symbol in symbols:
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-        logger.info(
-            f"{symbol}: replacing REST reconcile window via table rebuild; "
-            f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}"
-        )
-        reconcile_symbol(
-            base_url=base_url,
-            symbol=symbol,
-            start=start,
-            end=end,
-            run_id=run_id,
-            tolerance=tolerance,
-            dry_run=False,
-            keep_temp=False,
-        )
-        total_rows += expected_count
+    conn = create_connection()
+    try:
+        with conn.cursor() as cursor:
+            ensure_market_table(cursor, allow_migration=False)
+
+            for symbol in symbols:
+                logger.info(
+                    f"{symbol}: upserting REST reconcile tail window; "
+                    f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}"
+                )
+                rows = fetch_binance_klines(base_url, symbol, start, end)
+                validate_rows(rows, symbol, start, end)
+                insert_rows(cursor, TABLE_NAME, rows)
+                if verify_after_write:
+                    try:
+                        wait_for_symbol_window_match(
+                            cursor,
+                            symbol,
+                            start,
+                            end,
+                            rows,
+                            tolerance,
+                            timeout_seconds=wal_apply_timeout_seconds,
+                        )
+                    except Exception:
+                        logger.warning(
+                            f"{symbol}: REST reconcile rows were inserted but are not fully visible yet; "
+                            f"window=[{start.isoformat()}, {end.isoformat()}). "
+                            "QuestDB WAL may still be applying out-of-order rows.",
+                            exc_info=True,
+                        )
+                total_rows += len(rows)
+    finally:
+        conn.close()
 
     if total_rows:
-        logger.info(f"Replaced {total_rows} REST reconcile candle row(s) in {TABLE_NAME}.")
+        logger.info(f"Upserted {total_rows} REST reconcile candle row(s) in {TABLE_NAME}.")
     else:
-        logger.info("No REST reconcile candle rows to replace.")
+        logger.info("No REST reconcile candle rows to upsert.")
 
 
 def run_recent_reconciliation(
@@ -1323,21 +1403,30 @@ def run_recent_reconciliation(
     binance_rest_url: str | None = None,
     dry_run: bool = False,
     tolerance_arg: str | Decimal | None = None,
+    end_lag_minutes: int | None = None,
+    wal_apply_timeout_seconds: float = WAL_APPLY_TIMEOUT_SECONDS,
+    verify_after_write: bool = False,
 ) -> None:
-    """Replace a short closed-candle window after the live processor has started."""
+    """Upsert a short closed-candle window after the live processor has started."""
 
     load_environment()
 
     base_url = binance_rest_url or os.getenv("BINANCE_REST_URL") or DEFAULT_BINANCE_REST_URL
     symbols = parse_symbols(symbols_arg or os.getenv("TRADING_SYMBOLS"))
     tolerance = Decimal(str(tolerance_arg or DEFAULT_TOLERANCE))
-    end = resolve_latest_closed_end(base_url)
+    resolved_end_lag_minutes = parse_positive_int(
+        end_lag_minutes if end_lag_minutes is not None else os.getenv("RECENT_RECONCILE_END_LAG_MINUTES"),
+        RECENT_RECONCILE_END_LAG_MINUTES,
+        minimum=0,
+    )
+    end = resolve_latest_closed_end(base_url, end_lag_minutes=resolved_end_lag_minutes)
     start = end - timedelta(minutes=max(1, lookback_minutes))
     expected_count = int((end - start).total_seconds() // 60)
 
     logger.info(
         f"Recent REST reconcile started: symbols={symbols}, interval={INTERVAL}, "
-        f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}"
+        f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}, "
+        f"end_lag_minutes={resolved_end_lag_minutes}"
     )
     reconcile_tail_append(
         base_url=base_url,
@@ -1346,6 +1435,8 @@ def run_recent_reconciliation(
         end=end,
         tolerance=tolerance,
         dry_run=dry_run,
+        wal_apply_timeout_seconds=wal_apply_timeout_seconds,
+        verify_after_write=verify_after_write,
     )
     logger.info("Recent REST reconcile completed.")
 

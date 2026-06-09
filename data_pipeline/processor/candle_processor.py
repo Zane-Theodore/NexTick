@@ -71,6 +71,7 @@ class SingleCandleManager:
         self.interval_ms = interval_ms
         self.current_candle = None
         self.current_candle_start = None
+        self.has_observed_interval_boundary = False
         self.lock = threading.Lock()
         self.closed = False
 
@@ -126,11 +127,13 @@ class SingleCandleManager:
                 closed_candle = self.current_candle.copy() if self.current_candle else None
                 self.current_candle = None
                 self.current_candle_start = None
+                self.has_observed_interval_boundary = True
             else:
                 closed_candle = None
             
             # Initialize new candle if needed
             if self.current_candle is None:
+                complete_from_start = self.has_observed_interval_boundary or trade_time == candle_start
                 self.current_candle = {
                     'symbol': self.symbol.upper(),
                     'interval': self.interval,
@@ -139,7 +142,8 @@ class SingleCandleManager:
                     'high': float(trade_price),
                     'low': float(trade_price),
                     'close': float(trade_price),
-                    'volume': float(trade_volume)
+                    'volume': float(trade_volume),
+                    '_complete_from_start': complete_from_start,
                 }
                 self.current_candle_start = candle_start
             else:
@@ -416,7 +420,7 @@ class CandleProcessor:
             self.db_cursor.execute(
                 f"""
                 INSERT INTO {self.table_name} (symbol, interval, timestamp, open, high, low, close, volume)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, to_timestamp(%s, 'yyyy-MM-dd HH:mm:ss'), %s, %s, %s, %s, %s)
                 """,
                 (
                     candle['symbol'],
@@ -468,7 +472,10 @@ class CandleProcessor:
             is_final: Whether this is a final (closed interval) candle. 
                      Only 1m candles are persisted to DB when final=True.
         """
-        kafka_candle = candle.copy()
+        complete_from_start = bool(candle.get('_complete_from_start', True))
+        public_candle = {key: value for key, value in candle.items() if not key.startswith('_')}
+
+        kafka_candle = public_candle.copy()
         kafka_candle['is_final'] = is_final
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
 
@@ -481,6 +488,17 @@ class CandleProcessor:
             )
             if candle["interval"] == "1m":
                 self._commit_consumer_offset("skipping startup-backfilled final candle")
+            return
+
+        if is_final and not complete_from_start:
+            logger.warning(
+                f"Skipping final candle that started after the realtime processor began observing its interval: "
+                f"symbol={candle['symbol']}, interval={candle['interval']}, "
+                f"open_time={candle['timestamp'].isoformat()}. "
+                "A REST recent reconciliation pass will upsert the authoritative closed candle."
+            )
+            if candle["interval"] == "1m":
+                self._commit_consumer_offset("skipping incomplete first observed final candle")
             return
 
         if is_final and candle['interval'] == '1m':

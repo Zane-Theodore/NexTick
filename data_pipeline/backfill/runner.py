@@ -61,11 +61,14 @@ def run_startup_backfill() -> bool:
     tolerance = os.getenv("STARTUP_RECONCILE_TOLERANCE")
     window_hours = os.getenv("STARTUP_RECONCILE_WINDOW_HOURS")
     end_lag_minutes = os.getenv("STARTUP_RECONCILE_END_LAG_MINUTES")
+    wait_for_open_close = _env_bool("STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE", True)
 
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
             logger.info(f"Running startup candle backfill ({attempt}/{attempts}).")
+            if wait_for_open_close:
+                reconciler.wait_for_open_candle_close(base_url or reconciler.DEFAULT_BINANCE_REST_URL)
             result = reconciler.run_reconciliation(
                 symbols_arg=symbols,
                 binance_rest_url=base_url,
