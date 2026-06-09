@@ -19,13 +19,15 @@ export const useMarketData = (
   volumeSeriesRef: RefObject<ISeriesApi<"Candlestick"> | null>,
   symbol: string = 'BTCUSDT',
   interval: string = '1m',
-  volumeByTimeRef?: RefObject<Map<string, number>>,
+  volumeByTimeRef: RefObject<Map<string, number>>,
+  latestCandleRef: RefObject<FormattedCandle | null>,
+  candleHistoryRef: RefObject<FormattedCandle[]>,
   indicatorSeriesRef?: RefObject<IndicatorSeriesConfig[]>,
   indicatorSettings: IndicatorSetting[] = [],
   onIndicatorValuesChange?: (values: IndicatorValue[]) => void,
+  onCandleHistoryChange?: () => void,
   isChartReady: boolean = true
 ) => {
-  const candleHistoryRef = useRef<FormattedCandle[]>([]);
   const indicatorSettingsRef = useRef<IndicatorSetting[]>(indicatorSettings);
   const onIndicatorValuesChangeRef = useRef(onIndicatorValuesChange);
 
@@ -51,7 +53,7 @@ export const useMarketData = (
   useEffect(() => {
     if (!isChartReady || candleHistoryRef.current.length === 0) return;
     syncIndicatorSeries(candleHistoryRef.current);
-  }, [indicatorSettings, isChartReady, syncIndicatorSeries]);
+  }, [indicatorSettings, isChartReady, candleHistoryRef, syncIndicatorSeries]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -69,8 +71,10 @@ export const useMarketData = (
         volumeSeries.setData([]);
         indicatorSeriesRef?.current.forEach(({ series: indicatorSeries }) => indicatorSeries.setData([]));
         candleHistoryRef.current = [];
+        latestCandleRef.current = null;
+        onCandleHistoryChange?.();
         onIndicatorValuesChangeRef.current?.([]);
-        volumeByTimeRef?.current.clear();
+        volumeByTimeRef.current.clear();
         
         const rawCandles = await getHistoricalCandles(symbol, interval, 2000);
 
@@ -116,9 +120,11 @@ export const useMarketData = (
         candlestickSeries.setData(candleData);
         volumeSeries.setData(volumeData);
         candleHistoryRef.current = formattedData;
+        latestCandleRef.current = formattedData.at(-1) ?? null;
+        onCandleHistoryChange?.();
         syncIndicatorSeries(formattedData);
         formattedData.forEach((candle) => {
-          volumeByTimeRef?.current.set(String(candle.time), candle.volume);
+          volumeByTimeRef.current.set(String(candle.time), candle.volume);
         });
         logger.info(`Successfully loaded ${formattedData.length} candles for symbol: ${symbol} [${interval}]`);
 
@@ -164,8 +170,10 @@ export const useMarketData = (
         candleHistoryRef.current = lastCandle?.time === formatted.time
           ? [...candleHistoryRef.current.slice(0, -1), formatted]
           : [...candleHistoryRef.current, formatted];
+        latestCandleRef.current = formatted;
+        onCandleHistoryChange?.();
 
-        volumeByTimeRef?.current.set(String(formatted.time), formatted.volume);
+        volumeByTimeRef.current.set(String(formatted.time), formatted.volume);
         candlestickSeries.update({
           time: formatted.time as Time,
           open: formatted.open,
@@ -211,8 +219,11 @@ export const useMarketData = (
     symbol,
     interval,
     volumeByTimeRef,
+    latestCandleRef,
+    candleHistoryRef,
     indicatorSeriesRef,
     syncIndicatorSeries,
+    onCandleHistoryChange,
     isChartReady,
   ]);
 };

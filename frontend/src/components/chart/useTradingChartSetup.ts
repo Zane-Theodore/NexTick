@@ -1,9 +1,10 @@
 import { useEffect } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { createChart, CandlestickSeries, ColorType, LineSeries } from 'lightweight-charts';
-import type { AutoscaleInfoProvider, CandlestickData, IChartApi, ISeriesApi, LineData, MouseEventParams, Time } from 'lightweight-charts';
+import type { AutoscaleInfoProvider, CandlestickData, IChartApi, ISeriesApi, LineData, LogicalRange, MouseEventParams, Time } from 'lightweight-charts';
 
-import type { ChartPaneLayout, CursorPosition, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData } from '../../types/chart';
+import type { ChartPaneLayout, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData, VisiblePriceExtrema } from '../../types/chart';
+import type { FormattedCandle } from '../../utils/formatters';
 import {
   formatChartValue,
   formatTimeScaleCrosshair,
@@ -26,12 +27,15 @@ interface UseTradingChartSetupParams {
   volumeSeriesRef: RefObject<ISeriesApi<"Candlestick"> | null>;
   indicatorSeriesRef: RefObject<IndicatorSeriesConfig[]>;
   volumeByTimeRef: RefObject<Map<string, number>>;
+  latestCandleRef: RefObject<FormattedCandle | null>;
+  candleHistoryRef: RefObject<FormattedCandle[]>;
   indicatorSettings: IndicatorSetting[];
+  marketDataVersion: number;
   setIsChartReady: Dispatch<SetStateAction<boolean>>;
   setLegendData: Dispatch<SetStateAction<LegendData | null>>;
-  setCursorPosition: Dispatch<SetStateAction<CursorPosition>>;
   setHoverIndicatorValues: Dispatch<SetStateAction<IndicatorValue[] | null>>;
   setPaneLayouts: Dispatch<SetStateAction<ChartPaneLayout[]>>;
+  setVisiblePriceExtrema: Dispatch<SetStateAction<VisiblePriceExtrema | null>>;
 }
 
 export function useTradingChartSetup({
@@ -41,12 +45,15 @@ export function useTradingChartSetup({
   volumeSeriesRef,
   indicatorSeriesRef,
   volumeByTimeRef,
+  latestCandleRef,
+  candleHistoryRef,
   indicatorSettings,
+  marketDataVersion,
   setIsChartReady,
   setLegendData,
-  setCursorPosition,
   setHoverIndicatorValues,
   setPaneLayouts,
+  setVisiblePriceExtrema,
 }: UseTradingChartSetupParams) {
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -121,6 +128,8 @@ export function useTradingChartSetup({
       borderVisible: false,
       wickUpColor: CHART_UP_COLOR,
       wickDownColor: CHART_DOWN_COLOR,
+      priceLineVisible: false,
+      lastValueVisible: true,
     });
 
     const volumeSeries = chart.addSeries(CandlestickSeries, {
@@ -174,12 +183,25 @@ export function useTradingChartSetup({
       setPaneLayouts(getPaneLayouts(chart));
       paneLayoutFrameId = null;
     };
+    const updateVisiblePriceExtrema = () => {
+      if (isDisposed || !chartContainerRef.current) return;
+      setVisiblePriceExtrema(getVisiblePriceExtrema({
+        chart,
+        candlestickSeries,
+        history: candleHistoryRef.current,
+        width: chartContainerRef.current.clientWidth,
+        height: chartContainerRef.current.clientHeight,
+      }));
+    };
     const schedulePaneLayoutUpdate = () => {
       if (isDisposed) return;
       if (paneLayoutFrameId !== null) {
         cancelAnimationFrame(paneLayoutFrameId);
       }
-      paneLayoutFrameId = requestAnimationFrame(updatePaneLayouts);
+      paneLayoutFrameId = requestAnimationFrame(() => {
+        updatePaneLayouts();
+        updateVisiblePriceExtrema();
+      });
     };
     schedulePaneLayoutUpdate();
 
@@ -190,46 +212,34 @@ export function useTradingChartSetup({
     setIsChartReady(true);
 
     const handleCrosshair = (param: MouseEventParams<Time>) => {
-      if (!param.point || param.point.x < 0 || param.point.y < 0 || !param.time || !chartContainerRef.current) {
-        setLegendData(null);
+      if (!param.point || param.point.x < 0 || param.point.y < 0) {
         setHoverIndicatorValues(null);
         return;
       }
 
-      const containerWidth = chartContainerRef.current.clientWidth;
-      const containerHeight = chartContainerRef.current.clientHeight;
+      const candleData = param.time
+        ? param.seriesData.get(candlestickSeries) as (CandlestickData<Time> & { volume?: number }) | undefined
+        : undefined;
 
-      const TOOLTIP_WIDTH = 240;
-      const TOOLTIP_HEIGHT = 210;
-      const OFFSET = 15;
-
-      let finalX = param.point.x + OFFSET;
-      let finalY = param.point.y + OFFSET;
-
-      if (finalX + TOOLTIP_WIDTH > containerWidth) {
-        finalX = param.point.x - TOOLTIP_WIDTH - OFFSET;
-      }
-
-      if (finalY + TOOLTIP_HEIGHT > containerHeight) {
-        finalY = param.point.y - TOOLTIP_HEIGHT - OFFSET;
-      }
-
-      setCursorPosition({
-        x: Math.max(0, finalX),
-        y: Math.max(0, finalY),
-      });
-
-      const candleData = param.seriesData.get(candlestickSeries) as (CandlestickData<Time> & { volume?: number }) | undefined;
       if (candleData && candleData.open !== undefined) {
-        const volume = volumeByTimeRef.current.get(String(param.time)) ?? Number(candleData.volume ?? 0);
+        const volume = volumeByTimeRef.current.get(String(candleData.time)) ?? Number(candleData.volume ?? 0);
 
         setLegendData({
-          time: param.time,
+          time: candleData.time,
           open: candleData.open,
           high: candleData.high,
           low: candleData.low,
           close: candleData.close,
           volume,
+        });
+      } else if (latestCandleRef.current) {
+        setLegendData({
+          time: latestCandleRef.current.time,
+          open: latestCandleRef.current.open,
+          high: latestCandleRef.current.high,
+          low: latestCandleRef.current.low,
+          close: latestCandleRef.current.close,
+          volume: latestCandleRef.current.volume,
         });
       }
 
@@ -265,6 +275,9 @@ export function useTradingChartSetup({
     });
     resizeObserver.observe(chartContainerRef.current);
 
+    const handleVisibleLogicalRangeChange = () => updateVisiblePriceExtrema();
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
+
     const handlePaneResizeEnd = schedulePaneLayoutUpdate;
     window.addEventListener('mouseup', handlePaneResizeEnd);
     window.addEventListener('pointerup', handlePaneResizeEnd);
@@ -275,11 +288,13 @@ export function useTradingChartSetup({
         cancelAnimationFrame(paneLayoutFrameId);
       }
       chart.unsubscribeCrosshairMove(handleCrosshair);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       resizeObserver.disconnect();
       window.removeEventListener('mouseup', handlePaneResizeEnd);
       window.removeEventListener('pointerup', handlePaneResizeEnd);
       setIsChartReady(false);
       setPaneLayouts([]);
+      setVisiblePriceExtrema(null);
       chartInstanceRef.current = null;
       candlestickSeriesRef.current = null;
       volumeSeriesRef.current = null;
@@ -290,14 +305,42 @@ export function useTradingChartSetup({
     candlestickSeriesRef,
     chartContainerRef,
     chartInstanceRef,
+    candleHistoryRef,
     indicatorSeriesRef,
-    setCursorPosition,
+    latestCandleRef,
     setHoverIndicatorValues,
     setIsChartReady,
     setLegendData,
     setPaneLayouts,
+    setVisiblePriceExtrema,
     volumeByTimeRef,
     volumeSeriesRef,
+  ]);
+
+  useEffect(() => {
+    const chart = chartInstanceRef.current;
+    const candlestickSeries = candlestickSeriesRef.current;
+    const chartContainer = chartContainerRef.current;
+
+    if (!chart || !candlestickSeries || !chartContainer) {
+      setVisiblePriceExtrema(null);
+      return;
+    }
+
+    setVisiblePriceExtrema(getVisiblePriceExtrema({
+      chart,
+      candlestickSeries,
+      history: candleHistoryRef.current,
+      width: chartContainer.clientWidth,
+      height: chartContainer.clientHeight,
+    }));
+  }, [
+    candlestickSeriesRef,
+    candleHistoryRef,
+    chartContainerRef,
+    chartInstanceRef,
+    marketDataVersion,
+    setVisiblePriceExtrema,
   ]);
 
   useEffect(() => {
@@ -433,4 +476,78 @@ function getPaneLayouts(chart: IChartApi): ChartPaneLayout[] {
     top += height;
     return layout;
   });
+}
+
+function getVisiblePriceExtrema({
+  chart,
+  candlestickSeries,
+  history,
+  width,
+  height,
+}: {
+  chart: IChartApi;
+  candlestickSeries: ISeriesApi<"Candlestick">;
+  history: FormattedCandle[];
+  width: number;
+  height: number;
+}): VisiblePriceExtrema | null {
+  if (history.length === 0 || width <= 0 || height <= 0) return null;
+
+  const visibleRange = chart.timeScale().getVisibleLogicalRange();
+  if (!visibleRange) return null;
+
+  const visibleCandles = getVisibleCandles(history, visibleRange);
+  if (visibleCandles.length === 0) return null;
+
+  const highCandle = visibleCandles.reduce((currentHigh, candle) => (
+    candle.high > currentHigh.high ? candle : currentHigh
+  ), visibleCandles[0]);
+  const lowCandle = visibleCandles.reduce((currentLow, candle) => (
+    candle.low < currentLow.low ? candle : currentLow
+  ), visibleCandles[0]);
+  const highCoordinate = getExtremeCoordinates(chart, candlestickSeries, highCandle, highCandle.high, width);
+  const lowCoordinate = getExtremeCoordinates(chart, candlestickSeries, lowCandle, lowCandle.low, width);
+
+  if (!highCoordinate || !lowCoordinate) return null;
+
+  return {
+    high: {
+      value: highCandle.high,
+      x: highCoordinate.x,
+      y: highCoordinate.y,
+    },
+    low: {
+      value: lowCandle.low,
+      x: lowCoordinate.x,
+      y: lowCoordinate.y,
+    },
+    width,
+    height,
+  };
+}
+
+function getVisibleCandles(history: FormattedCandle[], visibleRange: LogicalRange): FormattedCandle[] {
+  const start = Math.max(0, Math.floor(visibleRange.from));
+  const end = Math.min(history.length - 1, Math.ceil(visibleRange.to));
+
+  if (end < start) return [];
+  return history.slice(start, end + 1);
+}
+
+function getExtremeCoordinates(
+  chart: IChartApi,
+  candlestickSeries: ISeriesApi<"Candlestick">,
+  candle: FormattedCandle,
+  price: number,
+  width: number,
+) {
+  const x = chart.timeScale().timeToCoordinate(candle.time as Time);
+  const y = candlestickSeries.priceToCoordinate(price);
+
+  if (x === null || y === null) return null;
+
+  return {
+    x: Math.min(width, Math.max(0, x)),
+    y,
+  };
 }

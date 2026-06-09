@@ -78,3 +78,16 @@ export interface ChartPaneLayout {
   top: number;
   height: number;
 }
+
+export interface VisiblePriceExtreme {
+  value: number;
+  x: number;
+  y: number;
+}
+
+export interface VisiblePriceExtrema {
+  high: VisiblePriceExtreme;
+  low: VisiblePriceExtreme;
+  width: number;
+  height: number;
+}

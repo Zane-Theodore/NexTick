@@ -178,7 +178,7 @@ function PaneIndicatorLegend({
   return (
     <div
       className="absolute left-0 z-10 flex max-w-[calc(100%-56px)] items-start"
-      style={{ top: paneLayout.top + 6 }}
+      style={{ top: getPaneLegendTop(paneLayout) }}
     >
       <button
         type="button"
@@ -985,6 +985,10 @@ function getPaneLegendLayout(paneLayouts: ChartPaneLayout[], paneIndex: number):
     top: 0,
     height: 120,
   };
+}
+
+function getPaneLegendTop(paneLayout: ChartPaneLayout): number {
+  return paneLayout.top + (paneLayout.index === 0 ? 34 : 6);
 }
 
 function supportsIndicatorSlots(group: IndicatorGroup | null): group is SlotIndicatorGroup {
