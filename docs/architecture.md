@@ -194,8 +194,10 @@ Docker startup, `data-producer` runs first so raw trades are buffered in Kafka,
 current minute floor, so only the open in-progress minute is excluded. The
 backfill service writes a shared watermark file; while draining the Kafka
 backlog, the processor skips final `1m` DB upserts before that watermark so
-partial replay candles cannot overwrite the canonical REST rows. The live table
-is WAL/dedup with `UPSERT KEYS(timestamp, symbol, interval)`.
+partial replay candles cannot overwrite the canonical REST rows. The optional
+`data-recent-reconcile` maintenance profile runs `data_pipeline.backfill.recent_runner`
+for periodic closed-tail repair when explicitly enabled. The live table is
+WAL/dedup with `UPSERT KEYS(timestamp, symbol, interval)`.
 
 ## Backend Layer
 
@@ -277,9 +279,13 @@ Key files:
 | `src/services/api.ts` | Calls `GET {VITE_API_URL}/candles`. |
 | `src/services/socket.ts` | Creates Socket.IO client and room helpers. |
 | `src/hooks/useMarketData.ts` | Loads history, joins/leaves rooms, applies realtime candles, and syncs indicators. |
-| `src/components/chart/TradingChart.tsx` | Owns chart refs, selected market, indicators, and chart UI state. |
-| `src/components/chart/IndicatorLegend.tsx` | Displays indicator values and settings window. |
-| `src/components/layout/Footer.tsx` | Checks `VITE_API_HEALTH_URL` and displays `Checking...`, `Online`, or `Offline`. |
+| `src/components/chart/TradingChart.tsx` | Composes chart controls, chart container, overlays, and indicator legend. |
+| `src/components/chart/useTradingChartState.ts` | Owns chart refs, selected market, indicator settings, and chart UI state. |
+| `src/components/chart/useTradingChartSetup.ts` | Creates Lightweight Charts series, crosshair behavior, pane layout tracking, and visible high/low overlay data. |
+| `src/components/indicators/IndicatorLegend.tsx` | Displays indicator values and settings window. |
+| `src/components/indicators/indicatorSettingsModel.ts` | Indicator settings tabs, slot defaults, pane placement helpers, and settings-window positioning. |
+| `src/utils/chartIndicators.ts` | Maps indicator settings and series configs to calculated chart values. |
+| `src/components/layout/useApiHealthStatus.ts` | Checks `VITE_API_HEALTH_URL` and returns API status for the footer. |
 
 Chart update rules:
 

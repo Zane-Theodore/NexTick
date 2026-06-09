@@ -8,7 +8,7 @@ The repository has no root `package.json`. Run backend and frontend commands ins
 
 | Tool | Required for |
 | --- | --- |
-| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, and `data-processor`. |
+| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, `data-processor`, and optional maintenance services. |
 | Node.js and npm | NestJS backend and Vite frontend. |
 | Python 3.10+ | Manual data pipeline runs without pipeline containers. |
 | PowerShell, Git Bash, or another shell | Copying env files and running commands. |
@@ -49,11 +49,18 @@ QUESTDB_DB_NAME=qdb
 KAFKA_BROKER=localhost:9092
 KAFKA_TOPIC_RAW_TRADES=raw-trades
 KAFKA_TOPIC_KLINE_STREAM=kline-stream
+KAFKA_CONSUMER_GROUP_ID=candle-processor-group
+KAFKA_AUTO_OFFSET_RESET=earliest
 
 BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 CANDLE_UPDATE_INTERVAL_MS=500
+
+STARTUP_RECONCILE_ENABLED=true
+STARTUP_RECONCILE_REQUIRED=true
+STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
+RECENT_RECONCILE_ENABLED=false
 ```
 
 Docker Compose overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb` inside pipeline containers.
@@ -95,7 +102,7 @@ VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ```
 
-`VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS` are read directly with `.split(',')`, so leaving them empty or undefined can break chart startup.
+`VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS` should be filled so frontend options match the pipeline and backend. If either value is missing or blank, the frontend falls back to `BTCUSDT` and `1m`.
 
 ## 3. Start Docker Services
 
@@ -188,7 +195,7 @@ The frontend:
 
 1. Reads symbols from `VITE_TRADING_SYMBOLS`.
 2. Reads intervals from `VITE_CANDLE_INTERVALS`.
-3. Calls `GET {VITE_API_URL}/candles?symbol=...&interval=...&limit=1000`.
+3. Calls `GET {VITE_API_URL}/candles?symbol=...&interval=...&limit=2000`.
 4. Draws history with `setData()`.
 5. Joins Socket.IO room `{SYMBOL}_{interval}`.
 6. Applies `kline_update` with `update()` for candles and volume.
@@ -338,6 +345,18 @@ If a previous reconcile failed after dropping `market_candles`, run the same
 command again. The script restores `market_candles` from the newest
 `market_candles_old_*` backup before continuing.
 
+For periodic recent closed-candle repair, Docker Compose includes the optional
+`data-recent-reconcile` service behind the `maintenance` profile. It runs
+`data_pipeline.backfill.recent_runner` and is disabled by default through
+`RECENT_RECONCILE_ENABLED=false`.
+
+```bash
+docker compose --profile maintenance up -d data-recent-reconcile
+```
+
+Enable it by setting `RECENT_RECONCILE_ENABLED=true` and tuning the recent
+reconcile variables in `data_pipeline/.env`.
+
 ## Troubleshooting
 
 | Problem | Likely cause | Fix |
@@ -354,7 +373,7 @@ command again. The script restores `market_candles` from the newest
 | `market_candles` is missing after reconciliation | A previous manual full repair failed after dropping the live table | Stop `data-processor`, then run `python -m data_pipeline.backfill.reconciler` to restore from the newest `market_candles_old_*` backup. |
 | Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs; Compose sets DNS to `8.8.8.8` and `8.8.4.4`. |
 | Interval returns 400 | Interval is not in backend `VALID_INTERVALS` | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
-| Chart fails during startup | `VITE_TRADING_SYMBOLS` or `VITE_CANDLE_INTERVALS` is blank or undefined | Fill both frontend env values and restart Vite. |
+| Chart only shows fallback market options | `VITE_TRADING_SYMBOLS` or `VITE_CANDLE_INTERVALS` is blank or undefined | Fill both frontend env values and restart Vite. |
 
 ## Stop Local Services
 

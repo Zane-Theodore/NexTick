@@ -15,7 +15,7 @@ NexTick is not a trading bot and does not provide financial, investment, tax, or
 | Storage | QuestDB stores final `1m` candles in `market_candles`; larger historical intervals are aggregated at read time. |
 | Backend | NestJS validates REST and Socket.IO payloads, reads QuestDB, consumes Kafka kline updates, and fans out room updates. |
 | Frontend | React + Lightweight Charts loads history, joins Socket.IO rooms, and renders candles, volume, tooltip data, and indicators. |
-| Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, and `data-processor`. |
+| Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, `data-processor`, and an optional maintenance `data-recent-reconcile` profile. |
 
 Kafka is the service boundary between the Python pipeline and the backend. QuestDB is the time-series contract for historical candle reads.
 
@@ -97,10 +97,16 @@ QUESTDB_DB_NAME=qdb
 KAFKA_BROKER=localhost:9092
 KAFKA_TOPIC_RAW_TRADES=raw-trades
 KAFKA_TOPIC_KLINE_STREAM=kline-stream
+KAFKA_CONSUMER_GROUP_ID=candle-processor-group
+KAFKA_AUTO_OFFSET_RESET=earliest
 BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 CANDLE_UPDATE_INTERVAL_MS=500
+STARTUP_RECONCILE_ENABLED=true
+STARTUP_RECONCILE_REQUIRED=true
+STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
+RECENT_RECONCILE_ENABLED=false
 ```
 
 ```env
@@ -205,6 +211,10 @@ NexTick/
 |-- frontend/
 |   |-- src/
 |   |   |-- components/
+|   |   |   |-- chart/
+|   |   |   |-- indicators/
+|   |   |   |-- layout/
+|   |   |   `-- legal/
 |   |   |-- hooks/
 |   |   |-- pages/
 |   |   |-- services/
@@ -224,7 +234,7 @@ NexTick/
 | --- | --- |
 | `data_pipeline/` | Binance combined trade stream ingestion, raw trade Kafka publishing, multi-interval candle aggregation, final `1m` QuestDB writes, kline Kafka publishing, retry/backoff handling. |
 | `backend/` | `GET /`, `GET /health`, `GET /candles`, Swagger at `/api/docs`, Kafka kline consumer, Socket.IO `join_kline_room`, `leave_kline_room`, and `kline_update`. |
-| `frontend/` | Realtime candlestick and volume chart, symbol/interval controls, OHLCV tooltip, scroll-to-latest, EMA/MA/volume-MA/RSI/MACD indicators, `/terms`, `/privacy`, and footer API status. |
+| `frontend/` | Realtime candlestick and volume chart, symbol/interval controls, OHLCV tooltip, visible high/low overlay, scroll-to-latest, EMA/MA/volume-MA/RSI/MACD indicators, `/terms`, `/privacy`, and footer API status. |
 
 ## Commands
 

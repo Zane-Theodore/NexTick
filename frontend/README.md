@@ -27,17 +27,22 @@ frontend/src/
 |-- components/
 |   |-- chart/
 |   |   |-- ChartFilterBar.tsx
-|   |   |-- IndicatorEyeIcon.tsx
-|   |   |-- IndicatorLegend.tsx
 |   |   |-- OhlcvTooltip.tsx
 |   |   |-- ScrollToLatestButton.tsx
 |   |   |-- TradingChart.tsx
+|   |   |-- VisibleExtremaOverlay.tsx
 |   |   |-- chartConstants.ts
-|   |   `-- useTradingChartSetup.ts
+|   |   |-- useTradingChartSetup.ts
+|   |   `-- useTradingChartState.ts
+|   |-- indicators/
+|   |   |-- IndicatorEyeIcon.tsx
+|   |   |-- IndicatorLegend.tsx
+|   |   `-- indicatorSettingsModel.ts
 |   |-- layout/
 |   |   |-- Footer.tsx
 |   |   |-- Header.tsx
-|   |   `-- MainLayout.tsx
+|   |   |-- MainLayout.tsx
+|   |   `-- useApiHealthStatus.ts
 |   `-- legal/
 |       `-- LegalPageLayout.tsx
 |-- hooks/
@@ -51,6 +56,7 @@ frontend/src/
 |-- types/
 |   `-- chart.ts
 `-- utils/
+    |-- chartIndicators.ts
     |-- formatters.ts
     |-- indicators.ts
     `-- logger.ts
@@ -99,8 +105,8 @@ These names match `frontend/.env.example` and current frontend code. The example
 | `VITE_API_URL` | Yes | `http://localhost:3000` | `src/services/api.ts`, for `GET /candles`. |
 | `VITE_API_HEALTH_URL` | Yes | `http://localhost:3000/health` | Footer API status check. |
 | `VITE_SOCKET_URL` | Yes | `http://localhost:3000` | Socket.IO client URL. |
-| `VITE_TRADING_SYMBOLS` | Yes | `BTCUSDT,ETHUSDT` | `chartConstants.ts`, split into chart symbol options. |
-| `VITE_CANDLE_INTERVALS` | Yes | `1m,3m,5m,15m,30m,1h` | `chartConstants.ts`, split into chart interval options. |
+| `VITE_TRADING_SYMBOLS` | Recommended | `BTCUSDT,ETHUSDT` | `chartConstants.ts`, parsed into chart symbol options. Falls back to `BTCUSDT` when unset or blank. |
+| `VITE_CANDLE_INTERVALS` | Recommended | `1m,3m,5m,15m,30m,1h` | `chartConstants.ts`, parsed into chart interval options. Falls back to `1m` when unset or blank. |
 
 Example:
 
@@ -112,7 +118,7 @@ VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ```
 
-`VITE_TRADING_SYMBOLS` and `VITE_CANDLE_INTERVALS` are read with direct `.split(',')` calls. Do not leave them blank or undefined.
+Keep `VITE_API_URL`, `VITE_API_HEALTH_URL`, and `VITE_SOCKET_URL` filled for the full app experience. The chart can fall back to `BTCUSDT` and `1m` if symbol or interval lists are missing, but explicit values are preferred so frontend options match the pipeline/backend configuration.
 
 ## Data Flow
 
@@ -124,7 +130,7 @@ sequenceDiagram
   participant Socket as Socket.IO
 
   UI->>Hook: selected symbol and interval
-  Hook->>API: GET /candles?symbol=BTCUSDT&interval=1m&limit=1000
+  Hook->>API: GET /candles?symbol=BTCUSDT&interval=1m&limit=2000
   API-->>Hook: historical candles
   Hook->>UI: candlestickSeries.setData(history)
   Hook->>UI: volumeSeries.setData(history)
@@ -151,7 +157,7 @@ Query parameters:
 | --- | --- |
 | `symbol` | Selected chart symbol. |
 | `interval` | Selected chart interval. |
-| `limit` | `1000`. |
+| `limit` | `2000`. |
 
 Expected response:
 
@@ -213,12 +219,13 @@ The frontend uses Lightweight Charts imperatively from React lifecycle hooks.
 | Realtime candle | `candlestickSeries.update()` and `volumeSeries.update()` | `useMarketData.ts` |
 | Realtime indicators | Recalculate visible indicator history and call indicator `setData()` | `useMarketData.ts` |
 | Cursor tooltip | Crosshair data updates `OhlcvTooltip` and hovered indicator values | `useTradingChartSetup.ts` |
+| Visible high/low labels | Visible logical range is scanned and labels are overlaid | `useTradingChartSetup.ts`, `VisibleExtremaOverlay.tsx` |
 
 Realtime candle and volume updates should not call `setData()` for every tick. Indicator series are recalculated from the maintained candle history because EMA, MA, volume-MA, RSI, and MACD depend on historical context.
 
 ## Indicators
 
-Default indicator settings live in `components/chart/chartConstants.ts`.
+Default indicator settings live in `components/chart/chartConstants.ts`. Indicator UI and settings model live in `components/indicators/`; calculation helpers live in `utils/indicators.ts` and `utils/chartIndicators.ts`.
 
 | Indicator group | Default state | Notes |
 | --- | --- | --- |
