@@ -3,6 +3,7 @@ import { DatabaseService } from '../database/database.service';
 import { CandleDto } from './dto/candle.dto';
 import { VALID_INTERVALS } from './enum/candle-interval.enum';
 import { AppLogger } from '../../common/logger';
+import { RecentCandlesCacheService } from './recent-candles-cache.service';
 
 type HistoricalCandleRow = {
   timestamp: string | Date;
@@ -40,7 +41,10 @@ export class CandlesService {
     '1M': 30 * 24 * 60 * 60_000,
   };
 
-  constructor(private readonly databaseService: DatabaseService) {}
+  constructor(
+    private readonly databaseService: DatabaseService,
+    private readonly recentCandlesCache: RecentCandlesCacheService,
+  ) {}
 
   private normalizeQuestDbTimestamp(value: string | Date): string {
     if (value instanceof Date) {
@@ -63,7 +67,10 @@ export class CandlesService {
   }
 
   private toQuestDbTimestamp(value: Date): string {
-    return value.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '');
+    return value
+      .toISOString()
+      .replace('T', ' ')
+      .replace(/\.\d{3}Z$/, '');
   }
 
   async getHistoricalCandles(
@@ -86,10 +93,7 @@ export class CandlesService {
 
       const safeSymbol = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
       const stepMs = this.intervalMs[interval];
-      const requestedWindowMs = Math.max(
-        stepMs * limit * 2,
-        24 * 60 * 60_000,
-      );
+      const requestedWindowMs = Math.max(stepMs * limit * 2, 24 * 60 * 60_000);
       const endTime = new Date();
       const startTime = new Date(endTime.getTime() - requestedWindowMs);
       const startTimestamp = this.toQuestDbTimestamp(startTime);
@@ -184,23 +188,33 @@ export class CandlesService {
                 candle.high >= candle.low;
 
               if (!isValid) {
-                this.logger.warning('Invalid OHLC candle filtered from history response', {
-                  symbol: safeSymbol,
-                  interval,
-                  candle,
-                });
+                this.logger.warning(
+                  'Invalid OHLC candle filtered from history response',
+                  {
+                    symbol: safeSymbol,
+                    interval,
+                    candle,
+                  },
+                );
               }
 
               return isValid;
             })
         : [];
 
-      this.detectHistoryGaps(candles, safeSymbol, interval);
+      const candlesWithRealtimeTail = this.recentCandlesCache.mergeWithHistory(
+        candles,
+        safeSymbol,
+        interval,
+        limit,
+      );
+
+      this.detectHistoryGaps(candlesWithRealtimeTail, safeSymbol, interval);
 
       this.logger.info(
-        `Successfully aggregated ${candles.length} [${interval}] candles for ${symbol}`,
+        `Successfully aggregated ${candlesWithRealtimeTail.length} [${interval}] candles for ${symbol}`,
       );
-      return candles;
+      return candlesWithRealtimeTail;
     } catch (error) {
       this.logger.failure('Failed to fetch historical candles', error, {
         symbol,
@@ -262,5 +276,4 @@ export class CandlesService {
       });
     }
   }
-
 }
