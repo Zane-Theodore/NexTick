@@ -9,3 +9,14 @@ html, body {
 ::-webkit-scrollbar-track { background: #0f1117; }
 ::-webkit-scrollbar-thumb { background: #3f4654; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #5b6472; }
+
+.nextick-chart tr:nth-of-type(2) > td[colspan="3"] > div:last-child {
+  background: linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 3px,
+    #3f4654 3px,
+    #3f4654 6px,
+    transparent 6px
+  ) !important;
+}

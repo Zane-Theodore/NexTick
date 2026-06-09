@@ -33,8 +33,8 @@ export const CHART_DEFAULT_BAR_SPACING = 12;
 export const CHART_MIN_BAR_SPACING = 10;
 export const CHART_MAX_BAR_SPACING = 80;
 
-export const SUPPORTED_SYMBOLS = import.meta.env.VITE_TRADING_SYMBOLS.split(',').map((symbol: string) => symbol.trim());
-export const SUPPORTED_INTERVALS = import.meta.env.VITE_CANDLE_INTERVALS.split(',').map((interval: string) => interval.trim());
+export const SUPPORTED_SYMBOLS = parseEnvList(import.meta.env.VITE_TRADING_SYMBOLS, ['BTCUSDT']);
+export const SUPPORTED_INTERVALS = parseEnvList(import.meta.env.VITE_CANDLE_INTERVALS, ['1m']);
 
 const INTERVAL_UNITS: Record<string, string> = {
   m: 'minute',
@@ -61,3 +61,12 @@ export const formatIntervalLabel = (interval: string): string => {
 
   return `${value} ${unit}${value === 1 ? '' : 's'}`;
 };
+
+function parseEnvList(value: string | undefined, fallback: string[]): string[] {
+  const items = value
+    ?.split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return items && items.length > 0 ? items : fallback;
+}

@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 import { formatCandle } from '../utils/formatters';
 import type { FormattedCandle } from '../utils/formatters';
-import { calculateEMAHistory, calculateMACDHistory, calculateMAHistory, calculateRSIHistory, calculateVolumeMAHistory } from '../utils/indicators';
+import { getIndicatorData, getIndicatorValues } from '../utils/chartIndicators';
 import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/socket';
 import type { KlineUpdate } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
 import { Logger } from '../utils/logger';
-import type { ISeriesApi, IChartApi, CandlestickData, LineData, Time } from 'lightweight-charts';
+import type { ISeriesApi, IChartApi, CandlestickData, Time } from 'lightweight-charts';
 import type { IndicatorSeriesConfig, IndicatorSetting, IndicatorValue } from '../types/chart';
 import { CHART_DOWN_COLOR, CHART_UP_COLOR } from '../components/chart/chartConstants';
 
@@ -41,7 +41,7 @@ export const useMarketData = (
 
   const syncIndicatorSeries = useCallback((history: FormattedCandle[]) => {
     indicatorSeriesRef?.current.forEach((config) => {
-      const indicatorData = getIndicatorData(config, history) as LineData<Time>[];
+      const indicatorData = getIndicatorData(config, history);
       config.series.setData(indicatorData);
     });
 
@@ -227,122 +227,3 @@ export const useMarketData = (
     isChartReady,
   ]);
 };
-
-function getIndicatorData(config: IndicatorSeriesConfig, history: FormattedCandle[]): LineData<Time>[] {
-  if (history.length === 0) return [];
-  if (config.period !== undefined && config.period <= 0) return [];
-  const sourceHistory = getSourceHistory(history, config.source ?? 'close');
-
-  switch (config.kind) {
-    case 'ema':
-      return calculateEMAHistory(sourceHistory, config.period ?? 1) as LineData<Time>[];
-    case 'ma':
-      return calculateMAHistory(sourceHistory, config.period ?? 1) as LineData<Time>[];
-    case 'volume-ma':
-      return calculateVolumeMAHistory(history, config.period ?? 1) as LineData<Time>[];
-    case 'rsi':
-      return calculateRSIHistory(sourceHistory, config.period ?? 14) as LineData<Time>[];
-    case 'macd': {
-      const macd = calculateMACDHistory(
-        sourceHistory,
-        config.fastPeriod ?? 12,
-        config.slowPeriod ?? 26,
-        config.signalPeriod ?? 9,
-      );
-      return macd.macd as LineData<Time>[];
-    }
-    case 'macd-signal': {
-      const macd = calculateMACDHistory(
-        sourceHistory,
-        config.fastPeriod ?? 12,
-        config.slowPeriod ?? 26,
-        config.signalPeriod ?? 9,
-      );
-      return macd.signal as LineData<Time>[];
-    }
-    default:
-      return [];
-  }
-}
-
-function getIndicatorValues(settings: IndicatorSetting[], history: FormattedCandle[]): IndicatorValue[] {
-  if (history.length === 0) return [];
-
-  return settings.reduce<IndicatorValue[]>((values, setting) => {
-    if (!setting.visible) return values;
-
-    if (setting.group === 'macd') {
-      const macd = calculateMACDHistory(
-        getSourceHistory(history, setting.source),
-        setting.fastPeriod,
-        setting.slowPeriod,
-        setting.signalPeriod,
-      );
-      const macdPoint = macd.macd.at(-1);
-      const signalPoint = macd.signal.at(-1);
-
-      if (macdPoint) {
-        values.push({
-          id: `${setting.id}-macd`,
-          group: setting.group,
-          kind: 'macd',
-          label: setting.label,
-          value: macdPoint.value,
-          color: setting.macdColor,
-        });
-      }
-
-      if (signalPoint) {
-        values.push({
-          id: `${setting.id}-signal`,
-          group: setting.group,
-          kind: 'macd-signal',
-          label: `${setting.label} Signal`,
-          value: signalPoint.value,
-          color: setting.signalColor,
-        });
-      }
-
-      return values;
-    }
-
-    const config: Omit<IndicatorSeriesConfig, 'series' | 'paneIndex'> = {
-      id: setting.id,
-      group: setting.group,
-      kind: setting.group,
-      label: setting.label,
-      period: setting.period,
-      source: setting.source,
-      lineWidth: setting.lineWidth,
-      color: setting.color,
-    };
-    const indicatorData = getIndicatorData(config as IndicatorSeriesConfig, history);
-    const lastPoint = indicatorData.at(-1);
-
-    if (lastPoint) {
-      values.push({
-        id: setting.id,
-        group: setting.group,
-        kind: setting.group,
-        label: setting.label,
-        period: setting.period,
-        value: lastPoint.value,
-        color: setting.color,
-      });
-    }
-
-    return values;
-  }, []);
-}
-
-function getSourceHistory(
-  history: FormattedCandle[],
-  source: NonNullable<IndicatorSeriesConfig['source']>,
-) {
-  if (source === 'close') return history;
-
-  return history.map((candle) => ({
-    ...candle,
-    close: candle[source],
-  }));
-}

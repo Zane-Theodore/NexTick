@@ -2,6 +2,8 @@ import { io } from 'socket.io-client';
 import type { MarketCandle } from '../utils/formatters';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL;
+const roomSubscriptions = new Map<string, number>();
+
 export const socket = io(SOCKET_URL, {
   transports: ['websocket', 'polling'],
   withCredentials: true,
@@ -12,29 +14,33 @@ export const socket = io(SOCKET_URL, {
   reconnectionAttempts: 5,
 });
 
-/**
- * Join a room to receive real-time kline updates for a specific symbol and interval
- * @param symbol Trading symbol (e.g., 'BTCUSDT')
- * @param interval Candle interval (e.g., '1m', '5m', '1h')
- */
+const getRoomKey = (symbol: string, interval: string) => `${symbol.toUpperCase()}_${interval}`;
+
 export const joinKlineRoom = (symbol: string, interval: string) => {
+  const roomKey = getRoomKey(symbol, interval);
+  const currentCount = roomSubscriptions.get(roomKey) ?? 0;
+
+  roomSubscriptions.set(roomKey, currentCount + 1);
+  if (currentCount > 0) return;
+
   socket.emit('join_kline_room', { symbol, interval });
 };
 
-/**
- * Leave a room to stop receiving real-time kline updates for a specific symbol and interval
- * @param symbol Trading symbol (e.g., 'BTCUSDT')
- * @param interval Candle interval (e.g., '1m', '5m', '1h')
- */
 export const leaveKlineRoom = (symbol: string, interval: string) => {
+  const roomKey = getRoomKey(symbol, interval);
+  const currentCount = roomSubscriptions.get(roomKey) ?? 0;
+
+  if (currentCount <= 0) return;
+
+  if (currentCount > 1) {
+    roomSubscriptions.set(roomKey, currentCount - 1);
+    return;
+  }
+
+  roomSubscriptions.delete(roomKey);
   socket.emit('leave_kline_room', { symbol, interval });
 };
 
-/**
- * Subscribe to real-time candle updates via Room Pattern
- * Must call joinKlineRoom() before using this
- * @param callback Function to call when candle updates are received
- */
 export type KlineUpdate = MarketCandle & {
   is_final: boolean;
 };

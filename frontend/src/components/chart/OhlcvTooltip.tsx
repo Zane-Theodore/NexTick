@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { formatChartValue, formatOhlcvLegendTime } from '../../utils/formatters';
 import type { LegendData } from '../../types/chart';
+import { CHART_DOWN_COLOR, CHART_UP_COLOR } from './chartConstants';
 
 interface OhlcvTooltipProps {
   legendData: LegendData;
@@ -9,12 +10,12 @@ interface OhlcvTooltipProps {
 
 export default function OhlcvTooltip({ legendData }: OhlcvTooltipProps) {
   const [isOpen, setIsOpen] = useState(true);
-  const candleColor = legendData.close >= legendData.open ? '#26a69a' : '#ef5350';
+  const candleColor = legendData.close >= legendData.open ? CHART_UP_COLOR : CHART_DOWN_COLOR;
   const changePercent = calculatePercent(legendData.close - legendData.open, legendData.open);
   const rangePercent = calculatePercent(legendData.high - legendData.low, legendData.open);
 
   return (
-    <div className="pointer-events-none absolute left-0 top-1 z-20 flex max-w-[calc(100%-56px)] items-start overflow-hidden">
+    <div className="pointer-events-none absolute left-0 top-1 z-20 flex max-w-[calc(100%-56px)] items-start">
       <button
         type="button"
         onClick={() => setIsOpen((current) => !current)}
@@ -26,11 +27,13 @@ export default function OhlcvTooltip({ legendData }: OhlcvTooltipProps) {
 
       <div
         className={`overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-out ${
-          isOpen ? 'max-w-[min(1100px,calc(100vw-72px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-2'
+          isOpen ? 'max-w-[min(1100px,calc(100vw-72px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-3'
         }`}
       >
-        <div className="flex min-h-7 flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-xs leading-6 text-[#9099aa] sm:text-sm">
-          <span className="whitespace-nowrap">{formatOhlcvLegendTime(legendData.time)}</span>
+        <div className="flex min-h-7 flex-nowrap items-center gap-x-2 overflow-hidden font-mono text-xs font-medium leading-6 text-[#d1d4dc] whitespace-nowrap sm:text-sm">
+          <span className="whitespace-nowrap font-semibold" style={{ color: candleColor }}>
+            {formatOhlcvLegendTime(legendData.time)}
+          </span>
           <OhlcvLegendValue label="Open" value={formatChartValue(legendData.open)} color={candleColor} />
           <OhlcvLegendValue label="High" value={formatChartValue(legendData.high)} color={candleColor} />
           <OhlcvLegendValue label="Low" value={formatChartValue(legendData.low)} color={candleColor} />
@@ -71,8 +74,8 @@ function OhlcvLegendValue({
 }) {
   return (
     <span className="inline-flex whitespace-nowrap">
-      <span>{label}</span>
-      <span className="ml-1" style={{ color }}>{value}</span>
+      <span className="text-[#d1d4dc]">{label}</span>
+      <span className="ml-1 font-semibold" style={{ color }}>{value}</span>
     </span>
   );
 }

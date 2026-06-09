@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { createChart, CandlestickSeries, ColorType, LineSeries } from 'lightweight-charts';
 import type { AutoscaleInfoProvider, CandlestickData, IChartApi, ISeriesApi, LineData, LogicalRange, MouseEventParams, Time } from 'lightweight-charts';
@@ -55,6 +55,10 @@ export function useTradingChartSetup({
   setPaneLayouts,
   setVisiblePriceExtrema,
 }: UseTradingChartSetupParams) {
+  const lastViewedLegendDataRef = useRef<LegendData | null>(null);
+  const isPointerInsideChartRef = useRef(false);
+  const isLegendLockedToHoveredCandleRef = useRef(false);
+
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
@@ -99,7 +103,7 @@ export function useTradingChartSetup({
         borderColor: '#6b7280',
         scaleMargins: {
           top: 0.1,
-          bottom: 0.08,
+          bottom: 0.14,
         },
       },
       grid: {
@@ -155,7 +159,7 @@ export function useTradingChartSetup({
             maxValue: Math.max(autoscaleInfo.priceRange.maxValue, 1),
           },
           margins: {
-            above: 0,
+            above: 0.14,
             below: 0,
           },
         };
@@ -168,7 +172,7 @@ export function useTradingChartSetup({
       borderVisible: true,
       borderColor: '#6b7280',
       scaleMargins: {
-        top: 0.1,
+        top: 0.14,
         bottom: 0,
       },
     });
@@ -213,35 +217,21 @@ export function useTradingChartSetup({
 
     const handleCrosshair = (param: MouseEventParams<Time>) => {
       if (!param.point || param.point.x < 0 || param.point.y < 0) {
+        isPointerInsideChartRef.current = false;
+        isLegendLockedToHoveredCandleRef.current = false;
         setHoverIndicatorValues(null);
+        const latestLegendData = latestCandleRef.current
+          ? getLegendDataFromCandle(latestCandleRef.current)
+          : null;
+        lastViewedLegendDataRef.current = latestLegendData;
+        setLegendData(latestLegendData);
         return;
       }
 
+      isPointerInsideChartRef.current = true;
       const candleData = param.time
         ? param.seriesData.get(candlestickSeries) as (CandlestickData<Time> & { volume?: number }) | undefined
         : undefined;
-
-      if (candleData && candleData.open !== undefined) {
-        const volume = volumeByTimeRef.current.get(String(candleData.time)) ?? Number(candleData.volume ?? 0);
-
-        setLegendData({
-          time: candleData.time,
-          open: candleData.open,
-          high: candleData.high,
-          low: candleData.low,
-          close: candleData.close,
-          volume,
-        });
-      } else if (latestCandleRef.current) {
-        setLegendData({
-          time: latestCandleRef.current.time,
-          open: latestCandleRef.current.open,
-          high: latestCandleRef.current.high,
-          low: latestCandleRef.current.low,
-          close: latestCandleRef.current.close,
-          volume: latestCandleRef.current.volume,
-        });
-      }
 
       const hoveredIndicators = indicatorSeriesRef.current.reduce<IndicatorValue[]>((values, { id, group, kind, label, period, color, series }) => {
         const lineData = param.seriesData.get(series) as LineData<Time> | undefined;
@@ -260,6 +250,21 @@ export function useTradingChartSetup({
 
         return values;
       }, []);
+
+      if (candleData && candleData.open !== undefined) {
+        const volume = volumeByTimeRef.current.get(String(candleData.time)) ?? Number(candleData.volume ?? 0);
+        const legendData = getLegendDataFromSeries(candleData, volume);
+
+        lastViewedLegendDataRef.current = legendData;
+        isLegendLockedToHoveredCandleRef.current = true;
+        setLegendData(legendData);
+      } else if (latestCandleRef.current) {
+        const legendData = getLegendDataFromCandle(latestCandleRef.current);
+
+        lastViewedLegendDataRef.current = legendData;
+        isLegendLockedToHoveredCandleRef.current = false;
+        setLegendData(legendData);
+      }
 
       setHoverIndicatorValues(hoveredIndicators.length > 0 ? hoveredIndicators : null);
     };
@@ -316,6 +321,31 @@ export function useTradingChartSetup({
     volumeByTimeRef,
     volumeSeriesRef,
   ]);
+
+  useEffect(() => {
+    const latestCandle = latestCandleRef.current;
+
+    if (!latestCandle) {
+      lastViewedLegendDataRef.current = null;
+      isLegendLockedToHoveredCandleRef.current = false;
+      setLegendData(null);
+      return;
+    }
+
+    const isViewingOlderHoveredCandle = (
+      isPointerInsideChartRef.current
+      && isLegendLockedToHoveredCandleRef.current
+      && !isSameLegendTime(lastViewedLegendDataRef.current, latestCandle)
+    );
+
+    if (isViewingOlderHoveredCandle) {
+      return;
+    }
+
+    const legendData = getLegendDataFromCandle(latestCandle);
+    lastViewedLegendDataRef.current = legendData;
+    setLegendData(legendData);
+  }, [latestCandleRef, marketDataVersion, setLegendData]);
 
   useEffect(() => {
     const chart = chartInstanceRef.current;
@@ -450,6 +480,35 @@ export function useTradingChartSetup({
     const paneLayoutFrameId = requestAnimationFrame(() => setPaneLayouts(getPaneLayouts(chart)));
     return () => cancelAnimationFrame(paneLayoutFrameId);
   }, [chartInstanceRef, indicatorSeriesRef, indicatorSettings, setPaneLayouts]);
+}
+
+function getLegendDataFromCandle(candle: FormattedCandle): LegendData {
+  return {
+    time: candle.time,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+  };
+}
+
+function getLegendDataFromSeries(
+  candle: CandlestickData<Time> & { volume?: number },
+  volume: number,
+): LegendData {
+  return {
+    time: candle.time,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume,
+  };
+}
+
+function isSameLegendTime(legendData: LegendData | null, candle: FormattedCandle): boolean {
+  return legendData !== null && String(legendData.time) === String(candle.time);
 }
 
 function createLineOptions(color: string, lineWidth: 1 | 2 | 3 | 4 = 1) {
