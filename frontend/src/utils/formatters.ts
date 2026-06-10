@@ -37,6 +37,19 @@ const parseCandleTime = (time: unknown): number | null => {
   return null;
 };
 
+const parseRequiredNumber = (value: unknown): number => {
+  if (value === null || value === undefined) {
+    return Number.NaN;
+  }
+
+  if (typeof value === 'string' && value.trim() === '') {
+    return Number.NaN;
+  }
+
+  const parsedValue = Number(value);
+  return Number.isFinite(parsedValue) ? parsedValue : Number.NaN;
+};
+
 export const formatCandle = (candle: unknown): FormattedCandle | null => {
   if (!candle || typeof candle !== 'object' || !('timestamp' in candle) || !candle.timestamp) {
     return null;
@@ -48,11 +61,13 @@ export const formatCandle = (candle: unknown): FormattedCandle | null => {
     return null;
   }
 
-  const open = Number(rawCandle.open);
-  const high = Number(rawCandle.high);
-  const low = Number(rawCandle.low);
-  const close = Number(rawCandle.close);
-  const volume = Number(rawCandle.volume ?? 0);
+  const open = parseRequiredNumber(rawCandle.open);
+  const high = parseRequiredNumber(rawCandle.high);
+  const low = parseRequiredNumber(rawCandle.low);
+  const close = parseRequiredNumber(rawCandle.close);
+  const volume = rawCandle.volume === undefined
+    ? 0
+    : parseRequiredNumber(rawCandle.volume);
 
   if (!Number.isFinite(open) || !Number.isFinite(high) ||
       !Number.isFinite(low) || !Number.isFinite(close) ||

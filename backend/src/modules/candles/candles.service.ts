@@ -4,16 +4,17 @@ import { CandleDto } from './dto/candle.dto';
 import { VALID_INTERVALS } from './enum/candle-interval.enum';
 import { AppLogger } from '../../common/logger';
 import { RecentCandlesCacheService } from './recent-candles-cache.service';
+import { isValidCandleOhlcv, parseCandleNumber } from './candle-validation';
 
 type HistoricalCandleRow = {
   timestamp: string | Date;
   symbol: string;
   interval: string;
-  open: number | string;
-  high: number | string;
-  low: number | string;
-  close: number | string;
-  volume: number | string;
+  open: number | string | null;
+  high: number | string | null;
+  low: number | string | null;
+  close: number | string | null;
+  volume: number | string | null;
 };
 
 type HistoricalCandlesQueryResult = {
@@ -163,29 +164,16 @@ export class CandlesService {
               return {
                 symbol: row.symbol,
                 interval: row.interval,
-                open: Number(row.open),
-                high: Number(row.high),
-                low: Number(row.low),
-                close: Number(row.close),
-                volume: Number(row.volume),
+                open: parseCandleNumber(row.open),
+                high: parseCandleNumber(row.high),
+                low: parseCandleNumber(row.low),
+                close: parseCandleNumber(row.close),
+                volume: parseCandleNumber(row.volume),
                 timestamp: this.normalizeQuestDbTimestamp(row.timestamp),
               };
             })
             .filter((candle) => {
-              const isValid =
-                Number.isFinite(candle.open) &&
-                Number.isFinite(candle.high) &&
-                Number.isFinite(candle.low) &&
-                Number.isFinite(candle.close) &&
-                Number.isFinite(candle.volume) &&
-                candle.open > 0 &&
-                candle.high > 0 &&
-                candle.low > 0 &&
-                candle.close > 0 &&
-                candle.volume >= 0 &&
-                candle.high >= Math.max(candle.open, candle.close) &&
-                candle.low <= Math.min(candle.open, candle.close) &&
-                candle.high >= candle.low;
+              const isValid = isValidCandleOhlcv(candle);
 
               if (!isValid) {
                 this.logger.warning(
