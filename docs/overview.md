@@ -25,7 +25,7 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 | Module | Role |
 | --- | --- |
 | [`data_pipeline/`](../data_pipeline/README.md) | Binance ingestion, Kafka raw trade publishing, O(1) candle aggregation, QuestDB writes, kline publishing. |
-| [`backend/`](../backend/README.md) | NestJS API gateway, DTO validation, QuestDB queries, Kafka kline consumer, Socket.IO fan-out, Swagger. |
+| [`backend/`](../backend/README.md) | NestJS API gateway, DTO validation, QuestDB queries, recent realtime candle cache, Kafka kline consumer, Socket.IO fan-out, Swagger. |
 | [`frontend/`](../frontend/README.md) | React chart UI, REST history loading, Socket.IO realtime updates, indicators, static `/terms` and `/privacy` pages. |
 | Infrastructure | Docker Compose services for Kafka, Kafka UI, QuestDB, producer, startup backfill, processor, and optional recent reconciliation. |
 
@@ -35,7 +35,7 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 2. `BinanceCombinedProducer` normalizes each trade.
 3. The producer publishes raw trade JSON to `KAFKA_TOPIC_RAW_TRADES`.
 4. `CandleProcessor` consumes raw trades and updates active candles per symbol and interval.
-5. Final `1m` candles are inserted into QuestDB table `market_candles`.
+5. Final `1m` candles are upserted into QuestDB table `market_candles`.
 6. Final and non-final candle updates are published to `KAFKA_TOPIC_KLINE_STREAM`.
 7. `KafkaService` in the backend consumes kline updates and emits internal `candle.update` events.
 8. `CandlesGateway` sends Socket.IO `kline_update` to rooms like `BTCUSDT_1m`.
@@ -50,6 +50,7 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 | Candle aggregation | O(1) active candle updates in `SingleCandleManager`. |
 | QuestDB storage | Final `1m` candles in `market_candles`. |
 | Historical REST API | `GET /candles?symbol=BTCUSDT&interval=1m&limit=100`. |
+| Recent realtime tail cache | Backend keeps up to 500 recent kline updates per room and merges them into history responses. |
 | Health endpoint | `GET /health`. |
 | Swagger UI | `/api/docs`. |
 | Realtime Socket.IO | `join_kline_room`, `leave_kline_room`, `kline_update`. |
@@ -110,5 +111,5 @@ These are intentionally not implemented as current runtime features:
 | [Architecture](architecture.md) | Detailed runtime boundaries, contracts, storage, validation, and scaling notes. |
 | [Setup](setup.md) | Local setup, env values, verification commands, and troubleshooting. |
 | [Data pipeline README](../data_pipeline/README.md) | Python producer and processor details. |
-| [Backend README](../backend/README.md) | NestJS endpoints, modules, Kafka, QuestDB, Socket.IO, and tests. |
+| [Backend README](../backend/README.md) | NestJS endpoints, modules, Kafka, QuestDB, recent realtime cache, Socket.IO, and tests. |
 | [Frontend README](../frontend/README.md) | React UI, env config, REST and realtime chart flow, and indicators. |

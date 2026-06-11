@@ -12,12 +12,13 @@ The backend is not an ingestion engine. It does not connect to Binance and does 
 | --- | --- |
 | REST API | `AppController` and `CandlesController`. |
 | Health check | `GET /health` returns `{ status, timestamp }`. |
-| Historical candles | `GET /candles` queries QuestDB through `CandlesService`. |
+| Historical candles | `GET /candles` queries QuestDB through `CandlesService`, filters invalid OHLCV rows, and merges the recent realtime tail. |
 | Swagger | Registered at `/api/docs` in `main.ts`. |
 | Validation | Global `ValidationPipe` plus DTO classes for REST and Socket.IO payloads. |
 | QuestDB access | `DatabaseService` uses `pg.Pool` over QuestDB PostgreSQL wire protocol. |
 | Kafka consumption | `KafkaService` consumes `KAFKA_TOPIC_KLINE_STREAM` with KafkaJS. |
-| Realtime fan-out | `CandlesGateway` emits Socket.IO `kline_update` events to symbol/interval rooms. |
+| Recent realtime cache | `RecentCandlesCacheService` stores up to 500 normalized kline updates per symbol/interval room. |
+| Realtime fan-out | `CandlesGateway` emits Socket.IO `kline_update` events to symbol/interval rooms and replays cached tail data to new subscribers. |
 
 ## Source Structure
 
@@ -34,11 +35,13 @@ backend/
 |   `-- modules/
 |       |-- candles/
 |       |   |-- candles.controller.ts
+|       |   |-- candle-validation.ts
 |       |   |-- candles.gateway.ts
 |       |   |-- candles.module.ts
 |       |   |-- candles.service.ts
 |       |   |-- dto/
-|       |   `-- enum/
+|       |   |-- enum/
+|       |   `-- recent-candles-cache.service.ts
 |       |-- database/
 |       |   |-- database.module.ts
 |       |   `-- database.service.ts
@@ -165,7 +168,7 @@ Query parameters:
 | --- | --- | --- | --- |
 | `symbol` | Yes | None | String, not empty, transformed to uppercase by DTO. |
 | `interval` | No | `1m` | Must be one of `VALID_INTERVALS`. |
-| `limit` | No | `100` | Integer from `1` to `1000`. |
+| `limit` | No | `100` | Integer from `1` to `2000`. |
 
 Supported intervals:
 
@@ -200,9 +203,38 @@ Response shape:
 
 `CandlesService` reads from `market_candles`, where the pipeline stores final `1m` candles.
 
-The backend aggregates stored `1m` rows into the requested interval:
+The backend reads a bounded time window from stored `1m` rows, filters invalid
+OHLCV values, dedupes by `1m` timestamp, and aggregates into the requested
+interval:
 
 ```sql
+WITH deduped_1m AS (
+  SELECT
+    timestamp,
+    symbol,
+    interval,
+    last(open) AS open,
+    last(high) AS high,
+    last(low) AS low,
+    last(close) AS close,
+    last(volume) AS volume
+  FROM market_candles
+  WHERE symbol = $1
+    AND interval = '1m'
+    AND timestamp >= $2
+    AND timestamp < $3
+    AND open > 0
+    AND high > 0
+    AND low > 0
+    AND close > 0
+    AND volume >= 0
+    AND high >= open
+    AND high >= close
+    AND low <= open
+    AND low <= close
+    AND high >= low
+  SAMPLE BY 1m ALIGN TO CALENDAR
+)
 SELECT
   timestamp,
   symbol,
@@ -212,14 +244,17 @@ SELECT
   min(low) AS low,
   last(close) AS close,
   sum(volume) AS volume
-FROM market_candles
-WHERE symbol = $1 AND interval = '1m'
+FROM deduped_1m
 SAMPLE BY ${interval} ALIGN TO CALENDAR
 ORDER BY timestamp DESC
-LIMIT $2;
+LIMIT $4;
 ```
 
-The service reverses returned rows so API clients receive candles from oldest to newest. It also converts QuestDB timestamps to ISO strings before returning the DTO.
+The query window is `max(interval_ms * limit * 2, 24h)`. The service reverses
+returned rows so API clients receive candles from oldest to newest, converts
+QuestDB timestamps to ISO strings, filters any invalid computed candles, merges
+the in-memory recent realtime cache, trims to `limit`, and logs duplicate or
+missing candle gaps.
 
 Security notes:
 
@@ -227,7 +262,7 @@ Security notes:
 | --- | --- |
 | `interval` SQL fragment | Checked against `VALID_INTERVALS` before interpolation into `SAMPLE BY`. |
 | `symbol` | Uppercased, stripped to `[A-Z0-9]`, then passed as `$1`. |
-| `limit` | DTO-constrained to `1..1000`, then passed as `$2`. |
+| `limit` | DTO-constrained to `1..2000`, then passed as `$4`. |
 
 ## Kafka Consumer Behavior
 
@@ -238,7 +273,8 @@ Security notes:
 3. Subscribes to `KAFKA_TOPIC_KLINE_STREAM` with `fromBeginning: false`.
 4. Parses each message as JSON.
 5. Skips empty values and messages missing required candle fields.
-6. Emits an internal `candle.update` event through `EventEmitter2`.
+6. Normalizes timestamps and numeric OHLCV fields before validation.
+7. Emits an internal `candle.update` event through `EventEmitter2`.
 
 The backend consumes processed candle updates only. It does not consume raw trades.
 
@@ -258,7 +294,7 @@ BTCUSDT_1m
 
 | Event | Direction | Payload | Behavior |
 | --- | --- | --- | --- |
-| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Joins the socket to `BTCUSDT_1m`. |
+| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Joins the socket to `BTCUSDT_1m` and sends cached tail candles for that room. |
 | `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Leaves the matching room. |
 | `kline_update` | Server to client | `KlineUpdateDto` | Sent to the room matching the candle symbol and interval. |
 
@@ -289,6 +325,9 @@ Socket.IO CORS allows `BACKEND_URL`, `FRONTEND_URL`, and requests without an `or
 | REST candle response | `CandlesResponseDto` |
 | Socket room payload | `KlineRoomPayloadDto` |
 | Realtime candle update | `KlineUpdateDto` |
+
+`candle-validation.ts` also normalizes numeric values from QuestDB/Kafka and
+rejects invalid OHLCV shapes before the backend returns or emits candles.
 
 The app enables a global pipe:
 
@@ -324,7 +363,7 @@ npm run test:e2e
 | Rule | Reason |
 | --- | --- |
 | Validate interval allowlist before SQL interpolation. | QuestDB `SAMPLE BY ${interval}` is a SQL fragment and cannot be passed as a scalar parameter. |
-| Parameterize scalar values. | `symbol` and `limit` are passed as query parameters. |
+| Parameterize scalar values. | `symbol`, `startTimestamp`, `endTimestamp`, and `limit` are passed as query parameters. |
 | Do not expose Kafka or QuestDB to browsers. | Browsers should use NestJS REST and Socket.IO only. |
 | Do not ingest Binance in the backend. | Binance ingestion belongs to the Python producer. |
 | Do not aggregate raw trades in the backend. | Candle aggregation belongs to the Python processor. |

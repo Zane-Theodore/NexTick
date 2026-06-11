@@ -15,7 +15,7 @@ This module does not expose browser APIs, render UI, or run the NestJS backend.
 | `processor/runner.py` | Processor service entrypoint with signal handling and health marker management. |
 | `backfill/runner.py` | Startup backfill service entrypoint with retry policy and failure behavior. |
 | `backfill/reconciler.py` | Maintenance script that validates Binance REST klines and replaces a closed `1m` candle window in QuestDB. |
-| `backfill/recent_runner.py` | Optional periodic recent closed-candle reconciler used by the Compose `maintenance` profile. |
+| `backfill/recent_runner.py` | Optional periodic recent closed-candle reconciler used by the Compose `maintenance` profile; upserts the recent closed tail into the WAL/dedup table. |
 | `backfill/state.py` | Shared backfill watermark reader/writer used by backfill and processor services. |
 | `common/config.py` | Loads `data_pipeline/.env`, validates required config, parses symbols and intervals. |
 | `common/logger.py` | Configures stdout logging with timestamp, level, module name, and message. |
@@ -51,7 +51,7 @@ Compose behavior:
 | `data-producer` | Overrides `KAFKA_BROKER=kafka:29092`, starts as soon as Kafka topics exist, then streams live Binance trades into Kafka. |
 | `data-backfill` | Runs `data_pipeline.backfill.runner`, repairs the closed startup window, and writes a shared watermark. |
 | `data-processor` | Starts after `data-backfill` completes, drains buffered raw trades, and skips DB upserts for candles before the watermark. |
-| `data-recent-reconcile` | Optional `maintenance` profile service that runs periodic recent closed-candle repair when `RECENT_RECONCILE_ENABLED=true`. |
+| `data-recent-reconcile` | Optional `maintenance` profile service that upserts periodic recent closed-candle repair rows when `RECENT_RECONCILE_ENABLED=true`. |
 
 Check logs:
 
@@ -125,7 +125,7 @@ source .venv/bin/activate
 python -m data_pipeline.processor.runner
 ```
 
-## Reconcile Recent Candles
+## Reconcile Stored Candles
 
 At normal Docker startup, `data-producer` starts first and buffers raw trades in
 Kafka. `data-backfill` then runs `data_pipeline.backfill.runner` as a separate
@@ -148,6 +148,10 @@ After a successful run it drops its current old/replacement/staging tables and
 also cleans up old reconciler temporary tables from previous runs. Use
 `--keep-temp` only when you intentionally want to inspect those temporary
 tables.
+
+The optional `data_pipeline.backfill.recent_runner` path is different: it runs
+periodically and upserts only the recent closed tail into the WAL/dedup live
+table, without dropping or swapping `market_candles`.
 
 The default startup reconcile window is 24 hours and ends at Binance's current
 minute floor, so it includes every closed candle and excludes only the currently
@@ -199,7 +203,9 @@ Operational notes:
 
 ## Environment Variables
 
-These names match `data_pipeline/.env.example` and `common/config.py`. The example file intentionally contains blank values; local `.env` must be filled before startup.
+These names match `data_pipeline/.env.example` and `common/config.py`. The
+example file includes local defaults for the Docker pipeline; review and adjust
+local `.env` values before startup.
 
 | Variable | Required by code | Example | Notes |
 | --- | --- | --- | --- |
@@ -211,6 +217,8 @@ These names match `data_pipeline/.env.example` and `common/config.py`. The examp
 | `KAFKA_BROKER` | Yes | `localhost:9092` | Use `kafka:29092` inside the Compose network. |
 | `KAFKA_TOPIC_RAW_TRADES` | Yes | `raw-trades` | Topic for normalized raw trades. |
 | `KAFKA_TOPIC_KLINE_STREAM` | Yes | `kline-stream` | Topic for candle updates. |
+| `KAFKA_CONSUMER_GROUP_ID` | No | `candle-processor-group` | Consumer group id used by `CandleProcessor`. |
+| `KAFKA_AUTO_OFFSET_RESET` | No | `earliest` | Consumer offset reset policy. Invalid values fall back to `earliest`; supported values are `earliest` and `latest`. |
 | `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Base Binance WebSocket endpoint used to build the combined stream URL. |
 | `TRADING_SYMBOLS` | Effectively required in `.env` | `BTCUSDT,ETHUSDT` | If unset, defaults to `BTCUSDT`; if present but blank, no symbols are produced. |
 | `CANDLE_INTERVALS` | Effectively required in `.env` | `1m,3m,5m,15m,30m,1h` | If unset, defaults to all supported intervals; if present but blank, no interval managers are created. |

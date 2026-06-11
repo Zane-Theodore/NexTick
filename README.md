@@ -13,7 +13,7 @@ NexTick is not a trading bot and does not provide financial, investment, tax, or
 | Ingestion | Python producer connects to Binance combined trade streams and publishes normalized raw trades to Kafka. |
 | Aggregation | Python processor keeps active OHLCV state per symbol and interval, then publishes final and non-final kline updates. |
 | Storage | QuestDB stores final `1m` candles in `market_candles`; larger historical intervals are aggregated at read time. |
-| Backend | NestJS validates REST and Socket.IO payloads, reads QuestDB, consumes Kafka kline updates, and fans out room updates. |
+| Backend | NestJS validates REST and Socket.IO payloads, reads QuestDB, consumes Kafka kline updates, caches the recent realtime tail, and fans out room updates. |
 | Frontend | React + Lightweight Charts loads history, joins Socket.IO rooms, and renders candles, volume, tooltip data, and indicators. |
 | Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, `data-processor`, and an optional maintenance `data-recent-reconcile` profile. |
 
@@ -48,7 +48,7 @@ flowchart LR
 | Module | Role | Main technologies |
 | --- | --- | --- |
 | `data_pipeline/` | Binance ingestion, raw trade publishing, O(1) candle aggregation, QuestDB writes, kline publishing | Python 3.10, `kafka-python`, `websocket-client`, `psycopg2`, `python-dotenv` |
-| `backend/` | API gateway, DTO validation, QuestDB queries, Kafka consumer, Socket.IO fan-out, Swagger | NestJS 11, TypeScript 6, KafkaJS, Socket.IO, `pg`, `class-validator`, Swagger |
+| `backend/` | API gateway, DTO validation, QuestDB queries, recent realtime candle cache, Kafka consumer, Socket.IO fan-out, Swagger | NestJS 11, TypeScript 6, KafkaJS, Socket.IO, `pg`, `class-validator`, Swagger |
 | `frontend/` | Realtime chart UI, REST history loading, Socket.IO updates, indicator controls | React 19, Vite 8, TypeScript 6, Lightweight Charts 5, Axios, Socket.IO Client, Tailwind CSS 4 |
 | Infrastructure | Local streaming and storage runtime | Docker Compose, Kafka, Kafka UI, QuestDB |
 
@@ -59,7 +59,7 @@ flowchart LR
 3. `data-producer` keeps publishing raw trades to Kafka while startup backfill runs.
 4. `data-backfill` replaces a 24-hour closed `1m` window from Binance REST and writes a backfill watermark.
 5. `CandleProcessor` starts after backfill succeeds, consumes the buffered raw trades, and skips DB writes before the watermark.
-6. Final `1m` candles are inserted into QuestDB table `market_candles`.
+6. Final `1m` candles are upserted into QuestDB table `market_candles`.
 7. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
 8. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
 9. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
@@ -233,7 +233,7 @@ NexTick/
 | Module | Current features |
 | --- | --- |
 | `data_pipeline/` | Binance combined trade stream ingestion, raw trade Kafka publishing, multi-interval candle aggregation, final `1m` QuestDB writes, kline Kafka publishing, retry/backoff handling. |
-| `backend/` | `GET /`, `GET /health`, `GET /candles`, Swagger at `/api/docs`, Kafka kline consumer, Socket.IO `join_kline_room`, `leave_kline_room`, and `kline_update`. |
+| `backend/` | `GET /`, `GET /health`, `GET /candles`, Swagger at `/api/docs`, validated QuestDB history reads, recent realtime tail cache, Kafka kline consumer, Socket.IO `join_kline_room`, `leave_kline_room`, and `kline_update`. |
 | `frontend/` | Realtime candlestick and volume chart, symbol/interval controls, OHLCV tooltip, visible high/low overlay, scroll-to-latest, EMA/MA/volume-MA/RSI/MACD indicators, `/terms`, `/privacy`, and footer API status. |
 
 ## Commands
@@ -271,7 +271,7 @@ docker compose logs -f data-producer data-backfill data-processor
 | [`docs/architecture.md`](docs/architecture.md) | Runtime boundaries, data contracts, storage model, validation, and scaling notes. |
 | [`docs/setup.md`](docs/setup.md) | Local setup, env values, verification commands, and troubleshooting. |
 | [`data_pipeline/README.md`](data_pipeline/README.md) | Python producer, processor, Kafka topics, QuestDB schema, timestamp rules. |
-| [`backend/README.md`](backend/README.md) | NestJS modules, REST endpoints, DTO validation, QuestDB queries, Socket.IO events. |
+| [`backend/README.md`](backend/README.md) | NestJS modules, REST endpoints, DTO validation, QuestDB queries, recent realtime cache, Socket.IO events. |
 | [`frontend/README.md`](frontend/README.md) | React chart UI, env config, REST and Socket.IO flow, chart and indicator behavior. |
 
 ## Boundary Rules

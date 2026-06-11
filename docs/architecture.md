@@ -37,7 +37,7 @@ flowchart LR
 | Raw Kafka to candle state | Python processor | `CandleProcessor` consumes raw trades and updates active candles. |
 | Candle state to QuestDB | Python processor | Final `1m` candles upserted into `market_candles`. |
 | Candle state to kline Kafka | Python processor | Final and non-final candle JSON in `KAFKA_TOPIC_KLINE_STREAM`. |
-| QuestDB to REST | NestJS backend | `GET /candles` response DTO. |
+| QuestDB to REST | NestJS backend | `GET /candles` response DTO, with valid OHLCV filtering and recent realtime tail merge. |
 | Kline Kafka to Socket.IO | NestJS backend | `candle.update` internal event to `kline_update` room broadcast. |
 | REST/Socket.IO to chart | React frontend | Axios history load and Socket.IO realtime updates. |
 
@@ -196,8 +196,10 @@ backfill service writes a shared watermark file; while draining the Kafka
 backlog, the processor skips final `1m` DB upserts before that watermark so
 partial replay candles cannot overwrite the canonical REST rows. The optional
 `data-recent-reconcile` maintenance profile runs `data_pipeline.backfill.recent_runner`
-for periodic closed-tail repair when explicitly enabled. The live table is
-WAL/dedup with `UPSERT KEYS(timestamp, symbol, interval)`.
+for periodic closed-tail repair when explicitly enabled. Recent repair upserts
+authoritative REST candles into the WAL/dedup live table instead of replacing
+the whole table. The live table is WAL/dedup with
+`UPSERT KEYS(timestamp, symbol, interval)`.
 
 ## Backend Layer
 
@@ -205,9 +207,14 @@ NestJS modules:
 
 | Module | Role |
 | --- | --- |
-| `CandlesModule` | `GET /candles`, `CandlesService`, and Socket.IO gateway. |
+| `CandlesModule` | `GET /candles`, `CandlesService`, recent candle cache, validation helpers, and Socket.IO gateway. |
 | `DatabaseModule` | `pg.Pool` connection to QuestDB. |
 | `KafkaModule` | KafkaJS kline consumer. |
+
+`RecentCandlesCacheService` stores up to 500 normalized kline updates per
+`SYMBOL_interval` room. New Socket.IO subscribers receive the cached tail, and
+`GET /candles` merges the same cache into QuestDB history so the API can include
+the newest realtime candle before the final `1m` write is visible in QuestDB.
 
 REST endpoints:
 
@@ -235,10 +242,11 @@ sequenceDiagram
   Client->>Controller: GET /candles?symbol=BTCUSDT&interval=5m&limit=100
   Controller->>Controller: CandlesQueryDto validation
   Controller->>Service: getHistoricalCandles(symbol, limit, interval)
-  Service->>Service: allowlist interval and sanitize symbol
-  Service->>DB: SELECT ... SAMPLE BY 5m ALIGN TO CALENDAR
+  Service->>Service: allowlist interval, sanitize symbol, and resolve bounded query window
+  Service->>DB: dedupe/filter 1m rows, then SAMPLE BY 5m ALIGN TO CALENDAR
   DB-->>Service: rows newest first
-  Service-->>Controller: rows reversed oldest to newest
+  Service->>Service: reverse oldest-first and merge recent realtime cache
+  Service-->>Controller: CandlesResponseDto data
   Controller-->>Client: CandlesResponseDto
 ```
 
@@ -278,7 +286,7 @@ Key files:
 | `src/App.tsx` | Selects `/`, `/terms`, or `/privacy` based on `window.location.pathname`. |
 | `src/services/api.ts` | Calls `GET {VITE_API_URL}/candles`. |
 | `src/services/socket.ts` | Creates Socket.IO client and room helpers. |
-| `src/hooks/useMarketData.ts` | Loads history, joins/leaves rooms, applies realtime candles, and syncs indicators. |
+| `src/hooks/useMarketData.ts` | Loads history, joins/leaves rooms, applies realtime candles, repairs recent tail gaps, and syncs indicators. |
 | `src/components/chart/TradingChart.tsx` | Composes chart controls, chart container, overlays, and indicator legend. |
 | `src/components/chart/useTradingChartState.ts` | Owns chart refs, selected market, indicator settings, and chart UI state. |
 | `src/components/chart/useTradingChartSetup.ts` | Creates Lightweight Charts series, crosshair behavior, pane layout tracking, and visible high/low overlay data. |
@@ -328,11 +336,13 @@ Indicator groups:
 | Invalid raw trade | Skip missing symbol, timestamp, price, volume, non-positive values, or pre-2020 timestamps. |
 | Processor QuestDB startup | Startup fails if connection cannot be opened. |
 | Processor QuestDB upsert | Retry 3 times. If final `1m` persistence fails, skip publishing that final candle. |
-| Startup reconciler failure | Retry the one-shot reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; live processing continues after retries are exhausted. |
-| Candle reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
+| Startup reconciler failure | Retry the one-shot reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, Compose does not start `data-processor` after exhausted retries. |
+| Manual full-window reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
+| Recent reconciler failure | Logs the failed recent closed-tail pass and retries on the next scheduled interval. |
 | Backend QuestDB startup | Runs `SELECT 1`; startup fails if QuestDB is unreachable. |
 | Backend Kafka startup | Startup fails if consumer cannot connect or subscribe. |
 | Frontend history load | Logs error and does not join the Socket.IO room if history load fails. |
+| Frontend tail gap repair | Refetches and merges recent history with retry delays of 1s, 2.5s, 5s, and 10s when a realtime update reveals a tail gap. |
 | Frontend health check | Times out after 5 seconds and marks API as `Offline`. |
 
 ## Scaling Notes

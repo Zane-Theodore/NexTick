@@ -35,7 +35,9 @@ cp frontend/.env.example frontend/.env
 
 ## 2. Fill Environment Values
 
-The `.env.example` files intentionally contain blank values. Fill each local `.env` before starting services.
+`data_pipeline/.env.example` includes local defaults for the Docker pipeline.
+`backend/.env.example` and `frontend/.env.example` use blank values. Review and
+fill each local `.env` before starting services.
 
 ### `data_pipeline/.env`
 
@@ -140,7 +142,7 @@ Expected service order:
 3. `questdb` becomes healthy.
 4. `data-producer` starts after Kafka topics exist and connects to Binance.
 5. `data-backfill` repairs the closed startup candle window and writes a shared watermark.
-6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered raw trades.
+6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered raw trades and skips final `1m` DB upserts before the backfill watermark.
 
 ## 4. Start the Backend
 
@@ -316,15 +318,16 @@ LIMIT 20;
 
 ## Reconcile Missing Candles
 
-Use the pipeline reconciler when recent stored `1m` candles are missing or need
-to be filled from Binance REST data. The startup backfill repairs one 24-hour
-window through Binance's latest closed minute and writes a watermark so the
-processor does not overwrite that window while draining buffered trades.
+Use the pipeline reconciler when stored `1m` candles are missing or need to be
+filled from Binance REST data. The startup backfill repairs one 24-hour window
+through Binance's latest closed minute and writes a watermark so the processor
+does not overwrite that window while draining buffered trades.
 
-Docker Compose starts reconciliation automatically after `CandleProcessor`
-initialized. The startup path replaces the target window in `market_candles`
-and runs once. Stop the live writer before any manual repair workflow that
-drops, recreates, or migrates `market_candles`.
+Docker Compose runs `data-backfill` once before `data-processor` starts. The
+startup/manual `data_pipeline.backfill.reconciler` path builds replacement
+tables and swaps the bounded target window into `market_candles`. Stop the live
+writer before any manual repair workflow that drops, recreates, or migrates
+`market_candles`.
 
 ```bash
 docker compose stop data-processor
@@ -347,7 +350,8 @@ command again. The script restores `market_candles` from the newest
 
 For periodic recent closed-candle repair, Docker Compose includes the optional
 `data-recent-reconcile` service behind the `maintenance` profile. It runs
-`data_pipeline.backfill.recent_runner` and is disabled by default through
+`data_pipeline.backfill.recent_runner`, upserts the recent closed tail into the
+WAL/dedup table, and is disabled by default through
 `RECENT_RECONCILE_ENABLED=false`.
 
 ```bash

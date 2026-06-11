@@ -4,6 +4,10 @@
 
 It loads historical candles from the NestJS REST API, joins Socket.IO rooms for realtime kline updates, and renders candlestick, volume, OHLCV tooltip, and configurable indicator series with Lightweight Charts.
 
+When realtime updates reveal a gap near the latest candles, the frontend
+refetches recent history, merges it with the current in-memory candle list, and
+resyncs chart and indicator series.
+
 The frontend does not connect directly to Binance, Kafka, QuestDB, or AI/model services.
 
 ## Stack
@@ -218,6 +222,7 @@ The frontend uses Lightweight Charts imperatively from React lifecycle hooks.
 | Symbol or interval change | Clear series, load history, then `setData()` | `useMarketData.ts` |
 | Realtime candle | `candlestickSeries.update()` and `volumeSeries.update()` | `useMarketData.ts` |
 | Realtime indicators | Recalculate visible indicator history and call indicator `setData()` | `useMarketData.ts` |
+| Tail gap repair | Retry recent `GET /candles` requests with 1s, 2.5s, 5s, and 10s delays, then merge history | `useMarketData.ts` |
 | Cursor tooltip | Crosshair data updates `OhlcvTooltip` and hovered indicator values | `useTradingChartSetup.ts` |
 | Visible high/low labels | Visible logical range is scanned and labels are overlaid | `useTradingChartSetup.ts`, `VisibleExtremaOverlay.tsx` |
 
@@ -230,7 +235,7 @@ Default indicator settings live in `components/chart/chartConstants.ts`. Indicat
 | Indicator group | Default state | Notes |
 | --- | --- | --- |
 | EMA | Visible | Default periods `7`, `25`, `99` on the main chart. |
-| MA | Configured but hidden by group state | Default periods `7`, `25`, `99` on the main chart. |
+| MA | Visible | Default periods `7`, `25`, `99` on the main chart. |
 | Volume MA | Visible | Default period `20` on the volume pane. |
 | RSI | Hidden | Uses a secondary pane when enabled. |
 | MACD | Hidden | Uses MACD and signal line series in a secondary pane. |
