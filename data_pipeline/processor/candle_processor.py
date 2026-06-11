@@ -16,7 +16,13 @@ from data_pipeline.common.logger import get_logger
 logger = get_logger(__name__)
 
 
-def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0, operation_name='operation'):
+def retry_with_backoff(
+    operation,
+    max_retries=60,
+    base_delay=1.0,
+    max_delay=10.0,
+    operation_name="operation",
+):
     """Execute an operation with exponential backoff retry logic.
     
     Args:
@@ -39,7 +45,10 @@ def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0
         except NoBrokersAvailable:
             attempt += 1
             delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            logger.warning(f"{operation_name} failed (Kafka not ready). Retrying in {delay:.1f}s... ({attempt}/{max_retries})")
+            logger.warning(
+                f"{operation_name} failed (Kafka not ready). "
+                f"Retrying in {delay:.1f}s... ({attempt}/{max_retries})"
+            )
             time.sleep(delay)
         except Exception as error:
             attempt += 1
@@ -47,7 +56,10 @@ def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0
                 logger.error(f"{operation_name} failed after {attempt} attempts.", exc_info=True)
                 raise
             delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            logger.warning(f"{operation_name} failed on attempt {attempt}: {error}. Retrying in {delay:.1f}s...")
+            logger.warning(
+                f"{operation_name} failed on attempt {attempt}: {error}. "
+                f"Retrying in {delay:.1f}s..."
+            )
             time.sleep(delay)
 
 
@@ -108,7 +120,12 @@ class SingleCandleManager:
 
         raise ValueError(f"Unsupported candle interval: {self.interval}")
 
-    def update_with_trade(self, trade_price: float, trade_volume: float, trade_time: datetime) -> dict:
+    def update_with_trade(
+        self,
+        trade_price: float,
+        trade_volume: float,
+        trade_time: datetime,
+    ) -> dict:
         """Update candle with new trade data using O(1) algorithm.
         
         Args:
@@ -133,7 +150,10 @@ class SingleCandleManager:
             
             # Initialize new candle if needed
             if self.current_candle is None:
-                complete_from_start = self.has_observed_interval_boundary or trade_time == candle_start
+                complete_from_start = (
+                    self.has_observed_interval_boundary
+                    or trade_time == candle_start
+                )
                 self.current_candle = {
                     'symbol': self.symbol.upper(),
                     'interval': self.interval,
@@ -148,8 +168,14 @@ class SingleCandleManager:
                 self.current_candle_start = candle_start
             else:
                 # Update current candle with O(1) operations
-                self.current_candle['high'] = max(self.current_candle['high'], float(trade_price))
-                self.current_candle['low'] = min(self.current_candle['low'], float(trade_price))
+                self.current_candle['high'] = max(
+                    self.current_candle['high'],
+                    float(trade_price),
+                )
+                self.current_candle['low'] = min(
+                    self.current_candle['low'],
+                    float(trade_price),
+                )
                 self.current_candle['close'] = float(trade_price)
                 self.current_candle['volume'] += float(trade_volume)
             
@@ -193,10 +219,18 @@ class MultiTimeframeManager:
         for interval_name, interval_ms in self.timeframes:
             self.managers[interval_name] = SingleCandleManager(symbol, interval_name, interval_ms)
         
-        logger.info(f"Initialized multi-timeframe manager for {self.symbol.upper()} with timeframes: {[t[0] for t in self.timeframes]}")
+        logger.info(
+            f"Initialized multi-timeframe manager for {self.symbol.upper()} "
+            f"with timeframes: {[t[0] for t in self.timeframes]}"
+        )
         self.schedule_next_update()
 
-    def process_trade(self, trade_price: float, trade_volume: float, trade_time: datetime) -> list:
+    def process_trade(
+        self,
+        trade_price: float,
+        trade_volume: float,
+        trade_time: datetime,
+    ) -> list:
         """Process a trade across all timeframes and emit closed candles.
         
         Args:
@@ -273,7 +307,10 @@ class CandleProcessor:
                 f"skip final 1m upserts before {self.backfill_write_fence.isoformat()}"
             )
         
-        logger.info("Starting multi-symbol multi-timeframe candle processor with O(1) complexity and synchronous database operations")
+        logger.info(
+            "Starting multi-symbol multi-timeframe candle processor with O(1) "
+            "complexity and synchronous database operations"
+        )
         
         try:
             self.db_conn = psycopg2.connect(
@@ -324,7 +361,10 @@ class CandleProcessor:
                 group_id=config.KAFKA_CONSUMER_GROUP_ID
             )
         
-        self.consumer = retry_with_backoff(_create_consumer, operation_name='Kafka consumer creation')
+        self.consumer = retry_with_backoff(
+            _create_consumer,
+            operation_name='Kafka consumer creation',
+        )
         logger.info(
             f"Kafka raw trade consumer initialized: topic={config.TOPIC_RAW_TRADES}, "
             f"groupId={config.KAFKA_CONSUMER_GROUP_ID}, "
@@ -341,7 +381,10 @@ class CandleProcessor:
                 request_timeout_ms=30000,
             )
         
-        self.producer = retry_with_backoff(_create_producer, operation_name='Kafka producer creation')
+        self.producer = retry_with_backoff(
+            _create_producer,
+            operation_name='Kafka producer creation',
+        )
         self.running = True
 
     def _is_valid_candle(self, candle: dict) -> bool:
@@ -386,16 +429,91 @@ class CandleProcessor:
 
         try:
             self.db_cursor.execute(
-                f"ALTER TABLE {self.table_name} DEDUP ENABLE UPSERT KEYS(timestamp, symbol, interval)"
+                f"ALTER TABLE {self.table_name} "
+                "DEDUP ENABLE UPSERT KEYS(timestamp, symbol, interval)"
             )
         except Exception as exc:
             logger.error(
-                f"{self.table_name} does not accept DEDUP UPSERT KEYS(timestamp, symbol, interval). "
-                "If this is an existing BYPASS WAL table, migrate it to a WAL table before running "
+                f"{self.table_name} does not accept DEDUP UPSERT KEYS"
+                "(timestamp, symbol, interval). "
+                "If this is an existing BYPASS WAL table, migrate it to a "
+                "WAL table before running "
                 "the live processor to prevent duplicate candles.",
                 exc_info=True,
             )
             raise exc
+
+    def check_price_continuity(self, candle: dict) -> bool:
+        """Check if the given 1m candle's open price matches the previous candle's close price.
+        
+        This helper can detect price discontinuities that may indicate:
+        - Missed candles from mid-minute startup gaps
+        - Data corruption or inconsistency
+        
+        Args:
+            candle: The candle to check (must have symbol, interval, timestamp, open).
+            
+        Returns:
+            True if continuity is verified or no previous candle exists, False if there's a gap.
+        """
+        if candle.get('interval') != '1m':
+            # Continuity check applies to 1m candles only
+            return True
+        
+        try:
+            symbol = candle.get('symbol')
+            ts = candle.get('timestamp')
+            current_open = float(candle.get('open', 0))
+            
+            if not ts or not symbol or current_open <= 0:
+                return True
+            
+            # Get the previous candle's close price
+            prev_ts = ts - timedelta(minutes=1)
+            ts_str = prev_ts.strftime('%Y-%m-%d %H:%M:%S')
+            
+            self.db_cursor.execute(
+                f"""
+                SELECT close FROM {self.table_name}
+                WHERE symbol = %s
+                  AND interval = '1m'
+                  AND timestamp = to_timestamp(%s, 'yyyy-MM-dd HH:mm:ss')
+                """,
+                (symbol, ts_str)
+            )
+            result = self.db_cursor.fetchone()
+            
+            if result is None:
+                # No previous candle found - can't check continuity
+                logger.debug(
+                    f"No previous candle found for {symbol} at {prev_ts.isoformat()}. "
+                    f"Cannot verify price continuity for {candle['timestamp'].isoformat()}."
+                )
+                return True
+            
+            prev_close = float(result[0])
+            tolerance = 1e-8  # Tolerance for floating point comparison
+            
+            if abs(current_open - prev_close) > tolerance:
+                logger.warning(
+                    f"PRICE CONTINUITY BREAK detected for {symbol}: "
+                    f"Previous candle close={prev_close:.8f}, "
+                    f"Current candle open={current_open:.8f}, "
+                    f"Difference={abs(current_open - prev_close):.8f} "
+                    f"at {candle['timestamp'].isoformat()}. "
+                    f"This may indicate missing candles or data sync issues."
+                )
+                return False
+            
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Could not verify price continuity for {candle.get('symbol')} "
+                f"at {candle.get('timestamp')}: {e}",
+                exc_info=True,
+            )
+            # Return True to not block processing if check fails
+            return True
 
     def save_to_db(self, candle: dict) -> bool:
         """Upsert a candle to QuestDB.
@@ -411,7 +529,8 @@ class CandleProcessor:
                 f"Refusing to upsert invalid candle: symbol={candle.get('symbol')}, "
                 f"interval={candle.get('interval')}, open_time={candle.get('timestamp')}, "
                 f"open={candle.get('open')}, high={candle.get('high')}, "
-                f"low={candle.get('low')}, close={candle.get('close')}, volume={candle.get('volume')}"
+                f"low={candle.get('low')}, close={candle.get('close')}, "
+                f"volume={candle.get('volume')}"
             )
             return False
 
@@ -419,7 +538,16 @@ class CandleProcessor:
             db_timestamp_str = candle['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
             self.db_cursor.execute(
                 f"""
-                INSERT INTO {self.table_name} (symbol, interval, timestamp, open, high, low, close, volume)
+                INSERT INTO {self.table_name} (
+                    symbol,
+                    interval,
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume
+                )
                 VALUES (%s, %s, to_timestamp(%s, 'yyyy-MM-dd HH:mm:ss'), %s, %s, %s, %s, %s)
                 """,
                 (
@@ -441,6 +569,11 @@ class CandleProcessor:
                 f"Upserted candle: symbol={candle['symbol']}, interval={candle['interval']}, "
                 f"open_time={candle['timestamp'].isoformat()}, source=LIVE_PROCESSOR"
             )
+            
+            # Check price continuity for 1m candles to detect data gaps
+            if candle.get('interval') == '1m':
+                self.check_price_continuity(candle)
+            
             return True
         except Exception:
             logger.error(
@@ -458,11 +591,20 @@ class CandleProcessor:
             value: Message data to publish.
         """
         def _send():
-            future = self.producer.send(topic, value=value, key=value['symbol'].encode('utf-8'))
+            future = self.producer.send(
+                topic,
+                value=value,
+                key=value['symbol'].encode('utf-8'),
+            )
             result = future.get(timeout=15)
             return result
 
-        retry_with_backoff(_send, max_retries=4, base_delay=0.5, operation_name=f'Kafka publish to {topic}')
+        retry_with_backoff(
+            _send,
+            max_retries=4,
+            base_delay=0.5,
+            operation_name=f'Kafka publish to {topic}',
+        )
 
     def broadcast_candle(self, candle: dict, is_final: bool = False):
         """Broadcast a candle to Kafka topic and persist if final 1m candle.
@@ -472,17 +614,30 @@ class CandleProcessor:
             is_final: Whether this is a final (closed interval) candle. 
                      Only 1m candles are persisted to DB when final=True.
         """
-        complete_from_start = bool(candle.get('_complete_from_start', True))
+        complete_from_start = bool(candle.get("_complete_from_start", True))
         public_candle = {key: value for key, value in candle.items() if not key.startswith('_')}
 
         kafka_candle = public_candle.copy()
         kafka_candle['is_final'] = is_final
         kafka_candle['timestamp'] = kafka_candle['timestamp'].isoformat()
 
+        if not complete_from_start:
+            logger.info(
+                f"Skipping candle that began before processor observed its interval start: "
+                f"symbol={candle['symbol']}, interval={candle['interval']}, "
+                f"open_time={candle['timestamp'].isoformat()}, is_final={is_final}. "
+                "Startup backfill owns prior closed candles; this partial live candle "
+                "would have incomplete OHLCV."
+            )
+            if is_final and candle["interval"] == "1m":
+                self._commit_consumer_offset("skipping incomplete startup candle")
+            return
+
         # Only persist to DB for final 1m candles
         if is_final and self._is_before_backfill_fence(candle):
             logger.info(
-                f"Skipping final candle before startup backfill watermark: symbol={candle['symbol']}, "
+                "Skipping final candle before startup backfill watermark: "
+                f"symbol={candle['symbol']}, "
                 f"interval={candle['interval']}, open_time={candle['timestamp'].isoformat()}, "
                 f"backfill_end={self.backfill_write_fence.isoformat()}"
             )
@@ -490,26 +645,31 @@ class CandleProcessor:
                 self._commit_consumer_offset("skipping startup-backfilled final candle")
             return
 
-        if is_final and not complete_from_start:
-            logger.warning(
-                f"Skipping final candle that started after the realtime processor began observing its interval: "
-                f"symbol={candle['symbol']}, interval={candle['interval']}, "
-                f"open_time={candle['timestamp'].isoformat()}. "
-                "A REST recent reconciliation pass will upsert the authoritative closed candle."
-            )
-            if candle["interval"] == "1m":
-                self._commit_consumer_offset("skipping incomplete first observed final candle")
-            return
-
         if is_final and candle['interval'] == '1m':
             if not self.save_to_db(candle):
-                logger.warning(f"Skipping final candle publish for {candle['symbol']} because DB persistence failed.")
+                logger.warning(
+                    f"Skipping final candle publish for {candle['symbol']} "
+                    "because DB persistence failed."
+                )
                 return
+
+        if not is_final and not self._is_valid_candle(candle):
+            logger.debug(
+                f"Skipping invalid non-final candle broadcast: symbol={candle.get('symbol')}, "
+                f"interval={candle.get('interval')}, open_time={candle.get('timestamp')}, "
+                f"open={candle.get('open')}, high={candle.get('high')}, "
+                f"low={candle.get('low')}, close={candle.get('close')}, "
+                f"volume={candle.get('volume')}"
+            )
+            return
 
         try:
             self._send_to_topic(config.TOPIC_KLINE_STREAM, kafka_candle)
         except Exception:
-            logger.error(f"Failed to publish candle update for {candle['symbol']} to Kafka.", exc_info=True)
+            logger.error(
+                f"Failed to publish candle update for {candle['symbol']} to Kafka.",
+                exc_info=True,
+            )
 
     def run(self):
         """Start processing raw trades and generating multi-timeframe candles."""
@@ -538,7 +698,9 @@ class CandleProcessor:
                                 continue
                                 
                             if not all(k in trade for k in ('timestamp', 'price', 'volume')):
-                                logger.debug(f"Skipped trade with missing required fields: {raw_trade}")
+                                logger.debug(
+                                    f"Skipped trade with missing required fields: {raw_trade}"
+                                )
                                 continue
                             
                             symbol = symbol.lower()
@@ -548,27 +710,38 @@ class CandleProcessor:
                             if price <= 0 or volume <= 0:
                                 continue
                                 
-                            trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000.0, tz=timezone.utc)
+                            trade_time = datetime.fromtimestamp(
+                                trade['timestamp'] / 1000.0,
+                                tz=timezone.utc,
+                            )
                             if trade_time.year < 2020:
                                 continue
                             
                             # Initialize multi-timeframe manager if new symbol
                             if symbol not in self.managers:
-                                logger.info(f"Detected new trading stream for {symbol.upper()}. Initializing multi-timeframe candle manager...")
-                                self.managers[symbol] = MultiTimeframeManager(symbol, self.broadcast_candle)
+                                logger.info(
+                                    f"Detected new trading stream for {symbol.upper()}. "
+                                    "Initializing multi-timeframe candle manager..."
+                                )
+                                self.managers[symbol] = MultiTimeframeManager(
+                                    symbol,
+                                    self.broadcast_candle,
+                                )
                             
                             # Process trade across all timeframes
                             manager = self.managers[symbol]
                             manager.process_trade(price, volume, trade_time)
                             logger.debug(
                                 f"Candle aggregated from trade: symbol={symbol.upper()}, "
-                                f"event_time={trade_time.isoformat()}, price={price}, volume={volume}"
+                                f"event_time={trade_time.isoformat()}, "
+                                f"price={price}, volume={volume}"
                             )
                                     
                         except Exception as e:
                             logger.error(
                                 f"Error processing individual trade from Kafka "
-                                f"topic={message.topic}, partition={message.partition}, offset={message.offset}: {e}",
+                                f"topic={message.topic}, partition={message.partition}, "
+                                f"offset={message.offset}: {e}",
                                 exc_info=True,
                             )
                             

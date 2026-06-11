@@ -72,16 +72,29 @@ export class RecentCandlesCacheService {
     });
 
     this.getKlineUpdates(symbol, interval).forEach((candle) => {
-      candlesByTimestamp.set(candle.timestamp, {
-        timestamp: candle.timestamp,
-        symbol: candle.symbol,
-        interval: candle.interval,
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: candle.volume,
-      });
+      if (isValidCandleOhlcv(candle)) {
+        candlesByTimestamp.set(candle.timestamp, {
+          timestamp: candle.timestamp,
+          symbol: candle.symbol,
+          interval: candle.interval,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume,
+        });
+      } else {
+        this.logger.warning('Invalid candle skipped from merge', {
+          symbol: candle.symbol,
+          interval: candle.interval,
+          timestamp: candle.timestamp,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume,
+        });
+      }
     });
 
     return [...candlesByTimestamp.values()]
