@@ -1,8 +1,4 @@
-import { 
-  Controller,
-  Get,
-  Query,
-} from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CandlesService } from './candles.service';
 import { CandlesQueryDto } from './dto/candles-query.dto';
@@ -18,12 +14,14 @@ export class CandlesController {
 
   @Get()
   @ApiOperation({ summary: 'Get historical candle data' })
-  @ApiResponse({ 
-    status: 200, 
+  @ApiResponse({
+    status: 200,
     description: 'Returns the historical candle data',
     type: CandlesResponseDto,
   })
-  async getCandles(@Query() query: CandlesQueryDto): Promise<CandlesResponseDto> {
+  async getCandles(
+    @Query() query: CandlesQueryDto,
+  ): Promise<CandlesResponseDto> {
     const { symbol, interval = '1m', limit = 100 } = query;
 
     this.logger.info('Received request for candles', {

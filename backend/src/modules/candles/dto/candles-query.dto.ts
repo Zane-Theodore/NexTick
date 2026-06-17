@@ -1,11 +1,17 @@
 import { Transform } from 'class-transformer';
-import { IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Max, Min } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  CandleInterval,
-  VALID_INTERVALS,
-} from '../enum/candle-interval.enum';
+import { CandleInterval, VALID_INTERVALS } from '../enum/candle-interval.enum';
+import { normalizeCandleSymbol } from '../candle-normalization';
 
 export class CandlesQueryDto {
   @ApiProperty({
@@ -14,9 +20,10 @@ export class CandlesQueryDto {
   })
   @IsString()
   @IsNotEmpty()
-  @Transform(({ value }) => value?.toUpperCase())
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? normalizeCandleSymbol(value) : value,
+  )
   symbol: string;
-
 
   @ApiPropertyOptional({
     description: `The interval for the candles. Valid values are: ${VALID_INTERVALS.join(', ')}. Default is '1m'.`,
@@ -28,16 +35,16 @@ export class CandlesQueryDto {
   @IsIn(VALID_INTERVALS)
   interval?: CandleInterval = '1m';
 
-
   @ApiPropertyOptional({
-    description: 'The maximum number of candles to return (1-2000). Default is 100.',
+    description:
+      'The maximum number of candles to return (1-2000). Default is 100.',
     minimum: 1,
     maximum: 2000,
     default: 100,
     example: 100,
   })
   @IsOptional()
-  @Transform(({ value }) =>
+  @Transform(({ value }: { value: unknown }) =>
     value === undefined || value === '' ? undefined : Number(value),
   )
   @IsInt()

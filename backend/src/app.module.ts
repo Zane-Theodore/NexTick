@@ -15,9 +15,10 @@ import { KafkaModule } from '@modules/kafka/kafka.module';
       isGlobal: true,
     }),
     EventEmitterModule.forRoot(),
-    CandlesModule, 
-    DatabaseModule, 
-    KafkaModule],
+    CandlesModule,
+    DatabaseModule,
+    KafkaModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

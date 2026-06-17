@@ -1,10 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
-import {
-  CandleInterval,
-  VALID_INTERVALS,
-} from '../enum/candle-interval.enum';
+import { CandleInterval, VALID_INTERVALS } from '../enum/candle-interval.enum';
+import { normalizeCandleSymbol } from '../candle-normalization';
 
 export class KlineRoomPayloadDto {
   @ApiProperty({
@@ -13,7 +11,9 @@ export class KlineRoomPayloadDto {
   })
   @IsString()
   @IsNotEmpty()
-  @Transform(({ value }) => value?.toUpperCase())
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? normalizeCandleSymbol(value) : value,
+  )
   symbol: string;
 
   @ApiPropertyOptional({

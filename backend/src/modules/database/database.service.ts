@@ -1,8 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { 
-  Injectable, 
-  OnModuleInit, 
-  OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Pool, types } from 'pg';
 import { AppLogger } from '../../common/logger';
 
@@ -20,14 +17,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     this.logger.info('Initializing database connection...');
 
     this.pool = new Pool({
-        user: this.configService.get('QUESTDB_USER'),
-        host: this.configService.get('QUESTDB_HOST'),
-        database: this.configService.get('QUESTDB_DB_NAME'),
-        password: this.configService.get('QUESTDB_PASSWORD'),
-        port: this.configService.get('QUESTDB_PORT'),
-        max: this.configService.get('QUESTDB_POOL_MAX'),
-        connectionTimeoutMillis: this.configService.get('QUESTDB_POOL_TIMEOUT'),
-        idleTimeoutMillis: this.configService.get('QUESTDB_POOL_IDLE_TIMEOUT'),
+      user: this.configService.get('QUESTDB_USER'),
+      host: this.configService.get('QUESTDB_HOST'),
+      database: this.configService.get('QUESTDB_DB_NAME'),
+      password: this.configService.get('QUESTDB_PASSWORD'),
+      port: this.configService.get('QUESTDB_PORT'),
+      max: this.configService.get('QUESTDB_POOL_MAX'),
+      connectionTimeoutMillis: this.configService.get('QUESTDB_POOL_TIMEOUT'),
+      idleTimeoutMillis: this.configService.get('QUESTDB_POOL_IDLE_TIMEOUT'),
     });
 
     try {

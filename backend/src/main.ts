@@ -30,9 +30,11 @@ async function bootstrap() {
 
   const config = new DocumentBuilder()
     .setTitle('NexTick API')
-    .setDescription('API documentation for NexTick - Real-time cryptocurrency data and trading platform')
+    .setDescription(
+      'API documentation for NexTick - Real-time cryptocurrency data and trading platform',
+    )
     .build();
-    
+
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
@@ -40,4 +42,4 @@ async function bootstrap() {
   logger.info(`Application is running on: ${backendUrl}`);
   logger.info(`Swagger UI is available at: ${backendUrl}/api/docs`);
 }
-bootstrap();
+void bootstrap();

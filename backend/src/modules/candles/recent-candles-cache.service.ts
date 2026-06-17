@@ -2,7 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { CandleDto } from './dto/candle.dto';
 import { KlineUpdateDto } from './dto/kline-update.dto';
 import { AppLogger } from '../../common/logger';
-import { isValidCandleOhlcv, parseCandleNumber } from './candle-validation';
+import { isValidCandleOhlcv } from './candle-validation';
+import {
+  compareTimestampAsc,
+  getCandleRoomKey,
+  klineUpdateToCandleDto,
+  normalizeKlineUpdate,
+} from './candle-normalization';
 
 @Injectable()
 export class RecentCandlesCacheService {
@@ -11,7 +17,7 @@ export class RecentCandlesCacheService {
   private readonly candlesByRoom = new Map<string, KlineUpdateDto[]>();
 
   upsert(candle: KlineUpdateDto): void {
-    const normalizedCandle = this.normalizeCandle(candle);
+    const normalizedCandle = normalizeKlineUpdate(candle);
 
     if (!normalizedCandle) {
       this.logger.warning('Invalid realtime candle skipped from cache', {
@@ -42,11 +48,7 @@ export class RecentCandlesCacheService {
       cachedCandles.push(normalizedCandle);
     }
 
-    cachedCandles.sort((left, right) => {
-      return (
-        new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()
-      );
-    });
+    cachedCandles.sort(compareTimestampAsc);
 
     this.candlesByRoom.set(
       roomKey,
@@ -73,16 +75,10 @@ export class RecentCandlesCacheService {
 
     this.getKlineUpdates(symbol, interval).forEach((candle) => {
       if (isValidCandleOhlcv(candle)) {
-        candlesByTimestamp.set(candle.timestamp, {
-          timestamp: candle.timestamp,
-          symbol: candle.symbol,
-          interval: candle.interval,
-          open: candle.open,
-          high: candle.high,
-          low: candle.low,
-          close: candle.close,
-          volume: candle.volume,
-        });
+        candlesByTimestamp.set(
+          candle.timestamp,
+          klineUpdateToCandleDto(candle),
+        );
       } else {
         this.logger.warning('Invalid candle skipped from merge', {
           symbol: candle.symbol,
@@ -98,46 +94,11 @@ export class RecentCandlesCacheService {
     });
 
     return [...candlesByTimestamp.values()]
-      .sort((left, right) => {
-        return (
-          new Date(left.timestamp).getTime() -
-          new Date(right.timestamp).getTime()
-        );
-      })
+      .sort(compareTimestampAsc)
       .slice(-limit);
   }
 
   private getRoomKey(symbol: string, interval: string): string {
-    return `${symbol.toUpperCase()}_${interval}`;
-  }
-
-  private normalizeCandle(candle: KlineUpdateDto): KlineUpdateDto | null {
-    const timestamp = new Date(candle.timestamp);
-
-    if (Number.isNaN(timestamp.getTime())) {
-      return null;
-    }
-
-    const normalizedCandle = {
-      ...candle,
-      symbol: String(candle.symbol ?? '').toUpperCase(),
-      interval: String(candle.interval ?? ''),
-      timestamp: timestamp.toISOString(),
-      open: parseCandleNumber(candle.open),
-      high: parseCandleNumber(candle.high),
-      low: parseCandleNumber(candle.low),
-      close: parseCandleNumber(candle.close),
-      volume: parseCandleNumber(candle.volume),
-    };
-
-    if (
-      !normalizedCandle.symbol ||
-      !normalizedCandle.interval ||
-      !isValidCandleOhlcv(normalizedCandle)
-    ) {
-      return null;
-    }
-
-    return normalizedCandle;
+    return getCandleRoomKey(symbol, interval);
   }
 }

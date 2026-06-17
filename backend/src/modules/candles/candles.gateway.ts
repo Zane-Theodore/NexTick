@@ -15,6 +15,7 @@ import { KlineUpdateDto } from './dto/kline-update.dto';
 import { AppLogger } from '../../common/logger';
 import { RecentCandlesCacheService } from './recent-candles-cache.service';
 import { isValidCandleOhlcv } from './candle-validation';
+import { getCandleRoomKey } from './candle-normalization';
 
 @WebSocketGateway({
   cors: {
@@ -67,8 +68,8 @@ export class CandlesGateway
     @ConnectedSocket() client: Socket,
   ) {
     const interval = payload.interval ?? '1m';
-    const roomName = `${payload.symbol.toUpperCase()}_${interval}`;
-    client.join(roomName);
+    const roomName = getCandleRoomKey(payload.symbol, interval);
+    void client.join(roomName);
     this.logger.info(`Client ${client.id} joined room: ${roomName}`);
 
     const cachedCandles = this.recentCandlesCache.getKlineUpdates(
@@ -87,24 +88,27 @@ export class CandlesGateway
     @ConnectedSocket() client: Socket,
   ) {
     const interval = payload.interval ?? '1m';
-    const roomName = `${payload.symbol.toUpperCase()}_${interval}`;
-    client.leave(roomName);
+    const roomName = getCandleRoomKey(payload.symbol, interval);
+    void client.leave(roomName);
     this.logger.info(`Client ${client.id} left room: ${roomName}`);
   }
 
   @OnEvent('candle.update')
   handleCandleUpdateEvent(candleData: KlineUpdateDto) {
     if (!isValidCandleOhlcv(candleData)) {
-      this.logger.warning('Invalid candle update skipped before websocket emit', {
-        symbol: candleData.symbol,
-        interval: candleData.interval,
-        timestamp: candleData.timestamp,
-        open: candleData.open,
-        high: candleData.high,
-        low: candleData.low,
-        close: candleData.close,
-        volume: candleData.volume,
-      });
+      this.logger.warning(
+        'Invalid candle update skipped before websocket emit',
+        {
+          symbol: candleData.symbol,
+          interval: candleData.interval,
+          timestamp: candleData.timestamp,
+          open: candleData.open,
+          high: candleData.high,
+          low: candleData.low,
+          close: candleData.close,
+          volume: candleData.volume,
+        },
+      );
       return;
     }
 
@@ -130,7 +134,7 @@ export class CandlesGateway
     }
 
     // Emit to specific room based on symbol and interval
-    const roomName = `${candleData.symbol.toUpperCase()}_${candleData.interval}`;
+    const roomName = getCandleRoomKey(candleData.symbol, candleData.interval);
     this.server.to(roomName).emit('kline_update', candleData);
   }
 }

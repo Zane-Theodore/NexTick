@@ -74,7 +74,25 @@ export class AppLogger extends NestLogger {
     try {
       return JSON.stringify(value);
     } catch {
-      return String(value);
+      if (value === null || value === undefined) {
+        return '';
+      }
+
+      if (typeof value === 'object' || typeof value === 'function') {
+        return '[Unserializable metadata]';
+      }
+
+      switch (typeof value) {
+        case 'string':
+          return value;
+        case 'number':
+        case 'bigint':
+        case 'boolean':
+        case 'symbol':
+          return value.toString();
+        default:
+          return '';
+      }
     }
   }
 }

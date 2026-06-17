@@ -1,10 +1,15 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CandleDto } from './dto/candle.dto';
-import { VALID_INTERVALS } from './enum/candle-interval.enum';
+import {
+  CANDLE_INTERVAL_MS,
+  CandleInterval,
+  isValidCandleInterval,
+} from './enum/candle-interval.enum';
 import { AppLogger } from '../../common/logger';
 import { RecentCandlesCacheService } from './recent-candles-cache.service';
 import { isValidCandleOhlcv, parseCandleNumber } from './candle-validation';
+import { sanitizeCandleSymbol } from './candle-normalization';
 
 type HistoricalCandleRow = {
   timestamp: string | Date;
@@ -24,23 +29,6 @@ type HistoricalCandlesQueryResult = {
 @Injectable()
 export class CandlesService {
   private readonly logger = new AppLogger(CandlesService.name);
-  private readonly intervalMs: Record<string, number> = {
-    '1m': 60_000,
-    '3m': 3 * 60_000,
-    '5m': 5 * 60_000,
-    '15m': 15 * 60_000,
-    '30m': 30 * 60_000,
-    '1h': 60 * 60_000,
-    '2h': 2 * 60 * 60_000,
-    '4h': 4 * 60 * 60_000,
-    '6h': 6 * 60 * 60_000,
-    '8h': 8 * 60 * 60_000,
-    '12h': 12 * 60 * 60_000,
-    '1d': 24 * 60 * 60_000,
-    '3d': 3 * 24 * 60 * 60_000,
-    '1w': 7 * 24 * 60 * 60_000,
-    '1M': 30 * 24 * 60 * 60_000,
-  };
 
   constructor(
     private readonly databaseService: DatabaseService,
@@ -74,41 +62,35 @@ export class CandlesService {
       .replace(/\.\d{3}Z$/, '');
   }
 
-  async getHistoricalCandles(
-    symbol: string = 'BTCUSDT',
-    limit: number = 100,
-    interval: string = '1m',
-  ): Promise<CandleDto[]> {
-    this.logger.info('Fetching historical candles', {
-      symbol,
-      interval,
-      limit,
-    });
+  private getQueryWindow(stepMs: number, limit: number) {
+    const requestedWindowMs = Math.max(stepMs * limit * 2, 24 * 60 * 60_000);
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - requestedWindowMs);
 
-    try {
-      if (!(VALID_INTERVALS as readonly string[]).includes(interval)) {
-        throw new BadRequestException(
-          `Invalid time interval requested: ${interval}`,
-        );
-      }
+    return {
+      startTimestamp: this.toQuestDbTimestamp(startTime),
+      endTimestamp: this.toQuestDbTimestamp(endTime),
+    };
+  }
 
-      const safeSymbol = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
-      const stepMs = this.intervalMs[interval];
-      const requestedWindowMs = Math.max(stepMs * limit * 2, 24 * 60 * 60_000);
-      const endTime = new Date();
-      const startTime = new Date(endTime.getTime() - requestedWindowMs);
-      const startTimestamp = this.toQuestDbTimestamp(startTime);
-      const endTimestamp = this.toQuestDbTimestamp(endTime);
-      this.logger.info('Resolved historical candle query window', {
-        symbol: safeSymbol,
-        interval,
-        limit,
-        startTimestamp,
-        endTimestamp,
-      });
+  private getCompleteBucketFilter(interval: CandleInterval): string {
+    if (interval === '1M') {
+      return '';
+    }
 
-      const query = `
-        WITH deduped_1m AS (
+    const expectedOneMinuteCount = Math.max(
+      1,
+      Math.floor(CANDLE_INTERVAL_MS[interval] / CANDLE_INTERVAL_MS['1m']),
+    );
+
+    return `WHERE minute_count = ${expectedOneMinuteCount}`;
+  }
+
+  private buildHistoricalCandlesQuery(interval: CandleInterval): string {
+    const completeBucketFilter = this.getCompleteBucketFilter(interval);
+
+    return `
+        WITH candidate_1m AS (
           SELECT
             timestamp,
             symbol,
@@ -117,7 +99,8 @@ export class CandlesService {
             last(high) AS high,
             last(low) AS low,
             last(close) AS close,
-            last(volume) AS volume
+            last(volume) AS volume,
+            count() AS version_count
           FROM market_candles
           WHERE symbol = $1
             AND interval = '1m'
@@ -134,22 +117,120 @@ export class CandlesService {
             AND low <= close
             AND high >= low
           SAMPLE BY 1m ALIGN TO CALENDAR
+        ),
+        stable_1m AS (
+          SELECT
+            timestamp,
+            symbol,
+            interval,
+            open,
+            high,
+            low,
+            close,
+            volume
+          FROM candidate_1m
+          WHERE version_count = 1
+        ),
+        aggregated AS (
+          SELECT
+            timestamp,
+            symbol,
+            '${interval}' AS interval,
+            first(open) AS open,
+            max(high) AS high,
+            min(low) AS low,
+            last(close) AS close,
+            sum(volume) AS volume,
+            count() AS minute_count
+          FROM stable_1m
+          SAMPLE BY ${interval} ALIGN TO CALENDAR
         )
-        SELECT 
+        SELECT
           timestamp,
           symbol,
-          '${interval}' AS interval,
-          first(open) AS open,
-          max(high) AS high,
-          min(low) AS low,
-          last(close) AS close,
-          sum(volume) AS volume
-        FROM deduped_1m
-        SAMPLE BY ${interval} ALIGN TO CALENDAR
+          interval,
+          open,
+          high,
+          low,
+          close,
+          volume
+        FROM aggregated
+        ${completeBucketFilter}
         ORDER BY timestamp DESC
         LIMIT $4;
       `;
+  }
 
+  private mapHistoricalRows(
+    rows: HistoricalCandleRow[] = [],
+    symbol: string,
+    interval: CandleInterval,
+  ): CandleDto[] {
+    return [...rows]
+      .reverse()
+      .map((row) => {
+        return {
+          symbol: row.symbol,
+          interval: row.interval,
+          open: parseCandleNumber(row.open),
+          high: parseCandleNumber(row.high),
+          low: parseCandleNumber(row.low),
+          close: parseCandleNumber(row.close),
+          volume: parseCandleNumber(row.volume),
+          timestamp: this.normalizeQuestDbTimestamp(row.timestamp),
+        };
+      })
+      .filter((candle) => {
+        const isValid = isValidCandleOhlcv(candle);
+
+        if (!isValid) {
+          this.logger.warning(
+            'Invalid OHLC candle filtered from history response',
+            {
+              symbol,
+              interval,
+              candle,
+            },
+          );
+        }
+
+        return isValid;
+      });
+  }
+
+  async getHistoricalCandles(
+    symbol: string = 'BTCUSDT',
+    limit: number = 100,
+    interval: string = '1m',
+  ): Promise<CandleDto[]> {
+    this.logger.info('Fetching historical candles', {
+      symbol,
+      interval,
+      limit,
+    });
+
+    try {
+      if (!isValidCandleInterval(interval)) {
+        throw new BadRequestException(
+          `Invalid time interval requested: ${interval}`,
+        );
+      }
+
+      const safeSymbol = sanitizeCandleSymbol(symbol);
+      const stepMs = CANDLE_INTERVAL_MS[interval];
+      const { startTimestamp, endTimestamp } = this.getQueryWindow(
+        stepMs,
+        limit,
+      );
+      this.logger.info('Resolved historical candle query window', {
+        symbol: safeSymbol,
+        interval,
+        limit,
+        startTimestamp,
+        endTimestamp,
+      });
+
+      const query = this.buildHistoricalCandlesQuery(interval);
       const parameters = [safeSymbol, startTimestamp, endTimestamp, limit];
 
       const result = (await this.databaseService.query(
@@ -157,38 +238,7 @@ export class CandlesService {
         parameters,
       )) as HistoricalCandlesQueryResult;
 
-      const candles = result.rows
-        ? [...result.rows]
-            .reverse()
-            .map((row) => {
-              return {
-                symbol: row.symbol,
-                interval: row.interval,
-                open: parseCandleNumber(row.open),
-                high: parseCandleNumber(row.high),
-                low: parseCandleNumber(row.low),
-                close: parseCandleNumber(row.close),
-                volume: parseCandleNumber(row.volume),
-                timestamp: this.normalizeQuestDbTimestamp(row.timestamp),
-              };
-            })
-            .filter((candle) => {
-              const isValid = isValidCandleOhlcv(candle);
-
-              if (!isValid) {
-                this.logger.warning(
-                  'Invalid OHLC candle filtered from history response',
-                  {
-                    symbol: safeSymbol,
-                    interval,
-                    candle,
-                  },
-                );
-              }
-
-              return isValid;
-            })
-        : [];
+      const candles = this.mapHistoricalRows(result.rows, safeSymbol, interval);
 
       const candlesWithRealtimeTail = this.recentCandlesCache.mergeWithHistory(
         candles,
@@ -215,14 +265,13 @@ export class CandlesService {
   private detectHistoryGaps(
     candles: CandleDto[],
     symbol: string,
-    interval: string,
+    interval: CandleInterval,
   ) {
-    const stepMs = this.intervalMs[interval];
-
-    if (!stepMs || candles.length < 2) {
+    if (candles.length < 2) {
       return;
     }
 
+    const stepMs = CANDLE_INTERVAL_MS[interval];
     const missing: Array<{ expected: string; actual: string }> = [];
     const duplicates: string[] = [];
     let previousTime = new Date(candles[0].timestamp).getTime();
