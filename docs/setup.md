@@ -8,7 +8,7 @@ The repository has no root `package.json`. Run backend and frontend commands ins
 
 | Tool | Required for |
 | --- | --- |
-| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, `data-processor`, and optional maintenance services. |
+| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, `data-processor`, and `data-recent-reconcile`. |
 | Node.js and npm | NestJS backend and Vite frontend. |
 | Python 3.10+ | Manual data pipeline runs without pipeline containers. |
 | PowerShell, Git Bash, or another shell | Copying env files and running commands. |
@@ -49,7 +49,7 @@ QUESTDB_PASSWORD=quest
 QUESTDB_DB_NAME=qdb
 
 KAFKA_BROKER=localhost:9092
-KAFKA_TOPIC_RAW_TRADES=raw-trades
+KAFKA_TOPIC_MARKET_KLINES=market-klines
 KAFKA_TOPIC_KLINE_STREAM=kline-stream
 KAFKA_CONSUMER_GROUP_ID=candle-processor-group
 KAFKA_AUTO_OFFSET_RESET=earliest
@@ -57,12 +57,11 @@ KAFKA_AUTO_OFFSET_RESET=earliest
 BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
-CANDLE_UPDATE_INTERVAL_MS=500
 
 STARTUP_RECONCILE_ENABLED=true
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
-RECENT_RECONCILE_ENABLED=false
+RECENT_RECONCILE_ENABLED=true
 ```
 
 Docker Compose overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb` inside pipeline containers.
@@ -111,7 +110,7 @@ VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 From the repository root:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor data-recent-reconcile
 ```
 
 Check containers:
@@ -123,7 +122,7 @@ docker compose ps
 View logs:
 
 ```bash
-docker compose logs -f kafka-setup data-producer data-backfill data-processor
+docker compose logs -f kafka-setup data-producer data-backfill data-processor data-recent-reconcile
 ```
 
 Local service URLs:
@@ -134,15 +133,17 @@ Local service URLs:
 | QuestDB Console | `http://localhost:9000` |
 | Kafka broker for host apps | `localhost:9092` |
 | QuestDB PostgreSQL wire for host apps | `localhost:8812` |
+| QuestDB ILP TCP for host apps | `localhost:9009` |
 
 Expected service order:
 
 1. `kafka` becomes healthy.
-2. `kafka-setup` creates `raw-trades` and `kline-stream`.
+2. `kafka-setup` creates `market-klines` and `kline-stream`.
 3. `questdb` becomes healthy.
-4. `data-producer` starts after Kafka topics exist and connects to Binance.
+4. `data-producer` starts after Kafka topics exist and connects to Binance kline streams.
 5. `data-backfill` repairs the closed startup candle window and writes a shared watermark.
-6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered raw trades and skips final `1m` DB upserts before the backfill watermark.
+6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered klines and skips final `1m` DB upserts before the backfill watermark.
+7. `data-recent-reconcile` starts after `data-processor` is healthy and periodically repairs recent closed candles.
 
 ## 4. Start the Backend
 
@@ -293,7 +294,7 @@ python -m compileall data_pipeline
 Pipeline operational checks:
 
 ```bash
-docker compose logs -f data-producer data-backfill data-processor
+docker compose logs -f data-producer data-backfill data-processor data-recent-reconcile
 ```
 
 Use Kafka UI to inspect topics:
@@ -321,7 +322,7 @@ LIMIT 20;
 Use the pipeline reconciler when stored `1m` candles are missing or need to be
 filled from Binance REST data. The startup backfill repairs one 24-hour window
 through Binance's latest closed minute and writes a watermark so the processor
-does not overwrite that window while draining buffered trades.
+does not overwrite that window while draining buffered kline updates.
 
 Docker Compose runs `data-backfill` once before `data-processor` starts. The
 startup/manual `data_pipeline.backfill.reconciler` path builds replacement
@@ -348,18 +349,21 @@ If a previous reconcile failed after dropping `market_candles`, run the same
 command again. The script restores `market_candles` from the newest
 `market_candles_old_*` backup before continuing.
 
-For periodic recent closed-candle repair, Docker Compose includes the optional
-`data-recent-reconcile` service behind the `maintenance` profile. It runs
-`data_pipeline.backfill.recent_runner`, upserts the recent closed tail into the
-WAL/dedup table, and is disabled by default through
-`RECENT_RECONCILE_ENABLED=false`.
+For periodic recent closed-candle repair, Docker Compose includes the
+`data-recent-reconcile` service. It runs `data_pipeline.backfill.recent_runner`
+and upserts the recent closed tail into the WAL/dedup table. Keep
+`RECENT_RECONCILE_ENABLED=true` for long-running storage so missed WebSocket
+final kline messages are repaired from Binance REST.
 
 ```bash
-docker compose --profile maintenance up -d data-recent-reconcile
+docker compose up -d data-recent-reconcile
 ```
 
-Enable it by setting `RECENT_RECONCILE_ENABLED=true` and tuning the recent
-reconcile variables in `data_pipeline/.env`.
+Tune the recent reconcile variables in `data_pipeline/.env` if you need a
+larger or less frequent repair window. Keep
+`RECENT_RECONCILE_VERIFY_AFTER_WRITE=true` so the service waits for QuestDB
+WAL/dedup to expose a single canonical row per repaired candle before the pass
+is considered successful.
 
 ## Troubleshooting
 
@@ -373,7 +377,7 @@ reconcile variables in `data_pipeline/.env`.
 | Frontend does not load data | Backend is down, `VITE_API_URL` is wrong, or no candles exist yet | Check `/health`, `/candles`, and frontend `.env`; wait for a final `1m` candle. |
 | Footer shows `Offline` | `VITE_API_HEALTH_URL` is missing or backend `/health` is unreachable | Set `VITE_API_HEALTH_URL=http://localhost:3000/health` and restart Vite. |
 | Socket.IO CORS error | `FRONTEND_URL` or `BACKEND_URL` does not match the browser/backend origin | Update `backend/.env` and restart NestJS. |
-| `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after trades start. |
+| `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after kline streaming starts. |
 | `market_candles` is missing after reconciliation | A previous manual full repair failed after dropping the live table | Stop `data-processor`, then run `python -m data_pipeline.backfill.reconciler` to restore from the newest `market_candles_old_*` backup. |
 | Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs; Compose sets DNS to `8.8.8.8` and `8.8.4.4`. |
 | Interval returns 400 | Interval is not in backend `VALID_INTERVALS` | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
