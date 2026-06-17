@@ -2,7 +2,7 @@
 
 `frontend/` is the React charting UI for NexTick.
 
-It loads historical candles from the NestJS REST API, joins Socket.IO rooms for realtime kline updates, and renders candlestick, volume, OHLCV tooltip, and configurable indicator series with Lightweight Charts.
+It loads historical candles from the NestJS REST API, joins Socket.IO rooms for realtime kline updates, and renders candlestick, volume, OHLCV tooltip, visible high/low labels, persisted chart preferences, and configurable indicator series with Lightweight Charts.
 
 When realtime updates reveal a gap near the latest candles, the frontend
 refetches recent history, merges it with the current in-memory candle list, and
@@ -36,6 +36,7 @@ frontend/src/
 |   |   |-- TradingChart.tsx
 |   |   |-- VisibleExtremaOverlay.tsx
 |   |   |-- chartConstants.ts
+|   |   |-- chartPreferences.ts
 |   |   |-- useTradingChartSetup.ts
 |   |   `-- useTradingChartState.ts
 |   |-- indicators/
@@ -62,6 +63,7 @@ frontend/src/
 `-- utils/
     |-- chartIndicators.ts
     |-- formatters.ts
+    |-- indicatorSettings.ts
     |-- indicators.ts
     `-- logger.ts
 ```
@@ -221,6 +223,7 @@ The frontend uses Lightweight Charts imperatively from React lifecycle hooks.
 | Historical load | `candlestickSeries.setData()`, `volumeSeries.setData()`, and indicator `setData()` | `useMarketData.ts` |
 | Symbol or interval change | Clear series, load history, then `setData()` | `useMarketData.ts` |
 | Realtime candle | `candlestickSeries.update()` and `volumeSeries.update()` | `useMarketData.ts` |
+| Out-of-order realtime candle | Merge by timestamp, then full candle/volume `setData()` while preserving visible range | `useMarketData.ts` |
 | Realtime indicators | Recalculate visible indicator history and call indicator `setData()` | `useMarketData.ts` |
 | Tail gap repair | Retry recent `GET /candles` requests with 1s, 2.5s, 5s, and 10s delays, then merge history | `useMarketData.ts` |
 | Cursor tooltip | Crosshair data updates `OhlcvTooltip` and hovered indicator values | `useTradingChartSetup.ts` |
@@ -235,7 +238,7 @@ Default indicator settings live in `components/chart/chartConstants.ts`. Indicat
 | Indicator group | Default state | Notes |
 | --- | --- | --- |
 | EMA | Visible | Default periods `7`, `25`, `99` on the main chart. |
-| MA | Visible | Default periods `7`, `25`, `99` on the main chart. |
+| MA | Hidden by group visibility | Default periods `7`, `25`, `99` on the main chart; the underlying settings remain enabled for quick re-show. |
 | Volume MA | Visible | Default period `20` on the volume pane. |
 | RSI | Hidden | Uses a secondary pane when enabled. |
 | MACD | Hidden | Uses MACD and signal line series in a secondary pane. |
@@ -249,6 +252,11 @@ The indicator settings window supports:
 | Price source | EMA, MA, RSI, MACD. |
 | Line width and color | All visible line indicators. |
 | Fast, slow, and signal periods | MACD. |
+
+Chart preferences are stored in `sessionStorage` under
+`nextick:trading-chart:preferences:v1`. The saved values include indicator
+settings, hidden indicator groups, bar spacing, and main/volume pane stretch
+factors. Pressing `Ctrl+F5` resets those saved chart preferences to defaults.
 
 ## Routes and UI Features
 

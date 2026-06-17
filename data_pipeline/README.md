@@ -12,7 +12,7 @@ This module does not expose browser APIs, render UI, or run the NestJS backend.
 | --- | --- |
 | `producer/binance_producer.py` | Runs `BinanceCombinedKlineProducer`, connects to Binance kline streams, validates OHLCV values, and publishes normalized klines to Kafka. |
 | `processor/candle_processor.py` | Runs `CandleProcessor`, consumes normalized klines, writes final `1m` candles to QuestDB, and publishes kline updates. |
-| `processor/runner.py` | Processor service entrypoint with signal handling and health marker management. |
+| `processor/runner.py` | Processor service entrypoint with signal handling and `PROCESSOR_READY_FILE` health marker management. |
 | `backfill/runner.py` | Startup backfill service entrypoint with retry policy and failure behavior. |
 | `backfill/reconciler.py` | Maintenance script that validates Binance REST klines and replaces a closed `1m` candle window in QuestDB. |
 | `backfill/recent_runner.py` | Periodic recent closed-candle reconciler used by `data-recent-reconcile`; upserts the recent closed tail into the WAL/dedup table. |
@@ -231,6 +231,7 @@ local `.env` values before startup.
 | `STARTUP_RECONCILE_END_LAG_MINUTES` | No | `0` | Optional lag behind Binance's current minute floor. Keep `0` for startup so DB has no handoff gap before the processor starts. |
 | `STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE` | No | `true` | Waits briefly near a fresh minute boundary before resolving the startup backfill window. |
 | `STARTUP_BACKFILL_STATE_FILE` | No | `/tmp/nextick/startup-backfill.json` in Docker | Shared marker file containing the startup backfill watermark for the processor; blank uses the OS temp directory. |
+| `PROCESSOR_READY_FILE` | No | `/tmp/nextick/processor-ready` in Docker | Optional ready marker path written by `processor/runner.py`; Compose uses it for the `data-processor` healthcheck. |
 | `RECENT_RECONCILE_ENABLED` | No | `true` | Enables the periodic recent closed-candle reconciler. |
 | `RECENT_RECONCILE_INTERVAL_SECONDS` | No | `60` | Delay between recent reconciliation passes. |
 | `RECENT_RECONCILE_LOOKBACK_MINUTES` | No | `15` | Recent closed window size repaired from Binance REST. |
@@ -385,4 +386,4 @@ It does not:
 | Socket.IO fan-out | NestJS backend |
 | AI forecasting request path | Future isolated service |
 
-Future replay buffers, model training, online learning, and forecasting services should consume Kafka or QuestDB contracts. They should not depend on trade-level aggregation state in `CandleProcessor`.
+Future replay buffers, model training, online learning, and forecasting services should consume Kafka or QuestDB contracts. They should not depend on in-memory state in `CandleProcessor`.

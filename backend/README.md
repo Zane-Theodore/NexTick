@@ -4,7 +4,7 @@
 
 It validates public contracts, reads historical candles from QuestDB, exposes REST and Swagger, consumes processed kline updates from Kafka, and fans those updates out to browsers through Socket.IO rooms.
 
-The backend is not an ingestion engine. It does not connect to Binance and does not aggregate raw trades.
+The backend is not an ingestion engine. It does not connect to Binance and does not own candle ingestion.
 
 ## Responsibilities
 
@@ -12,7 +12,7 @@ The backend is not an ingestion engine. It does not connect to Binance and does 
 | --- | --- |
 | REST API | `AppController` and `CandlesController`. |
 | Health check | `GET /health` returns `{ status, timestamp }`. |
-| Historical candles | `GET /candles` queries QuestDB through `CandlesService`, filters invalid OHLCV rows, and merges the recent realtime tail. |
+| Historical candles | `GET /candles` queries QuestDB through `CandlesService`, filters invalid OHLCV rows, skips duplicate visible WAL versions, returns complete aggregate buckets where possible, and merges the recent realtime tail. |
 | Swagger | Registered at `/api/docs` in `main.ts`. |
 | Validation | Global `ValidationPipe` plus DTO classes for REST and Socket.IO payloads. |
 | QuestDB access | `DatabaseService` uses `pg.Pool` over QuestDB PostgreSQL wire protocol. |
@@ -35,6 +35,7 @@ backend/
 |   `-- modules/
 |       |-- candles/
 |       |   |-- candles.controller.ts
+|       |   |-- candle-normalization.ts
 |       |   |-- candle-validation.ts
 |       |   |-- candles.gateway.ts
 |       |   |-- candles.module.ts
@@ -204,11 +205,14 @@ Response shape:
 `CandlesService` reads from `market_candles`, where the pipeline stores final `1m` candles.
 
 The backend reads a bounded time window from stored `1m` rows, filters invalid
-OHLCV values, dedupes by `1m` timestamp, and aggregates into the requested
-interval:
+OHLCV values, skips any `1m` timestamp that still has duplicate visible WAL
+versions, and only returns fixed-size aggregate buckets after all expected
+minute rows are present. The `1M` interval is the exception: it uses QuestDB's
+calendar month buckets without a fixed minute-count filter because month length
+varies.
 
 ```sql
-WITH deduped_1m AS (
+WITH candidate_1m AS (
   SELECT
     timestamp,
     symbol,
@@ -217,7 +221,8 @@ WITH deduped_1m AS (
     last(high) AS high,
     last(low) AS low,
     last(close) AS close,
-    last(volume) AS volume
+    last(volume) AS volume,
+    count() AS version_count
   FROM market_candles
   WHERE symbol = $1
     AND interval = '1m'
@@ -234,18 +239,37 @@ WITH deduped_1m AS (
     AND low <= close
     AND high >= low
   SAMPLE BY 1m ALIGN TO CALENDAR
+),
+stable_1m AS (
+  SELECT timestamp, symbol, interval, open, high, low, close, volume
+  FROM candidate_1m
+  WHERE version_count = 1
+),
+aggregated AS (
+  SELECT
+    timestamp,
+    symbol,
+    '${interval}' AS interval,
+    first(open) AS open,
+    max(high) AS high,
+    min(low) AS low,
+    last(close) AS close,
+    sum(volume) AS volume,
+    count() AS minute_count
+  FROM stable_1m
+  SAMPLE BY ${interval} ALIGN TO CALENDAR
 )
 SELECT
   timestamp,
   symbol,
-  '${interval}' AS interval,
-  first(open) AS open,
-  max(high) AS high,
-  min(low) AS low,
-  last(close) AS close,
-  sum(volume) AS volume
-FROM deduped_1m
-SAMPLE BY ${interval} ALIGN TO CALENDAR
+  interval,
+  open,
+  high,
+  low,
+  close,
+  volume
+FROM aggregated
+WHERE minute_count = ${expectedOneMinuteCount}
 ORDER BY timestamp DESC
 LIMIT $4;
 ```
@@ -261,7 +285,7 @@ Security notes:
 | Concern | Current handling |
 | --- | --- |
 | `interval` SQL fragment | Checked against `VALID_INTERVALS` before interpolation into `SAMPLE BY`. |
-| `symbol` | Uppercased, stripped to `[A-Z0-9]`, then passed as `$1`. |
+| `symbol` | Uppercased by room/update normalization; REST history symbols are stripped to `[A-Z0-9]`, then passed as `$1`. |
 | `limit` | DTO-constrained to `1..2000`, then passed as `$4`. |
 
 ## Kafka Consumer Behavior
@@ -273,10 +297,10 @@ Security notes:
 3. Subscribes to `KAFKA_TOPIC_KLINE_STREAM` with `fromBeginning: false`.
 4. Parses each message as JSON.
 5. Skips empty values and messages missing required candle fields.
-6. Normalizes timestamps and numeric OHLCV fields before validation.
+6. Normalizes timestamps, symbols, and numeric OHLCV fields before validation.
 7. Emits an internal `candle.update` event through `EventEmitter2`.
 
-The backend consumes processed candle updates only. It does not consume raw trades.
+The backend consumes processed candle updates only. It does not consume Binance market streams directly.
 
 ## Socket.IO Events
 
@@ -326,8 +350,10 @@ Socket.IO CORS allows `BACKEND_URL`, `FRONTEND_URL`, and requests without an `or
 | Socket room payload | `KlineRoomPayloadDto` |
 | Realtime candle update | `KlineUpdateDto` |
 
-`candle-validation.ts` also normalizes numeric values from QuestDB/Kafka and
-rejects invalid OHLCV shapes before the backend returns or emits candles.
+`candle-normalization.ts` centralizes symbol, room-key, timestamp, and Kafka
+update normalization. `candle-validation.ts` parses numeric values from
+QuestDB/Kafka and rejects invalid OHLCV shapes before the backend returns or
+emits candles.
 
 The app enables a global pipe:
 
@@ -366,5 +392,5 @@ npm run test:e2e
 | Parameterize scalar values. | `symbol`, `startTimestamp`, `endTimestamp`, and `limit` are passed as query parameters. |
 | Do not expose Kafka or QuestDB to browsers. | Browsers should use NestJS REST and Socket.IO only. |
 | Do not ingest Binance in the backend. | Binance ingestion belongs to the Python producer. |
-| Do not aggregate raw trades in the backend. | Candle aggregation belongs to the Python processor. |
+| Do not ingest Binance streams in the backend. | Binance stream handling belongs to the Python pipeline. |
 | Keep AI/model work outside the API request path. | Future forecasting should consume Kafka or QuestDB through explicit contracts. |
