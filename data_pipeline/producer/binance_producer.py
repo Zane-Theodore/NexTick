@@ -1,7 +1,8 @@
+import json
 import signal
 import sys
 import time
-import json
+
 import websocket
 from kafka import KafkaProducer
 from kafka.errors import KafkaError, NoBrokersAvailable
@@ -12,22 +13,9 @@ from data_pipeline.common.logger import get_logger
 logger = get_logger(__name__)
 
 
-def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0, operation_name='operation'):
-    """Execute an operation with exponential backoff retry logic.
-    
-    Args:
-        operation: Callable to execute.
-        max_retries: Maximum number of retry attempts.
-        base_delay: Initial delay in seconds between retries.
-        max_delay: Maximum delay in seconds between retries.
-        operation_name: Descriptive name for logging.
-        
-    Returns:
-        Result of the operation.
-        
-    Raises:
-        Exception: If all retries are exhausted.
-    """
+def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0, operation_name="operation"):
+    """Execute an operation with exponential backoff retry logic."""
+
     attempt = 0
     while attempt < max_retries:
         try:
@@ -35,7 +23,10 @@ def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0
         except NoBrokersAvailable:
             attempt += 1
             delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            logger.warning(f"{operation_name} failed (Kafka not ready). Retrying in {delay:.1f}s... ({attempt}/{max_retries})")
+            logger.warning(
+                f"{operation_name} failed (Kafka not ready). "
+                f"Retrying in {delay:.1f}s... ({attempt}/{max_retries})"
+            )
             time.sleep(delay)
         except Exception as error:
             attempt += 1
@@ -43,156 +34,177 @@ def retry_with_backoff(operation, max_retries=60, base_delay=1.0, max_delay=10.0
                 logger.error(f"{operation_name} failed after {attempt} attempts.", exc_info=True)
                 raise
             delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            logger.warning(f"{operation_name} failed on attempt {attempt}: {error}. Retrying in {delay:.1f}s...")
+            logger.warning(
+                f"{operation_name} failed on attempt {attempt}: {error}. "
+                f"Retrying in {delay:.1f}s..."
+            )
             time.sleep(delay)
 
 
-class BinanceCombinedProducer:
-    """Binance WebSocket producer for multiple trading symbols via Combined Stream.
-    
-    Connects to Binance WebSocket, consumes trade data for multiple symbols,
-    and publishes raw trade records to Kafka for downstream processing.
+class BinanceCombinedKlineProducer:
+    """Binance WebSocket producer for authoritative kline streams.
+
+    The producer subscribes to Binance combined kline streams for every
+    configured symbol and interval, normalizes the payload, and publishes it to
+    Kafka. Downstream code no longer reconstructs candles from trade-level events.
     """
 
-    def __init__(self, symbols: list):
-        """Initialize Binance Combined Producer.
-        
-        Args:
-            symbols: List of trading symbols to track (e.g., ['BTCUSDT', 'ETHUSDT']).
-        """
-        self.symbols = [s.lower() for s in symbols]
+    def __init__(self, symbols: list[str], intervals: list[str]):
+        self.symbols = [symbol.lower() for symbol in symbols if symbol]
+        self.intervals = [interval for interval in intervals if interval]
         self.ws = None
         self.is_running = True
         self.reconnect_attempt = 0
         self.max_reconnect_attempts = 10
         self.base_reconnect_delay = 5
-        
-        streams = "/".join([f"{sym}@trade" for sym in self.symbols])
-        binance_socket_url = config.BINANCE_SOCKET_URL.rstrip('/')
-        query_separator = '&' if '?' in binance_socket_url else '?'
+
+        if not self.symbols:
+            raise ValueError("At least one trading symbol is required")
+        if not self.intervals:
+            raise ValueError("At least one candle interval is required")
+
+        streams = "/".join(
+            f"{symbol}@kline_{interval}"
+            for symbol in self.symbols
+            for interval in self.intervals
+        )
+        binance_socket_url = config.BINANCE_SOCKET_URL.rstrip("/")
+        query_separator = "&" if "?" in binance_socket_url else "?"
         self.ws_url = f"{binance_socket_url}{query_separator}streams={streams}"
-        
-        logger.info(f"Initializing Binance Combined Producer for: {', '.join(s.upper() for s in self.symbols)}")
-        
+
+        logger.info(
+            "Initializing Binance kline producer for "
+            f"symbols={', '.join(symbol.upper() for symbol in self.symbols)}, "
+            f"intervals={self.intervals}"
+        )
+
         def _create_producer():
             return KafkaProducer(
                 bootstrap_servers=[config.KAFKA_SERVER],
                 api_version=(3, 4, 0),
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                acks='all',
+                value_serializer=lambda value: json.dumps(value).encode("utf-8"),
+                acks="all",
                 retries=5,
                 linger_ms=5,
                 request_timeout_ms=30000,
                 max_block_ms=10000,
             )
-        
-        self.producer = retry_with_backoff(_create_producer, operation_name='Kafka producer creation')
+
+        self.producer = retry_with_backoff(_create_producer, operation_name="Kafka producer creation")
         logger.info("Kafka producer initialized successfully.")
 
-    def _send_to_kafka(self, record: dict):
-        """Publish a trade record to Kafka.
-        
-        Args:
-            record: Trade record to publish.
-        """
+    def _normalize_kline_record(self, raw_message: dict) -> dict | None:
+        data = raw_message.get("data", raw_message)
+        kline = data.get("k") if isinstance(data, dict) else None
+
+        if not isinstance(kline, dict):
+            return None
+
         try:
+            symbol = str(kline.get("s") or data.get("s")).upper()
+            interval = str(kline["i"])
+            record = {
+                "symbol": symbol,
+                "interval": interval,
+                "timestamp": int(kline["t"]),
+                "close_time": int(kline["T"]),
+                "event_time": int(data.get("E", kline["T"])),
+                "open": float(kline["o"]),
+                "high": float(kline["h"]),
+                "low": float(kline["l"]),
+                "close": float(kline["c"]),
+                "volume": float(kline["v"]),
+                "is_final": bool(kline["x"]),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(f"Invalid Binance kline payload: {exc}", exc_info=True)
+            return None
+
+        if (
+            not record["symbol"]
+            or record["interval"] not in self.intervals
+            or record["timestamp"] <= 0
+            or record["open"] <= 0
+            or record["high"] <= 0
+            or record["low"] <= 0
+            or record["close"] <= 0
+            or record["volume"] < 0
+            or record["high"] < max(record["open"], record["close"])
+            or record["low"] > min(record["open"], record["close"])
+            or record["high"] < record["low"]
+        ):
+            logger.warning(f"Dropped invalid Binance kline record: {record}")
+            return None
+
+        return record
+
+    def _send_to_kafka(self, record: dict):
+        def _send():
             logger.debug(
-                f"Producer publishing trade: symbol={record['symbol']}, "
-                f"trade_id={record['trade_id']}, event_time={record['timestamp']}, "
-                f"topic={config.TOPIC_RAW_TRADES}"
+                f"Producer publishing kline: symbol={record['symbol']}, "
+                f"interval={record['interval']}, open_time={record['timestamp']}, "
+                f"is_final={record['is_final']}, topic={config.KAFKA_TOPIC_MARKET_KLINES}"
             )
             future = self.producer.send(
-                config.TOPIC_RAW_TRADES,
+                config.KAFKA_TOPIC_MARKET_KLINES,
                 value=record,
-                key=record['symbol'].encode('utf-8')
+                key=f"{record['symbol']}_{record['interval']}".encode("utf-8"),
             )
-            future.add_callback(self._on_kafka_send_success, record)
-            future.add_errback(self._on_kafka_send_error, record)
+            return future.get(timeout=15)
+
+        try:
+            metadata = retry_with_backoff(
+                _send,
+                max_retries=4,
+                base_delay=0.5,
+                operation_name="Kafka kline publish",
+            )
+            self._on_kafka_send_success(metadata, record)
         except KafkaError:
             logger.error(f"Kafka publish failed immediately for {record['symbol']}.", exc_info=True)
         except Exception:
             logger.error(f"Unexpected Kafka publish failure for {record['symbol']}.", exc_info=True)
 
     def _on_kafka_send_success(self, metadata, record: dict):
-        """Log successful Kafka publish at debug level without blocking WebSocket reads."""
         logger.debug(
-            f"Published {record['symbol']} trade {record['trade_id']} "
+            f"Published {record['symbol']} {record['interval']} kline "
             f"to {metadata.topic}[{metadata.partition}]@{metadata.offset}"
         )
 
     def _on_kafka_send_error(self, exc, record: dict):
-        """Log async Kafka publish failures."""
         logger.error(
-            f"Kafka async publish failed for {record['symbol']} trade {record['trade_id']}: {exc}",
-            exc_info=True
+            f"Kafka async publish failed for {record['symbol']} {record['interval']} "
+            f"kline at {record['timestamp']}: {exc}",
+            exc_info=True,
         )
 
     def on_message(self, ws, message):
-        """Handle incoming Binance WebSocket trade message.
-        
-        Args:
-            ws: WebSocket connection object.
-            message: Raw message from WebSocket.
-        """
         try:
             raw_message = json.loads(message)
-            
-            if 'data' not in raw_message:
-                return 
-                
-            data = raw_message['data']
-            symbol = data['s'].upper()
+            record = self._normalize_kline_record(raw_message)
 
-            clean_record = {
-                "symbol": symbol,
-                "trade_id": data['t'],
-                "timestamp": data['T'],
-                "price": float(data['p']),
-                "volume": float(data['q']),
-                "is_buyer_maker": data['m']
-            }
-
-            if clean_record['price'] <= 0 or clean_record['volume'] <= 0:
-                logger.warning(f"Dropped invalid trade record for {symbol}: {clean_record}")
+            if not record:
                 return
 
-            self._send_to_kafka(clean_record)
-            action = "SELL" if clean_record["is_buyer_maker"] else "BUY"
+            self._send_to_kafka(record)
             logger.debug(
-                f"[{symbol}] {action} | Price: {clean_record['price']:,.2f} | Volume: {clean_record['volume']:,.4f}"
+                f"[{record['symbol']} {record['interval']}] "
+                f"close={record['close']:,.8f} volume={record['volume']:,.8f} "
+                f"is_final={record['is_final']}"
             )
-
-        except ValueError as e:
-            logger.warning(f"Invalid Binance payload: {e}", exc_info=True)
-        except Exception as e:
-            logger.error(f"Error processing Binance message: {e}", exc_info=True)
+        except ValueError as exc:
+            logger.warning(f"Invalid Binance payload: {exc}", exc_info=True)
+        except Exception as exc:
+            logger.error(f"Error processing Binance kline message: {exc}", exc_info=True)
 
     def on_open(self, ws):
-        """Handle WebSocket connection opened event.
-        
-        Args:
-            ws: WebSocket connection object.
-        """
-        self.reconnect_attempt = 0  # Reset reconnection counter on successful connection
-        logger.info(f"Connected to Binance Combined WebSocket! Streaming to {config.TOPIC_RAW_TRADES}")
+        self.reconnect_attempt = 0
+        logger.info(f"Connected to Binance combined kline stream. Topic={config.KAFKA_TOPIC_MARKET_KLINES}")
 
     def on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket connection closed event.
-        
-        Args:
-            ws: WebSocket connection object.
-            close_status_code: WebSocket close status code.
-            close_msg: WebSocket close message.
-        """
-        logger.info("Disconnected from Binance. Closing producer...")
+        logger.info("Disconnected from Binance kline stream.")
 
     def on_error(self, ws, error):
-        """Handle WebSocket error event.
-        
-        Args:
-            ws: WebSocket connection object.
-            error: Error object or message.
-        """
         error_message = str(error).lower()
         error_type = type(error).__name__
 
@@ -203,20 +215,20 @@ class BinanceCombinedProducer:
             "broken pipe",
             "network is unreachable",
             "temporary failure in name resolution",
-            "errno -3"
+            "errno -3",
         ]
 
-        if isinstance(error, websocket.WebSocketConnectionClosedException) or \
-            any(net_err in error_message for net_err in network_errors):
+        if isinstance(error, websocket.WebSocketConnectionClosedException) or any(
+            network_error in error_message for network_error in network_errors
+        ):
             logger.warning(f"Binance WebSocket dropped ({error_type}): {error}")
         else:
             logger.error(f"WebSocket error ({error_type}): {error}", exc_info=True)
 
     def run(self):
-        """Start the WebSocket connection and run the producer loop."""
         logger.info(
-            f"Producer starting Binance WebSocket stream for "
-            f"{', '.join(symbol.upper() for symbol in self.symbols)}"
+            "Producer starting Binance kline streams for "
+            f"{len(self.symbols)} symbol(s) x {len(self.intervals)} interval(s)"
         )
         while self.is_running:
             try:
@@ -225,43 +237,39 @@ class BinanceCombinedProducer:
                     on_open=self.on_open,
                     on_message=self.on_message,
                     on_error=self.on_error,
-                    on_close=self.on_close
+                    on_close=self.on_close,
                 )
                 logger.info(f"Connecting to {self.ws_url} ...")
                 self.ws.run_forever(
                     ping_interval=60,
                     ping_timeout=30,
                 )
-                
+
                 if self.is_running:
                     self._handle_reconnect("WebSocket connection closed unexpectedly")
-            except Exception as e:
-                logger.error(f"Fatal error in producer: {e}", exc_info=True)
+            except Exception as exc:
+                logger.error(f"Fatal error in producer: {exc}", exc_info=True)
                 if self.is_running:
-                    self._handle_reconnect(f"Exception during connection: {str(e)}")
+                    self._handle_reconnect(f"Exception during connection: {exc}")
 
         self.shutdown()
 
     def _handle_reconnect(self, reason: str):
-        """Handle reconnection with exponential backoff.
-        
-        Args:
-            reason: Reason for reconnection attempt.
-        """
         self.reconnect_attempt += 1
         if self.reconnect_attempt > self.max_reconnect_attempts:
             logger.error(f"Max reconnection attempts ({self.max_reconnect_attempts}) reached. Giving up.")
             self.is_running = False
             return
-        
-        # Exponential backoff: 5s, 10s, 20s, 40s, ... (max 5 minutes)
+
         delay = min(self.base_reconnect_delay * (2 ** (self.reconnect_attempt - 1)), 300)
-        logger.warning(f"{reason}. Reconnecting in {delay:.1f}s... (attempt {self.reconnect_attempt}/{self.max_reconnect_attempts})")
+        logger.warning(
+            f"{reason}. Reconnecting in {delay:.1f}s... "
+            f"(attempt {self.reconnect_attempt}/{self.max_reconnect_attempts})"
+        )
         time.sleep(delay)
 
     def shutdown(self):
-        """Gracefully shutdown the producer and close all connections."""
-        logger.info("Shutting down Binance WebSocket producer...")
+        logger.info("Shutting down Binance kline producer...")
         self.is_running = False
         if self.ws:
             self.ws.close()
@@ -275,21 +283,19 @@ class BinanceCombinedProducer:
 
 
 if __name__ == "__main__":
-    symbols_to_track = config.TRADING_SYMBOLS 
-    
-    app = BinanceCombinedProducer(symbols_to_track)
-    
+    app = BinanceCombinedKlineProducer(config.TRADING_SYMBOLS, config.CANDLE_INTERVALS)
+
     def signal_handler(sig, frame):
         logger.info(f"Received signal {sig}. Initiating graceful shutdown...")
         app.shutdown()
         sys.exit(0)
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     try:
         app.run()
-    except Exception as e:
-        logger.error(f"Fatal error in main: {e}", exc_info=True)
+    except Exception as exc:
+        logger.error(f"Fatal error in main: {exc}", exc_info=True)
         app.shutdown()
         sys.exit(1)

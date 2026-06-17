@@ -62,7 +62,7 @@ def run_recent_reconciler() -> None:
     end_lag_minutes = _env_int("RECENT_RECONCILE_END_LAG_MINUTES", 3, minimum=0)
     initial_delay_seconds = _env_float("RECENT_RECONCILE_INITIAL_DELAY_SECONDS", 5.0)
     wal_apply_timeout_seconds = _env_float("RECENT_RECONCILE_WAL_APPLY_TIMEOUT_SECONDS", 120.0, minimum=1.0)
-    verify_after_write = _env_bool("RECENT_RECONCILE_VERIFY_AFTER_WRITE", False)
+    verify_after_write = _env_bool("RECENT_RECONCILE_VERIFY_AFTER_WRITE", True)
     dry_run = _env_bool("RECENT_RECONCILE_DRY_RUN", False)
     symbols = os.getenv("RECENT_RECONCILE_SYMBOLS")
     base_url = os.getenv("RECENT_RECONCILE_BINANCE_REST_URL") or os.getenv("BINANCE_REST_URL")

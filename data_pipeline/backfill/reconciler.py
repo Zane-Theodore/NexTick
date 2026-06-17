@@ -425,9 +425,36 @@ def ensure_market_table(cursor, allow_migration: bool = True) -> None:
 
     for attempt in range(1, DDL_RETRY_ATTEMPTS + 1):
         try:
+            table_state = get_market_table_state(cursor)
+            if table_state is not None:
+                wal_enabled, dedup_enabled, table_suspended = table_state
+                if table_suspended:
+                    raise RuntimeError(
+                        f"{TABLE_NAME} is suspended in QuestDB. Resume or repair the WAL table "
+                        "before running candle reconciliation."
+                    )
+                if wal_enabled and dedup_enabled:
+                    return
+                if not allow_migration:
+                    raise RuntimeError(
+                        f"{TABLE_NAME} exists but is not a WAL/dedup table "
+                        f"(walEnabled={wal_enabled}, dedup={dedup_enabled}). "
+                        "The concurrent recent reconciler will not migrate/drop the live table while "
+                        "the processor may be writing. Run a manual full repair with the processor stopped."
+                    )
+
+                logger.warning(
+                    f"{TABLE_NAME} exists but is not configured as a WAL/dedup table "
+                    f"(walEnabled={wal_enabled}, dedup={dedup_enabled}). "
+                    "Attempting one-time WAL/dedup table migration before reconciliation."
+                )
+                migrate_market_table_to_dedup(cursor)
+                cursor.execute(f"ALTER TABLE {TABLE_NAME} DEDUP ENABLE UPSERT KEYS {UPSERT_KEYS}")
+                return
+
             cursor.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                CREATE TABLE {TABLE_NAME} (
                     symbol SYMBOL,
                     interval SYMBOL,
                     timestamp TIMESTAMP,
@@ -441,7 +468,6 @@ def ensure_market_table(cursor, allow_migration: bool = True) -> None:
                 DEDUP UPSERT KEYS {UPSERT_KEYS};
                 """
             )
-            cursor.execute(f"ALTER TABLE {TABLE_NAME} DEDUP ENABLE UPSERT KEYS {UPSERT_KEYS}")
             wait_for_table_state(cursor, TABLE_NAME, should_exist=True)
             return
         except psycopg2.DatabaseError as exc:
@@ -449,21 +475,6 @@ def ensure_market_table(cursor, allow_migration: bool = True) -> None:
                 cursor.connection.rollback()
             except Exception:
                 logger.warning("Failed to rollback connection after market table DDL error", exc_info=True)
-
-            if table_exists(cursor, TABLE_NAME):
-                if not allow_migration:
-                    raise RuntimeError(
-                        f"{TABLE_NAME} exists but cannot enable DEDUP UPSERT KEYS {UPSERT_KEYS}. "
-                        "The concurrent startup reconciler will not migrate/drop the live table while "
-                        "the processor may be writing. Run a manual full repair with the processor stopped."
-                    )
-                logger.warning(
-                    f"{TABLE_NAME} exists but cannot enable DEDUP UPSERT KEYS {UPSERT_KEYS}. "
-                    "Attempting one-time WAL/dedup table migration before reconciliation."
-                )
-                migrate_market_table_to_dedup(cursor)
-                cursor.execute(f"ALTER TABLE {TABLE_NAME} DEDUP ENABLE UPSERT KEYS {UPSERT_KEYS}")
-                return
 
             if attempt == DDL_RETRY_ATTEMPTS:
                 raise
@@ -473,6 +484,19 @@ def ensure_market_table(cursor, allow_migration: bool = True) -> None:
                 f"{exc}. Retrying..."
             )
             time.sleep(DDL_RETRY_DELAY_SECONDS)
+
+
+def get_market_table_state(cursor) -> tuple[bool, bool, bool] | None:
+    """Return WAL/dedup/suspended metadata for the live candle table."""
+
+    cursor.execute(
+        "SELECT walEnabled, dedup, table_suspended FROM tables() WHERE table_name = %s",
+        (TABLE_NAME,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return bool(row[0]), bool(row[1]), bool(row[2])
 
 
 def migrate_market_table_to_dedup(cursor) -> None:
@@ -940,8 +964,9 @@ def assert_rows_match(
     tolerance: Decimal,
     symbol: str,
     log_duplicates: bool = True,
+    require_no_duplicates: bool = False,
 ) -> None:
-    """Assert that QuestDB contains Binance rows, tolerating duplicate stale rows."""
+    """Assert that QuestDB contains Binance rows."""
 
     actual_by_timestamp: dict[datetime, list[CandleRow]] = {}
     for actual_row in actual:
@@ -953,6 +978,12 @@ def assert_rows_match(
     if duplicate_timestamps and log_duplicates:
         logger.warning(
             f"{symbol}: duplicate candle rows detected during verification; "
+            f"duplicate_count={len(duplicate_timestamps)}, "
+            f"samples={[timestamp.isoformat() for timestamp in duplicate_timestamps[:5]]}"
+        )
+    if duplicate_timestamps and require_no_duplicates:
+        raise RuntimeError(
+            f"{symbol}: duplicate candle rows are still visible after WAL upsert; "
             f"duplicate_count={len(duplicate_timestamps)}, "
             f"samples={[timestamp.isoformat() for timestamp in duplicate_timestamps[:5]]}"
         )
@@ -1078,6 +1109,7 @@ def wait_for_symbol_window_match(
     expected: list[CandleRow],
     tolerance: Decimal,
     timeout_seconds: float = WAL_APPLY_TIMEOUT_SECONDS,
+    require_no_duplicates: bool = False,
 ) -> None:
     """Wait until WAL/dedup upserts are visible with the expected OHLCV values."""
 
@@ -1087,7 +1119,14 @@ def wait_for_symbol_window_match(
     while True:
         actual_rows = fetch_db_rows(cursor, symbol, start, end)
         try:
-            assert_rows_match(actual_rows, expected, tolerance, symbol, log_duplicates=False)
+            assert_rows_match(
+                actual_rows,
+                expected,
+                tolerance,
+                symbol,
+                log_duplicates=False,
+                require_no_duplicates=require_no_duplicates,
+            )
             return
         except Exception as exc:
             last_error = exc
@@ -1369,24 +1408,26 @@ def reconcile_tail_append(
                 rows = fetch_binance_klines(base_url, symbol, start, end)
                 validate_rows(rows, symbol, start, end)
                 insert_rows(cursor, TABLE_NAME, rows)
-                if verify_after_write:
-                    try:
-                        wait_for_symbol_window_match(
-                            cursor,
-                            symbol,
-                            start,
-                            end,
-                            rows,
-                            tolerance,
-                            timeout_seconds=wal_apply_timeout_seconds,
-                        )
-                    except Exception:
-                        logger.warning(
-                            f"{symbol}: REST reconcile rows were inserted but are not fully visible yet; "
-                            f"window=[{start.isoformat()}, {end.isoformat()}). "
-                            "QuestDB WAL may still be applying out-of-order rows.",
-                            exc_info=True,
-                        )
+                try:
+                    wait_for_symbol_window_match(
+                        cursor,
+                        symbol,
+                        start,
+                        end,
+                        rows,
+                        tolerance,
+                        timeout_seconds=wal_apply_timeout_seconds,
+                        require_no_duplicates=True,
+                    )
+                except Exception as exc:
+                    log_message = (
+                        f"{symbol}: REST reconcile rows were inserted but the live table is not yet "
+                        f"strictly canonical; window=[{start.isoformat()}, {end.isoformat()}). "
+                        "QuestDB WAL may still be applying out-of-order rows."
+                    )
+                    if verify_after_write:
+                        raise RuntimeError(log_message) from exc
+                    logger.warning(log_message, exc_info=True)
                 total_rows += len(rows)
     finally:
         conn.close()

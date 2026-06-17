@@ -44,7 +44,7 @@ def _split_env_list(var_name: str, default: str = "") -> list[str]:
 
 # KAFKA
 KAFKA_SERVER = get_env_or_raise('KAFKA_BROKER')
-TOPIC_RAW_TRADES = get_env_or_raise('KAFKA_TOPIC_RAW_TRADES')
+KAFKA_TOPIC_MARKET_KLINES = get_env_or_raise('KAFKA_TOPIC_MARKET_KLINES')
 TOPIC_KLINE_STREAM = get_env_or_raise('KAFKA_TOPIC_KLINE_STREAM')
 KAFKA_CONSUMER_GROUP_ID = os.getenv('KAFKA_CONSUMER_GROUP_ID', 'candle-processor-group').strip() or 'candle-processor-group'
 KAFKA_AUTO_OFFSET_RESET = os.getenv('KAFKA_AUTO_OFFSET_RESET', 'earliest').strip().lower() or 'earliest'
@@ -123,6 +123,3 @@ def get_timeframes_with_ms() -> list[tuple[str, int]]:
         )
 
     return [(interval, _INTERVAL_MS_MAP[interval]) for interval in CANDLE_INTERVALS]
-
-# Interval in milliseconds for broadcasting updating candles to frontend
-CANDLE_UPDATE_INTERVAL_MS = int(os.getenv('CANDLE_UPDATE_INTERVAL_MS', '500'))
