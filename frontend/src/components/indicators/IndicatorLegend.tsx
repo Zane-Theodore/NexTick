@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 
 import type { ChartPaneLayout, IndicatorGroup, IndicatorPriceSource, IndicatorSetting, IndicatorValue, MacdIndicatorSetting, SinglePeriodIndicatorSetting } from '../../types/chart';
 import { formatChartValue } from '../../utils/formatters';
+import { mergeIndicatorSettings } from '../../utils/indicatorSettings';
 import IndicatorEyeIcon from './IndicatorEyeIcon';
 import {
   INDICATOR_GROUPS,
@@ -246,15 +247,10 @@ function IndicatorSettingsWindow({
 
   const updateDraftGroupSettings = (group: IndicatorGroup, nextGroupSettings: IndicatorSetting[]) => {
     setDraftSettings((currentSettings) => {
-      const nextGroupSettingsById = new Map(nextGroupSettings.map((setting) => [setting.id, setting]));
-      const currentSettingIds = new Set(currentSettings.map((setting) => setting.id));
-
-      return [
-        ...currentSettings.map((setting) => (
-          setting.group === group ? nextGroupSettingsById.get(setting.id) ?? setting : setting
-        )),
-        ...nextGroupSettings.filter((setting) => !currentSettingIds.has(setting.id)),
-      ];
+      return mergeIndicatorSettings(
+        currentSettings,
+        nextGroupSettings.filter((setting) => setting.group === group),
+      );
     });
   };
 

@@ -19,6 +19,8 @@ import {
   MAIN_CHART_DEFAULT_STRETCH_FACTOR,
   VOLUME_CHART_DEFAULT_STRETCH_FACTOR,
 } from './chartConstants';
+import { isLogicalRangeZoomChange } from './chartPreferences';
+import type { ChartPaneStretchFactors, ChartViewSettings } from './chartPreferences';
 
 interface UseTradingChartSetupParams {
   chartContainerRef: RefObject<HTMLDivElement | null>;
@@ -30,12 +32,14 @@ interface UseTradingChartSetupParams {
   latestCandleRef: RefObject<FormattedCandle | null>;
   candleHistoryRef: RefObject<FormattedCandle[]>;
   indicatorSettings: IndicatorSetting[];
+  chartViewSettings: ChartViewSettings;
   marketDataVersion: number;
   setIsChartReady: Dispatch<SetStateAction<boolean>>;
   setLegendData: Dispatch<SetStateAction<LegendData | null>>;
   setHoverIndicatorValues: Dispatch<SetStateAction<IndicatorValue[] | null>>;
   setPaneLayouts: Dispatch<SetStateAction<ChartPaneLayout[]>>;
   setVisiblePriceExtrema: Dispatch<SetStateAction<VisiblePriceExtrema | null>>;
+  onChartViewSettingsChange: (settings: ChartViewSettings) => void;
 }
 
 export function useTradingChartSetup({
@@ -48,20 +52,29 @@ export function useTradingChartSetup({
   latestCandleRef,
   candleHistoryRef,
   indicatorSettings,
+  chartViewSettings,
   marketDataVersion,
   setIsChartReady,
   setLegendData,
   setHoverIndicatorValues,
   setPaneLayouts,
   setVisiblePriceExtrema,
+  onChartViewSettingsChange,
 }: UseTradingChartSetupParams) {
   const lastViewedLegendDataRef = useRef<LegendData | null>(null);
   const isPointerInsideChartRef = useRef(false);
   const isLegendLockedToHoveredCandleRef = useRef(false);
+  const initialChartViewSettingsRef = useRef(chartViewSettings);
+  const chartViewSettingsRef = useRef(chartViewSettings);
+
+  useEffect(() => {
+    chartViewSettingsRef.current = chartViewSettings;
+  }, [chartViewSettings]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
+    const initialChartViewSettings = initialChartViewSettingsRef.current;
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
       height: chartContainerRef.current.clientHeight,
@@ -114,7 +127,7 @@ export function useTradingChartSetup({
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 10,
-        barSpacing: CHART_DEFAULT_BAR_SPACING,
+        barSpacing: initialChartViewSettings.barSpacing ?? CHART_DEFAULT_BAR_SPACING,
         minBarSpacing: CHART_MIN_BAR_SPACING,
         maxBarSpacing: CHART_MAX_BAR_SPACING,
         tickMarkFormatter: formatTimeScaleTick,
@@ -178,12 +191,17 @@ export function useTradingChartSetup({
     });
 
     const panes = chart.panes();
-    panes[0]?.setStretchFactor(MAIN_CHART_DEFAULT_STRETCH_FACTOR);
-    panes[1]?.setStretchFactor(VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
+    panes[0]?.setStretchFactor(initialChartViewSettings.paneStretchFactors?.main ?? MAIN_CHART_DEFAULT_STRETCH_FACTOR);
+    panes[1]?.setStretchFactor(initialChartViewSettings.paneStretchFactors?.volume ?? VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
     let paneLayoutFrameId: number | null = null;
+    let visibleExtremaFrameId: number | null = null;
+    let chartViewFrameId: number | null = null;
+    let lastVisibleLogicalRange: LogicalRange | null = null;
+    let lastMainVolumePaneStretchFactors: ChartPaneStretchFactors | null = null;
     let isDisposed = false;
     const updatePaneLayouts = () => {
       if (isDisposed) return;
+      lastMainVolumePaneStretchFactors = getMainVolumePaneStretchFactors(chart) ?? lastMainVolumePaneStretchFactors;
       setPaneLayouts(getPaneLayouts(chart));
       paneLayoutFrameId = null;
     };
@@ -206,6 +224,51 @@ export function useTradingChartSetup({
         updatePaneLayouts();
         updateVisiblePriceExtrema();
       });
+    };
+    const scheduleVisiblePriceExtremaUpdate = () => {
+      if (isDisposed) return;
+      if (visibleExtremaFrameId !== null) {
+        cancelAnimationFrame(visibleExtremaFrameId);
+      }
+      visibleExtremaFrameId = requestAnimationFrame(() => {
+        visibleExtremaFrameId = null;
+        updateVisiblePriceExtrema();
+      });
+    };
+    const persistChartViewSettings = (updatedSettings: ChartViewSettings) => {
+      chartViewSettingsRef.current = {
+        ...chartViewSettingsRef.current,
+        ...updatedSettings,
+      };
+      onChartViewSettingsChange(updatedSettings);
+    };
+    const scheduleChartViewUpdate = () => {
+      if (isDisposed) return;
+      if (chartViewFrameId !== null) {
+        cancelAnimationFrame(chartViewFrameId);
+      }
+      chartViewFrameId = requestAnimationFrame(() => {
+        chartViewFrameId = null;
+        persistChartViewSettings({
+          barSpacing: chart.timeScale().options().barSpacing,
+        });
+      });
+    };
+    const persistPaneStretchFactorsIfChanged = () => {
+      const nextStretchFactors = getMainVolumePaneStretchFactors(chart);
+
+      if (
+        nextStretchFactors
+        && lastMainVolumePaneStretchFactors
+        && !arePaneStretchFactorsEqual(lastMainVolumePaneStretchFactors, nextStretchFactors)
+      ) {
+        persistChartViewSettings({
+          paneStretchFactors: nextStretchFactors,
+        });
+      }
+
+      lastMainVolumePaneStretchFactors = nextStretchFactors ?? lastMainVolumePaneStretchFactors;
+      schedulePaneLayoutUpdate();
     };
     schedulePaneLayoutUpdate();
 
@@ -280,10 +343,20 @@ export function useTradingChartSetup({
     });
     resizeObserver.observe(chartContainerRef.current);
 
-    const handleVisibleLogicalRangeChange = () => updateVisiblePriceExtrema();
+    const handleVisibleLogicalRangeChange = (visibleLogicalRange: LogicalRange | null) => {
+      scheduleVisiblePriceExtremaUpdate();
+
+      if (isLogicalRangeZoomChange(lastVisibleLogicalRange, visibleLogicalRange)) {
+        scheduleChartViewUpdate();
+      }
+
+      lastVisibleLogicalRange = visibleLogicalRange
+        ? { ...visibleLogicalRange }
+        : null;
+    };
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
 
-    const handlePaneResizeEnd = schedulePaneLayoutUpdate;
+    const handlePaneResizeEnd = persistPaneStretchFactorsIfChanged;
     window.addEventListener('mouseup', handlePaneResizeEnd);
     window.addEventListener('pointerup', handlePaneResizeEnd);
 
@@ -291,6 +364,12 @@ export function useTradingChartSetup({
       isDisposed = true;
       if (paneLayoutFrameId !== null) {
         cancelAnimationFrame(paneLayoutFrameId);
+      }
+      if (visibleExtremaFrameId !== null) {
+        cancelAnimationFrame(visibleExtremaFrameId);
+      }
+      if (chartViewFrameId !== null) {
+        cancelAnimationFrame(chartViewFrameId);
       }
       chart.unsubscribeCrosshairMove(handleCrosshair);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
@@ -318,6 +397,7 @@ export function useTradingChartSetup({
     setLegendData,
     setPaneLayouts,
     setVisiblePriceExtrema,
+    onChartViewSettingsChange,
     volumeByTimeRef,
     volumeSeriesRef,
   ]);
@@ -473,8 +553,12 @@ export function useTradingChartSetup({
     indicatorSeriesRef.current = currentConfigs;
 
     const panes = chart.panes();
-    panes[0]?.setStretchFactor(lowerPaneByGroup.size > 0 ? 70 : MAIN_CHART_DEFAULT_STRETCH_FACTOR);
-    panes[1]?.setStretchFactor(VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
+    const persistedPaneStretchFactors = chartViewSettingsRef.current.paneStretchFactors;
+    panes[0]?.setStretchFactor(
+      persistedPaneStretchFactors?.main
+        ?? (lowerPaneByGroup.size > 0 ? 70 : MAIN_CHART_DEFAULT_STRETCH_FACTOR),
+    );
+    panes[1]?.setStretchFactor(persistedPaneStretchFactors?.volume ?? VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
     panes[2]?.setStretchFactor(18);
     panes[3]?.setStretchFactor(18);
     const paneLayoutFrameId = requestAnimationFrame(() => setPaneLayouts(getPaneLayouts(chart)));
@@ -535,6 +619,29 @@ function getPaneLayouts(chart: IChartApi): ChartPaneLayout[] {
     top += height;
     return layout;
   });
+}
+
+function getMainVolumePaneStretchFactors(chart: IChartApi): ChartPaneStretchFactors | null {
+  const panes = chart.panes();
+  const mainPaneHeight = panes[0]?.getHeight() ?? 0;
+  const volumePaneHeight = panes[1]?.getHeight() ?? 0;
+
+  if (mainPaneHeight <= 0 || volumePaneHeight <= 0) return null;
+
+  return {
+    main: Math.round(mainPaneHeight),
+    volume: Math.round(volumePaneHeight),
+  };
+}
+
+function arePaneStretchFactorsEqual(
+  currentFactors: ChartPaneStretchFactors,
+  nextFactors: ChartPaneStretchFactors,
+) {
+  return (
+    Math.abs(currentFactors.main - nextFactors.main) <= 1
+    && Math.abs(currentFactors.volume - nextFactors.volume) <= 1
+  );
 }
 
 function getVisiblePriceExtrema({

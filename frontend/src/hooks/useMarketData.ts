@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
-import { formatCandle } from '../utils/formatters';
+import { formatValidCandle, formatValidCandles } from '../utils/formatters';
 import type { FormattedCandle } from '../utils/formatters';
 import { getIndicatorData, getIndicatorValues } from '../utils/chartIndicators';
 import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/socket';
@@ -58,6 +58,26 @@ const toVolumeSeriesData = (candles: FormattedCandle[]) => (
     color: close >= open ? CHART_UP_COLOR : CHART_DOWN_COLOR,
   })) as CandlestickData<Time>[]
 );
+
+const resetSeriesData = (
+  candlestickSeries: ISeriesApi<"Candlestick">,
+  volumeSeries: ISeriesApi<"Candlestick">,
+  indicatorSeriesRef?: RefObject<IndicatorSeriesConfig[]>,
+) => {
+  candlestickSeries.setData([]);
+  volumeSeries.setData([]);
+  indicatorSeriesRef?.current.forEach(({ series }) => series.setData([]));
+};
+
+const replaceVolumeCache = (
+  volumeByTime: Map<string, number>,
+  history: FormattedCandle[],
+) => {
+  volumeByTime.clear();
+  history.forEach((candle) => {
+    volumeByTime.set(String(candle.time), candle.volume);
+  });
+};
 
 const findCandleInsertIndex = (history: FormattedCandle[], time: number) => {
   let low = 0;
@@ -147,9 +167,10 @@ export const useMarketData = (
   candleHistoryRef: RefObject<FormattedCandle[]>,
   indicatorSeriesRef?: RefObject<IndicatorSeriesConfig[]>,
   indicatorSettings: IndicatorSetting[] = [],
+  indicatorSyncSettings: IndicatorSetting[] = indicatorSettings,
   onIndicatorValuesChange?: (values: IndicatorValue[]) => void,
   onCandleHistoryChange?: () => void,
-  isChartReady: boolean = true
+  isChartReady: boolean = true,
 ) => {
   const indicatorSettingsRef = useRef<IndicatorSetting[]>(indicatorSettings);
   const onIndicatorValuesChangeRef = useRef(onIndicatorValuesChange);
@@ -176,7 +197,7 @@ export const useMarketData = (
   useEffect(() => {
     if (!isChartReady || candleHistoryRef.current.length === 0) return;
     syncIndicatorSeries(candleHistoryRef.current);
-  }, [indicatorSettings, isChartReady, candleHistoryRef, syncIndicatorSeries]);
+  }, [indicatorSyncSettings, isChartReady, candleHistoryRef, syncIndicatorSeries]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -205,10 +226,7 @@ export const useMarketData = (
     const syncRefsAndIndicators = (history: FormattedCandle[]) => {
       candleHistoryRef.current = history;
       latestCandleRef.current = history.at(-1) ?? null;
-      volumeByTimeRef.current.clear();
-      history.forEach((candle) => {
-        volumeByTimeRef.current.set(String(candle.time), candle.volume);
-      });
+      replaceVolumeCache(volumeByTimeRef.current, history);
       onCandleHistoryChange?.();
       syncIndicatorSeries(history);
     };
@@ -223,15 +241,7 @@ export const useMarketData = (
 
         if (isCancelled) return;
 
-        const formattedData: FormattedCandle[] = rawCandles
-          .map(formatCandle)
-          .filter((candle: ReturnType<typeof formatCandle>): candle is FormattedCandle => {
-            return candle !== null &&
-                   candle.open > 0 &&
-                   candle.high > 0 &&
-                   candle.low > 0 &&
-                   candle.close > 0;
-          });
+        const formattedData = formatValidCandles(rawCandles);
 
         if (formattedData.length === 0) {
           return;
@@ -293,9 +303,7 @@ export const useMarketData = (
 
     const fetchHistory = async () => {
       try {
-        candlestickSeries.setData([]); 
-        volumeSeries.setData([]);
-        indicatorSeriesRef?.current.forEach(({ series: indicatorSeries }) => indicatorSeries.setData([]));
+        resetSeriesData(candlestickSeries, volumeSeries, indicatorSeriesRef);
         candleHistoryRef.current = [];
         latestCandleRef.current = null;
         onCandleHistoryChange?.();
@@ -311,15 +319,7 @@ export const useMarketData = (
           return;
         }
 
-        const formattedData: FormattedCandle[] = rawCandles
-          .map(formatCandle)
-          .filter((candle: ReturnType<typeof formatCandle>): candle is FormattedCandle => {
-            return candle !== null && 
-                   candle.open > 0 && 
-                   candle.high > 0 && 
-                   candle.low > 0 && 
-                   candle.close > 0;
-          });
+        const formattedData = formatValidCandles(rawCandles);
         
         if (formattedData.length === 0) {
           logger.warn(`No valid candle data after formatting for symbol: ${symbol}, interval: ${interval}`);
@@ -333,13 +333,17 @@ export const useMarketData = (
         const totalCandles = formattedData.length;
         const OFFSET_RIGHT = 10;
         const VISIBLE_CANDLES = 30;
+        const currentBarSpacing = chart.timeScale().options().barSpacing;
 
         chart.timeScale().setVisibleLogicalRange({
           from: Math.max(0, totalCandles + OFFSET_RIGHT - VISIBLE_CANDLES),
           to: totalCandles + OFFSET_RIGHT,
         });
+
+        chart.timeScale().applyOptions({
+          barSpacing: currentBarSpacing,
+        });
         
-        // Join room to receive real-time updates after data is loaded
         joinKlineRoom(symbol, interval);
         logger.info(`Joined kline room: ${symbol}_${interval}`);
         
@@ -356,9 +360,9 @@ export const useMarketData = (
         return;
       }
 
-      const formatted = formatCandle(data);
+      const formatted = formatValidCandle(data);
       
-      if (formatted && formatted.open > 0 && formatted.high > 0 && formatted.low > 0 && formatted.close > 0) {
+      if (formatted) {
         const mergeResult = mergeRealtimeCandle(candleHistoryRef.current, formatted);
         candleHistoryRef.current = mergeResult.history;
         latestCandleRef.current = mergeResult.history.at(-1) ?? null;
@@ -401,13 +405,10 @@ export const useMarketData = (
           logger.info(`Final candle received for ${data.symbol} [${data.interval}]: O=${data.open}, C=${data.close}, V=${data.volume}`);
         }
       } else {
-        if (formatted) {
-            logger.warn(`Zero-drop candle filtered out from socket:`, data);
-        }
+        logger.warn(`Invalid candle filtered out from socket:`, data);
       }
     };
 
-    // Subscribe to kline updates via room pattern
     const unsubscribe = subscribeToCandles(handleCandleUpdate);
 
     return () => {
@@ -416,7 +417,6 @@ export const useMarketData = (
         clearTimeout(scheduledHistoryRepair);
       }
       unsubscribe();
-      // Leave room when component unmounts or dependencies change
       leaveKlineRoom(symbol, interval);
       logger.info(`Left kline room: ${symbol}_${interval}`);
     };

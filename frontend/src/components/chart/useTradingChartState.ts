@@ -1,11 +1,31 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 
 import type { ChartPaneLayout, IndicatorGroup, IndicatorSeriesConfig, IndicatorSetting, IndicatorValue, LegendData, VisiblePriceExtrema } from '../../types/chart';
 import type { FormattedCandle } from '../../utils/formatters';
+import {
+  areIndicatorGroupsEqual,
+  areIndicatorSettingsEqual,
+  cloneIndicatorSettings,
+  mergeIndicatorSettings,
+} from '../../utils/indicatorSettings';
 import { DEFAULT_INDICATOR_SETTINGS, SUPPORTED_INTERVALS, SUPPORTED_SYMBOLS } from './chartConstants';
+import {
+  clearTradingChartPreferences,
+  isChartViewSettingsEqual,
+  loadTradingChartPreferences,
+  saveTradingChartPreferences,
+} from './chartPreferences';
+import type { ChartViewSettings } from './chartPreferences';
 
 export function useTradingChartState() {
+  const [initialPreferences] = useState(loadTradingChartPreferences);
+  const [initialChartViewSettings] = useState<ChartViewSettings>(() => initialPreferences.chartViewSettings ?? {});
+  const chartViewSettingsRef = useRef<ChartViewSettings>(initialChartViewSettings);
+  const indicatorSettingsRef = useRef<IndicatorSetting[]>([]);
+  const hiddenIndicatorGroupsRef = useRef<IndicatorGroup[]>([]);
+  const chartViewSettingsSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isPreferencesResettingRef = useRef(false);
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<IChartApi | null>(null);
   const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -24,11 +44,80 @@ export function useTradingChartState() {
   const [indicatorValues, setIndicatorValues] = useState<IndicatorValue[]>([]);
   const [hoverIndicatorValues, setHoverIndicatorValues] = useState<IndicatorValue[] | null>(null);
   const [indicatorSettingsWindow, setIndicatorSettingsWindow] = useState<{ id: number; initialGroup: IndicatorGroup | null } | null>(null);
-  const [hiddenIndicatorGroups, setHiddenIndicatorGroups] = useState<IndicatorGroup[]>(['ma']);
+  const [hiddenIndicatorGroups, setHiddenIndicatorGroups] = useState<IndicatorGroup[]>(() => (
+    initialPreferences.hiddenIndicatorGroups ?? ['ma']
+  ));
   const [paneLayouts, setPaneLayouts] = useState<ChartPaneLayout[]>([]);
   const [indicatorSettings, setIndicatorSettings] = useState<IndicatorSetting[]>(() => (
-    DEFAULT_INDICATOR_SETTINGS.map((setting) => ({ ...setting }))
+    initialPreferences.indicatorSettings
+      ?? cloneIndicatorSettings(DEFAULT_INDICATOR_SETTINGS)
   ));
+
+  const resetCurrentPreferences = useCallback(() => {
+    isPreferencesResettingRef.current = true;
+
+    if (chartViewSettingsSaveTimeoutRef.current !== null) {
+      clearTimeout(chartViewSettingsSaveTimeoutRef.current);
+      chartViewSettingsSaveTimeoutRef.current = null;
+    }
+
+    clearTradingChartPreferences();
+    chartViewSettingsRef.current = {};
+    indicatorSettingsRef.current = cloneIndicatorSettings(DEFAULT_INDICATOR_SETTINGS);
+    hiddenIndicatorGroupsRef.current = ['ma'];
+    setIndicatorSettings(cloneIndicatorSettings(DEFAULT_INDICATOR_SETTINGS));
+    setHiddenIndicatorGroups(['ma']);
+
+    window.setTimeout(() => {
+      isPreferencesResettingRef.current = false;
+    }, 1_000);
+  }, []);
+
+  const saveCurrentPreferences = useCallback((
+    settings: IndicatorSetting[] = indicatorSettingsRef.current,
+    groups: IndicatorGroup[] = hiddenIndicatorGroupsRef.current,
+    chartViewSettings: ChartViewSettings = chartViewSettingsRef.current,
+  ) => {
+    if (isPreferencesResettingRef.current) return;
+
+    saveTradingChartPreferences({
+      indicatorSettings: settings,
+      hiddenIndicatorGroups: groups,
+      chartViewSettings,
+    });
+  }, []);
+
+  useEffect(() => {
+    indicatorSettingsRef.current = indicatorSettings;
+    hiddenIndicatorGroupsRef.current = hiddenIndicatorGroups;
+    saveCurrentPreferences();
+  }, [hiddenIndicatorGroups, indicatorSettings, saveCurrentPreferences]);
+
+  useEffect(() => {
+    const handlePreferencesResetShortcut = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.key === 'F5') {
+        resetCurrentPreferences();
+      }
+    };
+    const handlePageHide = () => {
+      if (chartViewSettingsSaveTimeoutRef.current !== null) {
+        clearTimeout(chartViewSettingsSaveTimeoutRef.current);
+        chartViewSettingsSaveTimeoutRef.current = null;
+      }
+      saveCurrentPreferences();
+    };
+
+    window.addEventListener('keydown', handlePreferencesResetShortcut, { capture: true });
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      if (chartViewSettingsSaveTimeoutRef.current !== null) {
+        clearTimeout(chartViewSettingsSaveTimeoutRef.current);
+      }
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('keydown', handlePreferencesResetShortcut, { capture: true });
+    };
+  }, [resetCurrentPreferences, saveCurrentPreferences]);
 
   const handleIndicatorValuesChange = useCallback((values: IndicatorValue[]) => {
     setIndicatorValues(values);
@@ -47,26 +136,23 @@ export function useTradingChartState() {
   }, []);
 
   const handleApplyIndicatorSettings = useCallback((updatedSettings: IndicatorSetting[]) => {
-    const updatedSettingsById = new Map(updatedSettings.map((setting) => [setting.id, setting]));
+    const nextSettings = mergeIndicatorSettings(indicatorSettingsRef.current, updatedSettings);
+    const nextGroups = hiddenIndicatorGroupsRef.current.filter((group) => (
+      updatedSettings.some((setting) => setting.group === group && setting.visible)
+    ));
 
-    setIndicatorSettings((settings) => {
-      const currentSettingIds = new Set(settings.map((setting) => setting.id));
-      const nextSettings = [
-        ...settings.map((setting) => updatedSettingsById.get(setting.id) ?? setting),
-        ...updatedSettings.filter((setting) => !currentSettingIds.has(setting.id)),
-      ];
+    if (!areIndicatorSettingsEqual(indicatorSettingsRef.current, nextSettings)) {
+      indicatorSettingsRef.current = nextSettings;
+      setIndicatorSettings(nextSettings);
+    }
 
-      return areIndicatorSettingsEqual(settings, nextSettings) ? settings : nextSettings;
-    });
+    if (!areIndicatorGroupsEqual(hiddenIndicatorGroupsRef.current, nextGroups)) {
+      hiddenIndicatorGroupsRef.current = nextGroups;
+      setHiddenIndicatorGroups(nextGroups);
+    }
 
-    setHiddenIndicatorGroups((groups) => {
-      const nextGroups = groups.filter((group) => (
-        updatedSettings.some((setting) => setting.group === group && setting.visible)
-      ));
-
-      return areIndicatorGroupsEqual(groups, nextGroups) ? groups : nextGroups;
-    });
-  }, []);
+    saveCurrentPreferences(nextSettings, nextGroups);
+  }, [saveCurrentPreferences]);
 
   const handleDismissIndicatorGroup = useCallback((group: IndicatorGroup) => {
     setIndicatorSettings((settings) => settings.map((setting) => (
@@ -81,6 +167,26 @@ export function useTradingChartState() {
       initialGroup,
     }));
   }, []);
+
+  const handleChartViewSettingsChange = useCallback((updatedSettings: ChartViewSettings) => {
+    const nextSettings = {
+      ...chartViewSettingsRef.current,
+      ...updatedSettings,
+    };
+
+    if (isChartViewSettingsEqual(chartViewSettingsRef.current, nextSettings)) return;
+
+    chartViewSettingsRef.current = nextSettings;
+
+    if (chartViewSettingsSaveTimeoutRef.current !== null) {
+      clearTimeout(chartViewSettingsSaveTimeoutRef.current);
+    }
+
+    chartViewSettingsSaveTimeoutRef.current = setTimeout(() => {
+      chartViewSettingsSaveTimeoutRef.current = null;
+      saveCurrentPreferences();
+    }, 250);
+  }, [saveCurrentPreferences]);
 
   const chartIndicatorSettings = useMemo(() => (
     indicatorSettings.map((setting) => (
@@ -118,6 +224,7 @@ export function useTradingChartState() {
     marketDataVersion,
     indicatorSettings,
     chartIndicatorSettings,
+    chartViewSettings: initialChartViewSettings,
     visibleIndicatorValues,
     hiddenIndicatorGroups,
     paneLayouts,
@@ -136,18 +243,6 @@ export function useTradingChartState() {
     handleApplyIndicatorSettings,
     handleDismissIndicatorGroup,
     handleOpenIndicatorSettingsWindow,
+    handleChartViewSettingsChange,
   };
-}
-
-function areIndicatorSettingsEqual(currentSettings: IndicatorSetting[], nextSettings: IndicatorSetting[]): boolean {
-  if (currentSettings.length !== nextSettings.length) return false;
-
-  return currentSettings.every((setting, index) => (
-    JSON.stringify(setting) === JSON.stringify(nextSettings[index])
-  ));
-}
-
-function areIndicatorGroupsEqual(currentGroups: IndicatorGroup[], nextGroups: IndicatorGroup[]): boolean {
-  if (currentGroups.length !== nextGroups.length) return false;
-  return currentGroups.every((group, index) => group === nextGroups[index]);
 }

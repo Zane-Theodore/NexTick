@@ -106,6 +106,24 @@ export const formatCandle = (candle: unknown): FormattedCandle | null => {
   };
 };
 
+export const hasPositiveOhlc = (candle: FormattedCandle): boolean => (
+  candle.open > 0
+  && candle.high > 0
+  && candle.low > 0
+  && candle.close > 0
+);
+
+export const formatValidCandle = (candle: unknown): FormattedCandle | null => {
+  const formattedCandle = formatCandle(candle);
+  return formattedCandle && hasPositiveOhlc(formattedCandle) ? formattedCandle : null;
+};
+
+export const formatValidCandles = (candles: unknown[]): FormattedCandle[] => (
+  candles
+    .map(formatValidCandle)
+    .filter((candle): candle is FormattedCandle => candle !== null)
+);
+
 export const formatChartValue = (value: number): string => {
   return new Intl.NumberFormat('vi-VN', {
     minimumFractionDigits: 2,

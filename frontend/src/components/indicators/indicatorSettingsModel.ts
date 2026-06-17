@@ -1,4 +1,5 @@
 import type { ChartPaneLayout, IndicatorGroup, IndicatorPriceSource, IndicatorSetting, SinglePeriodIndicatorSetting } from '../../types/chart';
+import { cloneIndicatorSettings } from '../../utils/indicatorSettings';
 
 export type IndicatorSettingsTab = 'main' | 'secondary';
 export type SlotIndicatorGroup = 'ema' | 'ma' | 'volume-ma';
@@ -124,7 +125,7 @@ export function isZeroPeriodSetting(setting: IndicatorSetting): boolean {
 }
 
 export function cloneSettings(settings: IndicatorSetting[]): IndicatorSetting[] {
-  return settings.map((setting) => ({ ...setting }));
+  return cloneIndicatorSettings(settings);
 }
 
 export function clampPeriod(value: number, min: number, max: number): number {

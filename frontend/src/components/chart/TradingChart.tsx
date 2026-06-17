@@ -27,6 +27,7 @@ export default function TradingChart() {
     marketDataVersion,
     indicatorSettings,
     chartIndicatorSettings,
+    chartViewSettings,
     visibleIndicatorValues,
     hiddenIndicatorGroups,
     paneLayouts,
@@ -45,6 +46,7 @@ export default function TradingChart() {
     handleApplyIndicatorSettings,
     handleDismissIndicatorGroup,
     handleOpenIndicatorSettingsWindow,
+    handleChartViewSettingsChange,
   } = chartState;
 
   useTradingChartSetup({
@@ -57,12 +59,14 @@ export default function TradingChart() {
     latestCandleRef,
     candleHistoryRef,
     indicatorSettings: chartIndicatorSettings,
+    chartViewSettings,
     marketDataVersion,
     setIsChartReady,
     setLegendData,
     setHoverIndicatorValues,
     setPaneLayouts,
     setVisiblePriceExtrema,
+    onChartViewSettingsChange: handleChartViewSettingsChange,
   });
 
   useMarketData(
@@ -76,6 +80,7 @@ export default function TradingChart() {
     candleHistoryRef,
     indicatorSeriesRef,
     indicatorSettings,
+    chartIndicatorSettings,
     handleIndicatorValuesChange,
     handleCandleHistoryChange,
     isChartReady,
