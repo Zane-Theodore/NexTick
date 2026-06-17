@@ -61,7 +61,7 @@ services:
     command: |
       bash -ec '
         : "$${KAFKA_BROKER:?KAFKA_BROKER is required}"
-        : "$${KAFKA_TOPIC_RAW_TRADES:?KAFKA_TOPIC_RAW_TRADES is required}"
+        : "$${KAFKA_TOPIC_MARKET_KLINES:?KAFKA_TOPIC_MARKET_KLINES is required}"
         : "$${KAFKA_TOPIC_KLINE_STREAM:?KAFKA_TOPIC_KLINE_STREAM is required}"
 
         for attempt in $$(seq 1 30); do
@@ -78,9 +78,9 @@ services:
           sleep 5
         done
 
-        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_RAW_TRADES}" --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_MARKET_KLINES}" --partitions 3 --replication-factor 1
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_KLINE_STREAM}" --partitions 3 --replication-factor 1
-        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_RAW_TRADES}"
+        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_MARKET_KLINES}"
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_KLINE_STREAM}"
       '
     networks:
@@ -208,19 +208,17 @@ services:
     build: .
     container_name: nextick-data-recent-reconcile
     command: python -m data_pipeline.backfill.recent_runner
-    profiles:
-      - maintenance
     env_file:
       - data_pipeline/.env
     environment:
       - QUESTDB_HOST=questdb
-      - RECENT_RECONCILE_ENABLED=false
+      - RECENT_RECONCILE_ENABLED=true
       - RECENT_RECONCILE_INTERVAL_SECONDS=60
       - RECENT_RECONCILE_LOOKBACK_MINUTES=15
       - RECENT_RECONCILE_END_LAG_MINUTES=3
       - RECENT_RECONCILE_INITIAL_DELAY_SECONDS=5
       - RECENT_RECONCILE_WAL_APPLY_TIMEOUT_SECONDS=120
-      - RECENT_RECONCILE_VERIFY_AFTER_WRITE=false
+      - RECENT_RECONCILE_VERIFY_AFTER_WRITE=true
       - RECENT_RECONCILE_DRY_RUN=false
     dns:
       - 8.8.8.8
