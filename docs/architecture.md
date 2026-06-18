@@ -173,7 +173,7 @@ Current storage rules:
 | Historical larger intervals | Built by backend SQL using QuestDB `SAMPLE BY`. |
 | Table partitioning | Monthly. |
 | Timestamp column | Designated QuestDB timestamp. |
-| Insert path | Python processor, startup REST reconciler, and periodic recent REST reconciler. |
+| Insert path | Python processor plus startup/manual REST replacement reconciler. |
 
 Maintenance reconciliation is handled by `data_pipeline.backfill.reconciler`. In
 Docker startup, `data-producer` runs first so Binance klines are buffered in Kafka,
@@ -183,11 +183,9 @@ current minute floor, so only the open in-progress minute is excluded. The
 backfill service writes a shared watermark file; while draining the Kafka
 backlog, the processor skips final `1m` DB upserts before that watermark so
 partial replay candles cannot overwrite the canonical REST rows.
-`data-recent-reconcile` runs `data_pipeline.backfill.recent_runner`
-for periodic closed-tail repair. Recent repair upserts
-authoritative REST candles into the WAL/dedup live table instead of replacing
-the whole table. The live table is WAL/dedup with
-`UPSERT KEYS(timestamp, symbol, interval)`.
+Repairs use the startup/manual replacement reconciler while the live processor
+is stopped, so a bounded window is rebuilt and swapped instead of being patched
+by a second live writer.
 
 ## Backend Layer
 
@@ -334,7 +332,6 @@ stretch factors.
 | Processor QuestDB upsert | Retry 3 times. If final `1m` persistence fails, skip publishing that final candle. |
 | Startup reconciler failure | Retry the one-shot reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, Compose does not start `data-processor` after exhausted retries. |
 | Manual full-window reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
-| Recent reconciler failure | Logs the failed recent closed-tail pass and retries on the next scheduled interval. |
 | Backend QuestDB startup | Runs `SELECT 1`; startup fails if QuestDB is unreachable. |
 | Backend Kafka startup | Startup fails if consumer cannot connect or subscribe. |
 | Frontend history load | Logs error and does not join the Socket.IO room if history load fails. |

@@ -15,7 +15,7 @@ NexTick is not a trading bot and does not provide financial, investment, tax, or
 | Storage | QuestDB stores final `1m` candles in `market_candles`; larger historical intervals are aggregated at read time. |
 | Backend | NestJS validates REST and Socket.IO payloads, reads QuestDB, consumes Kafka kline updates, caches the recent realtime tail, and fans out room updates. |
 | Frontend | React + Lightweight Charts loads history, joins Socket.IO rooms, and renders candles, volume, tooltip data, and indicators. |
-| Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, `data-processor`, and `data-recent-reconcile`. |
+| Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, and `data-processor`. |
 
 Kafka is the service boundary between the Python pipeline and the backend. QuestDB is the time-series contract for historical candle reads.
 
@@ -60,11 +60,10 @@ flowchart LR
 4. `data-backfill` replaces a 24-hour closed `1m` window from Binance REST and writes a backfill watermark.
 5. `CandleProcessor` starts after backfill succeeds, consumes buffered klines, and skips final DB writes before the watermark.
 6. Final `1m` candles are upserted into QuestDB table `market_candles`.
-7. `data-recent-reconcile` periodically upserts recent closed REST candles into the same WAL/dedup table.
-8. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
-9. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
-10. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
-11. React loads history through `GET /candles`, joins the matching Socket.IO room, and updates Lightweight Charts.
+7. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
+8. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
+9. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
+10. React loads history through `GET /candles`, joins the matching Socket.IO room, and updates Lightweight Charts.
 
 ## Local Quickstart
 
@@ -106,7 +105,6 @@ CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 STARTUP_RECONCILE_ENABLED=true
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
-RECENT_RECONCILE_ENABLED=true
 ```
 
 ```env
@@ -140,7 +138,7 @@ VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 Start infrastructure and the Python pipeline:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor data-recent-reconcile
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
 Start the backend:
@@ -194,7 +192,6 @@ NexTick/
 |-- data_pipeline/
 |   |-- backfill/
 |   |   |-- reconciler.py
-|   |   |-- recent_runner.py
 |   |   |-- runner.py
 |   |   `-- state.py
 |   |-- common/
@@ -239,7 +236,7 @@ source files.
 
 | Module | Current features |
 | --- | --- |
-| `data_pipeline/` | Binance kline stream ingestion, market-kline Kafka publishing, startup backfill, recent closed-candle reconciliation, final `1m` QuestDB writes, kline Kafka publishing, retry/backoff handling. |
+| `data_pipeline/` | Binance kline stream ingestion, market-kline Kafka publishing, startup backfill, final `1m` QuestDB writes, kline Kafka publishing, retry/backoff handling. |
 | `backend/` | `GET /`, `GET /health`, `GET /candles`, Swagger at `/api/docs`, validated QuestDB history reads, recent realtime tail cache, Kafka kline consumer/normalization, Socket.IO `join_kline_room`, `leave_kline_room`, and `kline_update`. |
 | `frontend/` | Realtime candlestick and volume chart, symbol/interval controls, OHLCV tooltip, visible high/low overlay, scroll-to-latest, persisted chart/indicator preferences, EMA/MA/volume-MA/RSI/MACD indicators, `/terms`, `/privacy`, and footer API status. |
 
@@ -267,7 +264,7 @@ Pipeline operational checks:
 
 ```bash
 docker compose ps
-docker compose logs -f data-producer data-backfill data-processor data-recent-reconcile
+docker compose logs -f data-producer data-backfill data-processor
 ```
 
 ## Documentation Index

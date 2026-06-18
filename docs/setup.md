@@ -8,7 +8,7 @@ The repository has no root `package.json`. Run backend and frontend commands ins
 
 | Tool | Required for |
 | --- | --- |
-| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, `data-processor`, and `data-recent-reconcile`. |
+| Docker and Docker Compose | Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, and `data-processor`. |
 | Node.js and npm | NestJS backend and Vite frontend. |
 | Python 3.10+ | Manual data pipeline runs without pipeline containers. |
 | PowerShell, Git Bash, or another shell | Copying env files and running commands. |
@@ -61,7 +61,6 @@ CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 STARTUP_RECONCILE_ENABLED=true
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
-RECENT_RECONCILE_ENABLED=true
 ```
 
 Docker Compose overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb` inside pipeline containers.
@@ -110,7 +109,7 @@ VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 From the repository root:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor data-recent-reconcile
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
 Check containers:
@@ -122,7 +121,7 @@ docker compose ps
 View logs:
 
 ```bash
-docker compose logs -f kafka-setup data-producer data-backfill data-processor data-recent-reconcile
+docker compose logs -f kafka-setup data-producer data-backfill data-processor
 ```
 
 Local service URLs:
@@ -143,7 +142,6 @@ Expected service order:
 4. `data-producer` starts after Kafka topics exist and connects to Binance kline streams.
 5. `data-backfill` repairs the closed startup candle window and writes a shared watermark.
 6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered klines and skips final `1m` DB upserts before the backfill watermark.
-7. `data-recent-reconcile` starts after `data-processor` is healthy and periodically repairs recent closed candles.
 
 ## 4. Start the Backend
 
@@ -294,7 +292,7 @@ python -m compileall data_pipeline
 Pipeline operational checks:
 
 ```bash
-docker compose logs -f data-producer data-backfill data-processor data-recent-reconcile
+docker compose logs -f data-producer data-backfill data-processor
 ```
 
 Use Kafka UI to inspect topics:
@@ -349,21 +347,9 @@ If a previous reconcile failed after dropping `market_candles`, run the same
 command again. The script restores `market_candles` from the newest
 `market_candles_old_*` backup before continuing.
 
-For periodic recent closed-candle repair, Docker Compose includes the
-`data-recent-reconcile` service. It runs `data_pipeline.backfill.recent_runner`
-and upserts the recent closed tail into the WAL/dedup table. Keep
-`RECENT_RECONCILE_ENABLED=true` for long-running storage so missed WebSocket
-final kline messages are repaired from Binance REST.
-
-```bash
-docker compose up -d data-recent-reconcile
-```
-
-Tune the recent reconcile variables in `data_pipeline/.env` if you need a
-larger or less frequent repair window. Keep
-`RECENT_RECONCILE_VERIFY_AFTER_WRITE=true` so the service waits for QuestDB
-WAL/dedup to expose a single canonical row per repaired candle before the pass
-is considered successful.
+Stored-candle repair uses the manual replacement reconciler above with the live
+processor stopped. Docker Compose keeps `data-processor` as the only live
+QuestDB writer.
 
 ## Troubleshooting
 

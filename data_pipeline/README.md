@@ -15,7 +15,6 @@ This module does not expose browser APIs, render UI, or run the NestJS backend.
 | `processor/runner.py` | Processor service entrypoint with signal handling and `PROCESSOR_READY_FILE` health marker management. |
 | `backfill/runner.py` | Startup backfill service entrypoint with retry policy and failure behavior. |
 | `backfill/reconciler.py` | Maintenance script that validates Binance REST klines and replaces a closed `1m` candle window in QuestDB. |
-| `backfill/recent_runner.py` | Periodic recent closed-candle reconciler used by `data-recent-reconcile`; upserts the recent closed tail into the WAL/dedup table. |
 | `backfill/state.py` | Shared backfill watermark reader/writer used by backfill and processor services. |
 | `common/config.py` | Loads `data_pipeline/.env`, validates required config, parses symbols and intervals. |
 | `common/logger.py` | Configures stdout logging with timestamp, level, module name, and message. |
@@ -37,7 +36,7 @@ Copy-Item data_pipeline\.env.example data_pipeline\.env
 Fill `data_pipeline/.env`, then start the infrastructure and pipeline:
 
 ```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor data-recent-reconcile
+docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
 Compose behavior:
@@ -51,15 +50,16 @@ Compose behavior:
 | `data-producer` | Overrides `KAFKA_BROKER=kafka:29092`, starts as soon as Kafka topics exist, then streams live Binance klines into Kafka. |
 | `data-backfill` | Runs `data_pipeline.backfill.runner`, repairs the closed startup window, and writes a shared watermark. |
 | `data-processor` | Starts after `data-backfill` completes, drains buffered klines, and skips DB upserts for final candles before the watermark. |
-| `data-recent-reconcile` | Upserts periodic recent closed-candle repair rows from Binance REST when `RECENT_RECONCILE_ENABLED=true`. |
 
 Check logs:
 
 ```bash
-docker compose logs -f data-producer data-backfill data-processor data-recent-reconcile
+docker compose logs -f data-producer data-backfill data-processor
 ```
 
-`data-recent-reconcile` is included in the normal Compose command above. It can be omitted for short local UI-only runs, but long-running storage should keep it enabled.
+Stored-candle repair uses the startup/manual replacement reconciler while
+`data-processor` is stopped. The normal runtime has a single QuestDB writer:
+`data-processor`.
 
 ## Run Manually
 
@@ -130,8 +130,8 @@ processor reads the shared `STARTUP_BACKFILL_STATE_FILE` watermark and refuses
 to upsert final candles older than that watermark while it drains the Kafka
 backlog.
 
-Run `data_pipeline.backfill.reconciler` directly when you want to repair recent
-missing or incorrect stored `1m` candles outside normal startup. The normal path
+Run `data_pipeline.backfill.reconciler` directly when you want to repair missing
+or incorrect stored `1m` candles outside normal startup. The normal path
 validates a bounded Binance window, builds a replacement table that excludes
 stale rows in that window, and swaps it into `market_candles` before the
 processor starts.
@@ -144,10 +144,6 @@ After a successful run it drops its current old/replacement/staging tables and
 also cleans up old reconciler temporary tables from previous runs. Use
 `--keep-temp` only when you intentionally want to inspect those temporary
 tables.
-
-The `data_pipeline.backfill.recent_runner` path is different: it runs
-periodically and upserts only the recent closed tail into the WAL/dedup live
-table, without dropping or swapping `market_candles`.
 
 The default startup reconcile window is 24 hours and ends at Binance's current
 minute floor, so it includes every closed candle and excludes only the currently
@@ -232,17 +228,6 @@ local `.env` values before startup.
 | `STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE` | No | `true` | Waits briefly near a fresh minute boundary before resolving the startup backfill window. |
 | `STARTUP_BACKFILL_STATE_FILE` | No | `/tmp/nextick/startup-backfill.json` in Docker | Shared marker file containing the startup backfill watermark for the processor; blank uses the OS temp directory. |
 | `PROCESSOR_READY_FILE` | No | `/tmp/nextick/processor-ready` in Docker | Optional ready marker path written by `processor/runner.py`; Compose uses it for the `data-processor` healthcheck. |
-| `RECENT_RECONCILE_ENABLED` | No | `true` | Enables the periodic recent closed-candle reconciler. |
-| `RECENT_RECONCILE_INTERVAL_SECONDS` | No | `60` | Delay between recent reconciliation passes. |
-| `RECENT_RECONCILE_LOOKBACK_MINUTES` | No | `15` | Recent closed window size repaired from Binance REST. |
-| `RECENT_RECONCILE_END_LAG_MINUTES` | No | `3` | Lag behind the current minute for recent repair safety. |
-| `RECENT_RECONCILE_INITIAL_DELAY_SECONDS` | No | `5` | Startup delay before the first recent reconciliation pass. |
-| `RECENT_RECONCILE_WAL_APPLY_TIMEOUT_SECONDS` | No | `120` | Wait time for QuestDB WAL apply before strict canonical verification. |
-| `RECENT_RECONCILE_VERIFY_AFTER_WRITE` | No | `true` | Fails and retries the recent repair pass when strict post-write verification does not complete. |
-| `RECENT_RECONCILE_SYMBOLS` | No | `BTCUSDT,ETHUSDT` | Optional recent-reconcile symbol override; defaults to `TRADING_SYMBOLS`. |
-| `RECENT_RECONCILE_DRY_RUN` | No | `false` | Runs recent reconciliation without writing QuestDB. |
-| `RECENT_RECONCILE_BINANCE_REST_URL` | No | `https://api.binance.com` | Optional recent-reconcile REST endpoint override. |
-| `RECENT_RECONCILE_TOLERANCE` | No | `0.00000001` | Verification tolerance for recent reconciliation. |
 
 Supported intervals:
 

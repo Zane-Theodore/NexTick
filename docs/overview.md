@@ -27,7 +27,7 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 | [`data_pipeline/`](../data_pipeline/README.md) | Binance kline ingestion, Kafka candle publishing, QuestDB writes, kline publishing. |
 | [`backend/`](../backend/README.md) | NestJS API gateway, DTO validation, QuestDB queries, recent realtime candle cache, Kafka kline consumer, Socket.IO fan-out, Swagger. |
 | [`frontend/`](../frontend/README.md) | React chart UI, REST history loading, Socket.IO realtime updates, persisted chart preferences, indicators, static `/terms` and `/privacy` pages. |
-| Infrastructure | Docker Compose services for Kafka, Kafka UI, QuestDB, producer, startup backfill, processor, and recent reconciliation. |
+| Infrastructure | Docker Compose services for Kafka, Kafka UI, QuestDB, producer, startup backfill, and processor. |
 
 ## End-to-End Data Flow
 
@@ -60,7 +60,6 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 | API status | Frontend footer checks `VITE_API_HEALTH_URL`. |
 | Visible high/low overlay | Frontend marks visible-range price extrema on the chart. |
 | Startup backfill | `data-backfill` fills a closed `1m` startup window before live processing. |
-| Recent maintenance reconcile | `data-recent-reconcile` repairs recent closed candles from Binance REST. |
 
 Supported intervals in code:
 
