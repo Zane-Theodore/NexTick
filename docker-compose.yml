@@ -204,32 +204,6 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  data-recent-reconcile:
-    build: .
-    container_name: nextick-data-recent-reconcile
-    command: python -m data_pipeline.backfill.recent_runner
-    env_file:
-      - data_pipeline/.env
-    environment:
-      - QUESTDB_HOST=questdb
-      - RECENT_RECONCILE_ENABLED=true
-      - RECENT_RECONCILE_INTERVAL_SECONDS=60
-      - RECENT_RECONCILE_LOOKBACK_MINUTES=15
-      - RECENT_RECONCILE_END_LAG_MINUTES=3
-      - RECENT_RECONCILE_INITIAL_DELAY_SECONDS=5
-      - RECENT_RECONCILE_WAL_APPLY_TIMEOUT_SECONDS=120
-      - RECENT_RECONCILE_VERIFY_AFTER_WRITE=true
-      - RECENT_RECONCILE_DRY_RUN=false
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-    networks:
-      - nextick_net
-    depends_on:
-      data-processor:
-        condition: service_healthy
-    restart: unless-stopped
-
 networks:
   nextick_net:
     driver: bridge

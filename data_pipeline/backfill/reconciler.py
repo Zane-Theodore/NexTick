@@ -1,9 +1,9 @@
 """Reconcile closed 1-minute candles against Binance REST klines.
 
 The startup backfill service runs this before the realtime processor starts. It
-upserts a closed window into the WAL/dedup candle table, then the processor uses
-the reconciled window end as a write fence while it drains buffered Kafka trades.
-The full table replacement helpers remain for manual repair workflows.
+replaces a closed window in the WAL/dedup candle table, then the processor uses
+the reconciled window end as a write fence while it drains buffered Kafka klines.
+The same replacement path is used for manual repair workflows.
 """
 
 import argparse
@@ -38,7 +38,6 @@ DEFAULT_LIMIT = 1000
 DEFAULT_TOLERANCE = Decimal("0.00000001")
 MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
 RECONCILE_END_LAG_MINUTES = 0
-RECENT_RECONCILE_END_LAG_MINUTES = 3
 WAL_APPLY_TIMEOUT_SECONDS = 120.0
 DDL_RETRY_ATTEMPTS = 30
 DDL_RETRY_DELAY_SECONDS = 1.0
@@ -439,8 +438,8 @@ def ensure_market_table(cursor, allow_migration: bool = True) -> None:
                     raise RuntimeError(
                         f"{TABLE_NAME} exists but is not a WAL/dedup table "
                         f"(walEnabled={wal_enabled}, dedup={dedup_enabled}). "
-                        "The concurrent recent reconciler will not migrate/drop the live table while "
-                        "the processor may be writing. Run a manual full repair with the processor stopped."
+                        "Stop the processor before running a repair that migrates or recreates "
+                        "the live table."
                     )
 
                 logger.warning(
@@ -1368,118 +1367,6 @@ def reconcile_symbol(
                         logger.warning(f"{symbol}: failed to drop temporary table {table_name}", exc_info=True)
         finally:
             cleanup_conn.close()
-
-
-def reconcile_tail_append(
-    base_url: str,
-    symbols: list[str],
-    start: datetime,
-    end: datetime,
-    tolerance: Decimal,
-    dry_run: bool,
-    wal_apply_timeout_seconds: float = WAL_APPLY_TIMEOUT_SECONDS,
-    verify_after_write: bool = False,
-) -> None:
-    """Upsert a closed catch-up window into the WAL/dedup live table."""
-
-    total_rows = 0
-    if dry_run:
-        for symbol in symbols:
-            logger.info(
-                f"{symbol}: fetching Binance {INTERVAL} tail candles from "
-                f"{start.isoformat()} to {end.isoformat()}"
-            )
-            rows = fetch_binance_klines(base_url, symbol, start, end)
-            validate_rows(rows, symbol, start, end)
-            logger.info(f"{symbol}: tail dry run passed. {len(rows)} Binance candles are complete and valid.")
-        return
-
-    expected_count = int((end - start).total_seconds() // 60)
-    conn = create_connection()
-    try:
-        with conn.cursor() as cursor:
-            ensure_market_table(cursor, allow_migration=False)
-
-            for symbol in symbols:
-                logger.info(
-                    f"{symbol}: upserting REST reconcile tail window; "
-                    f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}"
-                )
-                rows = fetch_binance_klines(base_url, symbol, start, end)
-                validate_rows(rows, symbol, start, end)
-                insert_rows(cursor, TABLE_NAME, rows)
-                try:
-                    wait_for_symbol_window_match(
-                        cursor,
-                        symbol,
-                        start,
-                        end,
-                        rows,
-                        tolerance,
-                        timeout_seconds=wal_apply_timeout_seconds,
-                        require_no_duplicates=True,
-                    )
-                except Exception as exc:
-                    log_message = (
-                        f"{symbol}: REST reconcile rows were inserted but the live table is not yet "
-                        f"strictly canonical; window=[{start.isoformat()}, {end.isoformat()}). "
-                        "QuestDB WAL may still be applying out-of-order rows."
-                    )
-                    if verify_after_write:
-                        raise RuntimeError(log_message) from exc
-                    logger.warning(log_message, exc_info=True)
-                total_rows += len(rows)
-    finally:
-        conn.close()
-
-    if total_rows:
-        logger.info(f"Upserted {total_rows} REST reconcile candle row(s) in {TABLE_NAME}.")
-    else:
-        logger.info("No REST reconcile candle rows to upsert.")
-
-
-def run_recent_reconciliation(
-    lookback_minutes: int = 30,
-    symbols_arg: str | None = None,
-    binance_rest_url: str | None = None,
-    dry_run: bool = False,
-    tolerance_arg: str | Decimal | None = None,
-    end_lag_minutes: int | None = None,
-    wal_apply_timeout_seconds: float = WAL_APPLY_TIMEOUT_SECONDS,
-    verify_after_write: bool = False,
-) -> None:
-    """Upsert a short closed-candle window after the live processor has started."""
-
-    load_environment()
-
-    base_url = binance_rest_url or os.getenv("BINANCE_REST_URL") or DEFAULT_BINANCE_REST_URL
-    symbols = parse_symbols(symbols_arg or os.getenv("TRADING_SYMBOLS"))
-    tolerance = Decimal(str(tolerance_arg or DEFAULT_TOLERANCE))
-    resolved_end_lag_minutes = parse_positive_int(
-        end_lag_minutes if end_lag_minutes is not None else os.getenv("RECENT_RECONCILE_END_LAG_MINUTES"),
-        RECENT_RECONCILE_END_LAG_MINUTES,
-        minimum=0,
-    )
-    end = resolve_latest_closed_end(base_url, end_lag_minutes=resolved_end_lag_minutes)
-    start = end - timedelta(minutes=max(1, lookback_minutes))
-    expected_count = int((end - start).total_seconds() // 60)
-
-    logger.info(
-        f"Recent REST reconcile started: symbols={symbols}, interval={INTERVAL}, "
-        f"window=[{start.isoformat()}, {end.isoformat()}), expected_candles={expected_count}, "
-        f"end_lag_minutes={resolved_end_lag_minutes}"
-    )
-    reconcile_tail_append(
-        base_url=base_url,
-        symbols=symbols,
-        start=start,
-        end=end,
-        tolerance=tolerance,
-        dry_run=dry_run,
-        wal_apply_timeout_seconds=wal_apply_timeout_seconds,
-        verify_after_write=verify_after_write,
-    )
-    logger.info("Recent REST reconcile completed.")
 
 
 def parse_args():
