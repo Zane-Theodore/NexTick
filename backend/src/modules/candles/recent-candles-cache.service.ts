@@ -43,6 +43,13 @@ export class RecentCandlesCacheService {
     );
 
     if (existingIndex >= 0) {
+      if (
+        cachedCandles[existingIndex].is_final &&
+        !normalizedCandle.is_final
+      ) {
+        return;
+      }
+
       cachedCandles[existingIndex] = normalizedCandle;
     } else {
       cachedCandles.push(normalizedCandle);
