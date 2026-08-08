@@ -2,7 +2,7 @@
 
 NexTick is a realtime cryptocurrency market-data streaming and charting system.
 
-It ingests Binance kline streams, publishes normalized candle updates through Kafka, stores final `1m` candles in QuestDB, exposes validated REST and Socket.IO contracts through NestJS, and renders historical plus realtime candles in a React chart UI.
+It ingests Binance raw trade streams, builds candle updates in the Python processor, stores final `1m` candles in QuestDB, exposes validated REST and Socket.IO contracts through NestJS, and renders historical plus realtime candles in a React chart UI.
 
 NexTick is not a trading bot and does not provide financial, investment, tax, or legal advice.
 
@@ -10,8 +10,8 @@ NexTick is not a trading bot and does not provide financial, investment, tax, or
 
 | Area | Current implementation |
 | --- | --- |
-| Ingestion | Python producer connects to Binance combined kline streams for configured symbols and intervals. |
-| Processing | Python processor validates Binance kline updates, persists final `1m` candles, and republishes final/non-final updates. |
+| Ingestion | Python producer connects to Binance combined raw trade streams for configured symbols. |
+| Processing | Python processor aggregates raw trades into configured candle intervals, persists final `1m` candles, and republishes final/non-final updates. |
 | Storage | QuestDB stores final `1m` candles in `market_candles`; larger historical intervals are aggregated at read time. |
 | Backend | NestJS validates REST and Socket.IO payloads, reads QuestDB, consumes Kafka kline updates, caches the recent realtime tail, and fans out room updates. |
 | Frontend | React + Lightweight Charts loads history, joins Socket.IO rooms, and renders candles, volume, tooltip data, and indicators. |
@@ -23,7 +23,7 @@ Kafka is the service boundary between the Python pipeline and the backend. Quest
 
 ```mermaid
 flowchart LR
-  binance["Binance combined kline streams"] --> producer["Python producer"]
+  binance["Binance combined raw trade streams"] --> producer["Python producer"]
   producer --> marketKlines[("Kafka market klines topic")]
   marketKlines --> processor["Python candle processor"]
   processor --> questdb[("QuestDB market_candles")]
@@ -47,18 +47,18 @@ flowchart LR
 
 | Module | Role | Main technologies |
 | --- | --- | --- |
-| `data_pipeline/` | Binance kline ingestion, candle validation, QuestDB writes, kline publishing | Python 3.10, `kafka-python`, `websocket-client`, `psycopg2`, `python-dotenv` |
+| `data_pipeline/` | Binance raw-trade ingestion, candle aggregation, QuestDB writes, kline publishing | Python 3.10, `kafka-python`, `websocket-client`, `psycopg2`, `python-dotenv` |
 | `backend/` | API gateway, DTO validation, QuestDB queries, recent realtime candle cache, Kafka consumer, Socket.IO fan-out, Swagger | NestJS 11, TypeScript 6, KafkaJS, Socket.IO, `pg`, `class-validator`, Swagger |
 | `frontend/` | Realtime chart UI, REST history loading, Socket.IO updates, indicator controls | React 19, Vite 8, TypeScript 6, Lightweight Charts 5, Axios, Socket.IO Client, Tailwind CSS 4 |
 | Infrastructure | Local streaming and storage runtime | Docker Compose, Kafka, Kafka UI, QuestDB |
 
 ## Runtime Flow
 
-1. Binance emits kline updates through combined kline streams.
-2. `BinanceCombinedKlineProducer` normalizes each kline and publishes to `KAFKA_TOPIC_MARKET_KLINES`.
-3. `data-producer` keeps publishing kline updates to Kafka while startup backfill runs.
-4. `data-backfill` replaces a 24-hour closed `1m` window from Binance REST and writes a backfill watermark.
-5. `CandleProcessor` starts after backfill succeeds, consumes buffered klines, and skips final DB writes before the watermark.
+1. Binance emits individual trades through combined `@trade` streams.
+2. `BinanceCombinedTradeProducer` normalizes each trade and publishes to `KAFKA_TOPIC_MARKET_TRADES`.
+3. `data-producer` keeps publishing raw trades to Kafka.
+4. `data-backfill` is disabled by default; when enabled, it replaces a closed `1m` window from Binance REST and writes a backfill watermark before processing begins.
+5. `CandleProcessor` consumes buffered klines and skips final DB writes before a backfill watermark only when one exists.
 6. Final `1m` candles are upserted into QuestDB table `market_candles`.
 7. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
 8. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
@@ -95,14 +95,14 @@ QUESTDB_USER=admin
 QUESTDB_PASSWORD=quest
 QUESTDB_DB_NAME=qdb
 KAFKA_BROKER=localhost:9092
-KAFKA_TOPIC_MARKET_KLINES=market-klines
+KAFKA_TOPIC_MARKET_TRADES=market-trades
 KAFKA_TOPIC_KLINE_STREAM=kline-stream
 KAFKA_CONSUMER_GROUP_ID=candle-processor-group
 KAFKA_AUTO_OFFSET_RESET=earliest
 BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
-STARTUP_RECONCILE_ENABLED=true
+STARTUP_RECONCILE_ENABLED=false
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
 ```
@@ -140,6 +140,9 @@ Start infrastructure and the Python pipeline:
 ```bash
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
+
+Startup backfill is disabled by default. To opt in, set
+`STARTUP_RECONCILE_ENABLED=true` in `data_pipeline/.env` before starting Compose.
 
 Start the backend:
 
@@ -227,8 +230,15 @@ NexTick/
 `-- README.md
 ```
 
-Local runtime directories can also appear under the repository root. `data/questdb`
-is the QuestDB volume mounted by Docker Compose and is ignored by git.
+QuestDB data is stored in the Docker-managed `questdb_data` named volume so its
+WAL and memory-mapped files remain on Docker's Linux filesystem. Do not use a
+Windows bind mount for `/var/lib/questdb`. A legacy `data/questdb` directory, if
+present, is an untouched backup from the previous storage layout.
+
+For an existing installation that still has `data/questdb`, stop the processor
+and QuestDB, run `docker compose --profile migration run --rm questdb-storage-migrate`,
+then bring the stack up again. The migration is idempotent and never deletes the
+legacy directory.
 `models/` and `warehouse/` are currently local placeholders with no tracked
 source files.
 
@@ -236,7 +246,7 @@ source files.
 
 | Module | Current features |
 | --- | --- |
-| `data_pipeline/` | Binance kline stream ingestion, market-kline Kafka publishing, startup backfill, final `1m` QuestDB writes, kline Kafka publishing, retry/backoff handling. |
+| `data_pipeline/` | Binance raw-trade ingestion, market-trade Kafka publishing, startup backfill, candle aggregation, final `1m` QuestDB writes, kline Kafka publishing, retry/backoff handling. |
 | `backend/` | `GET /`, `GET /health`, `GET /candles`, Swagger at `/api/docs`, validated QuestDB history reads, recent realtime tail cache, Kafka kline consumer/normalization, Socket.IO `join_kline_room`, `leave_kline_room`, and `kline_update`. |
 | `frontend/` | Realtime candlestick and volume chart, symbol/interval controls, OHLCV tooltip, visible high/low overlay, scroll-to-latest, persisted chart/indicator preferences, EMA/MA/volume-MA/RSI/MACD indicators, `/terms`, `/privacy`, and footer API status. |
 
@@ -284,6 +294,6 @@ docker compose logs -f data-producer data-backfill data-processor
 | --- | --- |
 | Frontend only talks to backend REST and Socket.IO. | It does not connect to Binance, Kafka, QuestDB, or model services. |
 | Backend is not the ingestion engine. | It does not connect to Binance or own candle ingestion. |
-| Python pipeline owns the write path. | It ingests Binance klines, writes QuestDB, and publishes kline updates. |
+| Python pipeline owns the write path. | It ingests Binance raw trades, aggregates candles, writes QuestDB, and publishes kline updates. |
 | Kafka and QuestDB are integration contracts. | Backend consumes processed kline updates from Kafka and reads history from QuestDB. |
 | AI/model services are future extensions. | Replay buffers, model training, online learning, and forecasting should consume Kafka or QuestDB outside the API request path. |

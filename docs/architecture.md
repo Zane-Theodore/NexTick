@@ -2,15 +2,15 @@
 
 NexTick is a realtime market-data system with explicit runtime boundaries.
 
-Binance klines enter the Python pipeline, Kafka separates services, QuestDB stores final `1m` candles, NestJS exposes validated API contracts, and React renders the chart. AI forecasting, replay buffers, model training, and online learning are future extensions only.
+Binance raw trades enter the Python pipeline, where candles are aggregated before Kafka output to the backend. QuestDB stores final `1m` candles, NestJS exposes validated API contracts, and React renders the chart. AI forecasting, replay buffers, model training, and online learning are future extensions only.
 
 ## System Diagram
 
 ```mermaid
 flowchart LR
-  binance["Binance combined kline streams"] --> producer["Python BinanceCombinedKlineProducer"]
-  producer --> marketKlines[("Kafka: KAFKA_TOPIC_MARKET_KLINES")]
-  marketKlines --> processor["Python CandleProcessor"]
+  binance["Binance combined raw trade streams"] --> producer["Python BinanceCombinedTradeProducer"]
+  producer --> marketTrades[("Kafka: KAFKA_TOPIC_MARKET_TRADES")]
+  marketTrades --> processor["Python CandleProcessor"]
   processor --> questdb[("QuestDB: market_candles")]
   processor --> kline[("Kafka: KAFKA_TOPIC_KLINE_STREAM")]
 
@@ -33,8 +33,8 @@ flowchart LR
 
 | Boundary | Owner | Contract |
 | --- | --- | --- |
-| Binance to market kline Kafka | Python producer | Normalized Binance kline JSON in `KAFKA_TOPIC_MARKET_KLINES`. |
-| Market kline Kafka to processor | Python processor | `CandleProcessor` consumes and validates kline updates. |
+| Binance to market-trade Kafka | Python producer | Normalized Binance raw-trade JSON in `KAFKA_TOPIC_MARKET_TRADES`. |
+| Market-trade Kafka to processor | Python processor | `CandleProcessor` consumes trades and aggregates candles. |
 | Processor to QuestDB | Python processor | Final `1m` candles upserted into `market_candles`. |
 | Processor to kline Kafka | Python processor | Final and non-final candle JSON in `KAFKA_TOPIC_KLINE_STREAM`. |
 | QuestDB to REST | NestJS backend | `GET /candles` response DTO, with valid OHLCV filtering and recent realtime tail merge. |
@@ -45,21 +45,21 @@ flowchart LR
 
 ### Producer
 
-`data_pipeline/producer/binance_producer.py` runs `BinanceCombinedKlineProducer`.
+`data_pipeline/producer/binance_producer.py` runs `BinanceCombinedTradeProducer`.
 
 Current behavior:
 
-1. Reads `BINANCE_SOCKET_URL`, `TRADING_SYMBOLS`, and `CANDLE_INTERVALS` from config.
+1. Reads `BINANCE_SOCKET_URL` and `TRADING_SYMBOLS` from config.
 2. Lowercases configured symbols for Binance stream names.
-3. Builds a combined kline stream URL from `BINANCE_SOCKET_URL`, like:
+3. Builds a combined raw trade stream URL from `BINANCE_SOCKET_URL`, like:
 
 ```text
-wss://stream.binance.com:9443/stream?streams=btcusdt@kline_1m/btcusdt@kline_5m/ethusdt@kline_1m
+wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade
 ```
 
-4. Converts Binance payloads into the market kline input contract.
-5. Drops invalid candles with non-positive OHLC or inconsistent OHLC ranges.
-6. Publishes to `KAFKA_TOPIC_MARKET_KLINES` with `symbol_interval` as the Kafka key.
+4. Converts Binance payloads into the market raw-trade input contract.
+5. Drops invalid trades with invalid timestamp, price, or quantity.
+6. Publishes to `KAFKA_TOPIC_MARKET_TRADES` with `symbol` as the Kafka key.
 7. Reconnects to Binance with exponential backoff when the WebSocket drops.
 
 ### Processor
@@ -70,38 +70,33 @@ Current behavior:
 
 1. Connects to QuestDB through PostgreSQL wire protocol.
 2. Creates `market_candles` as a WAL/dedup table if it does not exist.
-3. Consumes `KAFKA_TOPIC_MARKET_KLINES` with group id `candle-processor-group` by default.
-4. Validates Binance-provided OHLCV values.
-5. Skips final candles before the startup backfill watermark.
-6. Persists final `1m` candles only.
-7. Publishes final and non-final candles to `KAFKA_TOPIC_KLINE_STREAM`.
+3. Consumes `KAFKA_TOPIC_MARKET_TRADES` with group id `candle-processor-group` by default.
+4. Aggregates raw trade price and quantity into every configured interval.
+5. Skips candles before the startup backfill watermark.
+6. Publishes final and non-final candles to `KAFKA_TOPIC_KLINE_STREAM` before persisting final `1m` candles.
+7. Persists final `1m` candles only and retries failed upserts without withholding realtime output.
 
 ## Kafka Topics
 
 | Topic env | Current producer | Current consumer | Message shape |
 | --- | --- | --- | --- |
-| `KAFKA_TOPIC_MARKET_KLINES` | Python producer | Python processor | Binance kline JSON. |
+| `KAFKA_TOPIC_MARKET_TRADES` | Python producer | Python processor | Binance raw-trade JSON. |
 | `KAFKA_TOPIC_KLINE_STREAM` | Python processor | NestJS backend | Candle JSON plus `is_final`. |
 
 Docker Compose creates both topics in `kafka-setup` using values from `data_pipeline/.env`. Each topic is created with 3 partitions and replication factor `1`.
 
 ## Data Shapes
 
-### Market Kline Input
+### Market Trade Input
 
 ```json
 {
   "symbol": "BTCUSDT",
-  "interval": "1m",
-  "timestamp": 1779254400000,
-  "close_time": 1779254459999,
+  "trade_id": 123456789,
+  "timestamp": 1779254400123,
   "event_time": 1779254460123,
-  "open": 105000.5,
-  "high": 105250.75,
-  "low": 104900.25,
-  "close": 105120.1,
-  "volume": 0.125,
-  "is_final": false
+  "price": 105120.1,
+  "quantity": 0.125
 }
 ```
 
@@ -176,13 +171,14 @@ Current storage rules:
 | Insert path | Python processor plus startup/manual REST replacement reconciler. |
 
 Maintenance reconciliation is handled by `data_pipeline.backfill.reconciler`. In
-Docker startup, `data-producer` runs first so Binance klines are buffered in Kafka,
-`data-backfill` runs one Binance REST replacement backfill pass, and only then
-`data-processor` starts `CandleProcessor`. Startup backfill ends at Binance's
-current minute floor, so only the open in-progress minute is excluded. The
-backfill service writes a shared watermark file; while draining the Kafka
-backlog, the processor skips final `1m` DB upserts before that watermark so
-partial replay candles cannot overwrite the canonical REST rows.
+Docker startup, `data-producer` runs first so Binance raw trades are buffered in Kafka,
+then `data-backfill` exits without writes by default and `data-processor` starts
+`CandleProcessor`. If `STARTUP_RECONCILE_ENABLED=true`, backfill instead runs one
+Binance REST replacement pass before the processor. It ends at Binance's current
+minute floor, so only the open in-progress minute is excluded. The backfill
+service writes a shared watermark file; while draining the Kafka backlog, the
+processor skips final `1m` DB upserts before that watermark so partial replay
+candles cannot overwrite the canonical REST rows.
 Repairs use the startup/manual replacement reconciler while the live processor
 is stopped, so a bounded window is rebuilt and swapped instead of being patched
 by a second live writer.
@@ -312,7 +308,7 @@ stretch factors.
 
 | Boundary | Format |
 | --- | --- |
-| Binance kline input | Milliseconds since Unix epoch from kline open time field `k.t`. |
+| Binance raw-trade input | Milliseconds since Unix epoch from trade time field `T`. |
 | Python processor | UTC-aware `datetime`. |
 | Kafka kline output | ISO 8601 string, usually with `+00:00`. |
 | QuestDB insert | `%Y-%m-%d %H:%M:%S`. |
@@ -325,11 +321,11 @@ stretch factors.
 | --- | --- |
 | Producer Kafka startup | Retry with exponential backoff, up to 60 attempts. |
 | Producer Binance disconnect | Reconnect with exponential backoff, up to 10 attempts. |
-| Invalid producer kline | Drop non-positive OHLC values, negative volume, unsupported intervals, or inconsistent OHLC ranges. |
+| Invalid producer trade | Drop missing symbol/id/timestamp or non-positive price/quantity. |
 | Processor Kafka startup | Retry with exponential backoff. |
-| Invalid kline input | Skip missing symbol, interval, timestamp, invalid OHLCV values, unsupported intervals, or pre-2020 timestamps. |
+| Invalid raw-trade input | Skip missing symbol, trade id, timestamp, price, or quantity. |
 | Processor QuestDB startup | Startup fails if connection cannot be opened. |
-| Processor QuestDB upsert | Retry 3 times. If final `1m` persistence fails, skip publishing that final candle. |
+| Processor QuestDB upsert | Retry 3 times, then retain the final `1m` candle for retry. The candle is already published to realtime consumers. |
 | Startup reconciler failure | Retry the one-shot reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, Compose does not start `data-processor` after exhausted retries. |
 | Manual full-window reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
 | Backend QuestDB startup | Runs `SELECT 1`; startup fails if QuestDB is unreachable. |

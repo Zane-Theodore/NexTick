@@ -64,6 +64,9 @@ Start Docker infrastructure from the repository root before starting the backend
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
+Startup backfill is disabled by default. Set `STARTUP_RECONCILE_ENABLED=true` in
+`data_pipeline/.env` before startup to enable it.
+
 Create and fill the backend env file:
 
 ```bash

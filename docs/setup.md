@@ -49,7 +49,7 @@ QUESTDB_PASSWORD=quest
 QUESTDB_DB_NAME=qdb
 
 KAFKA_BROKER=localhost:9092
-KAFKA_TOPIC_MARKET_KLINES=market-klines
+KAFKA_TOPIC_MARKET_TRADES=market-trades
 KAFKA_TOPIC_KLINE_STREAM=kline-stream
 KAFKA_CONSUMER_GROUP_ID=candle-processor-group
 KAFKA_AUTO_OFFSET_RESET=earliest
@@ -58,7 +58,7 @@ BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 
-STARTUP_RECONCILE_ENABLED=true
+STARTUP_RECONCILE_ENABLED=false
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
 ```
@@ -112,6 +112,9 @@ From the repository root:
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
+Startup backfill is disabled by default. Set `STARTUP_RECONCILE_ENABLED=true` in
+`data_pipeline/.env` before startup to opt in.
+
 Check containers:
 
 ```bash
@@ -137,11 +140,11 @@ Local service URLs:
 Expected service order:
 
 1. `kafka` becomes healthy.
-2. `kafka-setup` creates `market-klines` and `kline-stream`.
+2. `kafka-setup` creates `market-trades` and `kline-stream`.
 3. `questdb` becomes healthy.
-4. `data-producer` starts after Kafka topics exist and connects to Binance kline streams.
-5. `data-backfill` repairs the closed startup candle window and writes a shared watermark.
-6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered klines and skips final `1m` DB upserts before the backfill watermark.
+4. `data-producer` starts after Kafka topics exist and connects to Binance raw trade streams.
+5. `data-backfill` exits without database writes by default. When enabled, it repairs the closed startup candle window and writes a shared watermark.
+6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered klines. It skips final `1m` DB upserts before the watermark only when enabled backfill wrote one.
 
 ## 4. Start the Backend
 
@@ -322,8 +325,9 @@ filled from Binance REST data. The startup backfill repairs one 24-hour window
 through Binance's latest closed minute and writes a watermark so the processor
 does not overwrite that window while draining buffered kline updates.
 
-Docker Compose runs `data-backfill` once before `data-processor` starts. The
-startup/manual `data_pipeline.backfill.reconciler` path builds replacement
+Docker Compose runs `data-backfill` once before `data-processor` starts, but it
+does no work unless `STARTUP_RECONCILE_ENABLED=true`. The startup/manual
+`data_pipeline.backfill.reconciler` path builds replacement
 tables and swaps the bounded target window into `market_candles`. Stop the live
 writer before any manual repair workflow that drops, recreates, or migrates
 `market_candles`.
@@ -363,7 +367,7 @@ QuestDB writer.
 | Frontend does not load data | Backend is down, `VITE_API_URL` is wrong, or no candles exist yet | Check `/health`, `/candles`, and frontend `.env`; wait for a final `1m` candle. |
 | Footer shows `Offline` | `VITE_API_HEALTH_URL` is missing or backend `/health` is unreachable | Set `VITE_API_HEALTH_URL=http://localhost:3000/health` and restart Vite. |
 | Socket.IO CORS error | `FRONTEND_URL` or `BACKEND_URL` does not match the browser/backend origin | Update `backend/.env` and restart NestJS. |
-| `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after kline streaming starts. |
+| `GET /candles` returns empty data | QuestDB has no final `1m` rows yet | Check `data-processor` logs and query `market_candles`; wait at least one minute after raw trade streaming starts. |
 | `market_candles` is missing after reconciliation | A previous manual full repair failed after dropping the live table | Stop `data-processor`, then run `python -m data_pipeline.backfill.reconciler` to restore from the newest `market_candles_old_*` backup. |
 | Binance producer cannot connect | Network, DNS, or Binance access issue | Check `data-producer` logs; Compose sets DNS to `8.8.8.8` and `8.8.4.4`. |
 | Interval returns 400 | Interval is not in backend `VALID_INTERVALS` | Use one of `1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M`. |
