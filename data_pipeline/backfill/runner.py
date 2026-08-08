@@ -45,11 +45,11 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
 def run_startup_backfill() -> bool:
     """Run bounded startup reconciliation and write a processor fence on success."""
 
-    if not _env_bool("STARTUP_RECONCILE_ENABLED", True):
-        logger.warning("Startup backfill is disabled. Processor can start without a backfill write fence.")
-        return True
-
     remove_backfill_state_file()
+
+    if not _env_bool("STARTUP_RECONCILE_ENABLED", False):
+        logger.info("Startup backfill is disabled. Processor can start without a backfill write fence.")
+        return True
 
     required = _env_bool("STARTUP_RECONCILE_REQUIRED", True)
     attempts = _env_int("STARTUP_RECONCILE_MAX_ATTEMPTS", 3)

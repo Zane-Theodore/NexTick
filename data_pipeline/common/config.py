@@ -44,7 +44,7 @@ def _split_env_list(var_name: str, default: str = "") -> list[str]:
 
 # KAFKA
 KAFKA_SERVER = get_env_or_raise('KAFKA_BROKER')
-KAFKA_TOPIC_MARKET_KLINES = get_env_or_raise('KAFKA_TOPIC_MARKET_KLINES')
+KAFKA_TOPIC_MARKET_TRADES = get_env_or_raise('KAFKA_TOPIC_MARKET_TRADES')
 TOPIC_KLINE_STREAM = get_env_or_raise('KAFKA_TOPIC_KLINE_STREAM')
 KAFKA_CONSUMER_GROUP_ID = os.getenv('KAFKA_CONSUMER_GROUP_ID', 'candle-processor-group').strip() or 'candle-processor-group'
 KAFKA_AUTO_OFFSET_RESET = os.getenv('KAFKA_AUTO_OFFSET_RESET', 'earliest').strip().lower() or 'earliest'

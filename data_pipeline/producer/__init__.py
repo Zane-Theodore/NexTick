@@ -1,1 +1,1 @@
-"""Binance kline producer service."""
+"""Binance raw trade producer service."""
