@@ -61,7 +61,7 @@ services:
     command: |
       bash -ec '
         : "$${KAFKA_BROKER:?KAFKA_BROKER is required}"
-        : "$${KAFKA_TOPIC_MARKET_KLINES:?KAFKA_TOPIC_MARKET_KLINES is required}"
+        : "$${KAFKA_TOPIC_MARKET_TRADES:?KAFKA_TOPIC_MARKET_TRADES is required}"
         : "$${KAFKA_TOPIC_KLINE_STREAM:?KAFKA_TOPIC_KLINE_STREAM is required}"
 
         for attempt in $$(seq 1 30); do
@@ -78,9 +78,9 @@ services:
           sleep 5
         done
 
-        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_MARKET_KLINES}" --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_MARKET_TRADES}" --partitions 3 --replication-factor 1
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_KLINE_STREAM}" --partitions 3 --replication-factor 1
-        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_MARKET_KLINES}"
+        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_MARKET_TRADES}"
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_KLINE_STREAM}"
       '
     networks:
@@ -99,13 +99,38 @@ services:
     networks:
       - nextick_net
     volumes:
-      - ./data/questdb:/var/lib/questdb
+      # QuestDB uses WAL and memory-mapped files. Keep its data on Docker's
+      # Linux-managed filesystem instead of a Windows bind mount.
+      - questdb_data:/var/lib/questdb
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS 'http://localhost:9000/exec?query=select%201' >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 20s
+
+  # One-shot, opt-in migration for installations created before questdb_data
+  # was introduced. It copies the old bind-mounted database without deleting it.
+  questdb-storage-migrate:
+    image: confluentinc/cp-kafka:7.4.0
+    profiles: ["migration"]
+    user: "0:0"
+    entrypoint: []
+    command:
+      - bash
+      - -ec
+      - |
+          if [ -f /target/.nextick-storage-migrated ]; then
+            echo "QuestDB named-volume migration was already completed."
+            exit 0
+          fi
+          test -d /source/db
+          cp -a /source/. /target/
+          touch /target/.nextick-storage-migrated
+          echo "QuestDB storage migration completed. The source directory remains unchanged."
+    volumes:
+      - ./data/questdb:/source:ro
+      - questdb_data:/target
 
   data-producer:
     build: .
@@ -145,13 +170,6 @@ services:
       - KAFKA_SERVER=kafka:29092
       - QUESTDB_HOST=questdb
       - STARTUP_BACKFILL_STATE_FILE=/tmp/nextick/startup-backfill.json
-      - STARTUP_RECONCILE_ENABLED=true
-      - STARTUP_RECONCILE_REQUIRED=true
-      - STARTUP_RECONCILE_MAX_ATTEMPTS=3
-      - STARTUP_RECONCILE_RETRY_DELAY_SECONDS=5
-      - STARTUP_RECONCILE_WINDOW_HOURS=24
-      - STARTUP_RECONCILE_END_LAG_MINUTES=0
-      - STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
     networks:
       - nextick_net
     volumes:
@@ -184,6 +202,7 @@ services:
       - KAFKA_AUTO_OFFSET_RESET=earliest
       - QUESTDB_HOST=questdb
       - PROCESSOR_READY_FILE=/tmp/nextick/processor-ready
+      - CANDLE_PROCESSOR_STATE_FILE=/tmp/nextick/candle-processor-state.json
       - STARTUP_BACKFILL_STATE_FILE=/tmp/nextick/startup-backfill.json
     networks:
       - nextick_net
@@ -211,3 +230,4 @@ networks:
 volumes:
   kafka_data:
   pipeline_state:
+  questdb_data:
