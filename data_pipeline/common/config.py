@@ -42,6 +42,15 @@ def _split_env_list(var_name: str, default: str = "") -> list[str]:
     """
     return [item.strip().lower() for item in os.getenv(var_name, default).split(",") if item.strip()]
 
+
+def get_env_bool(var_name: str, default: bool) -> bool:
+    """Parse an optional boolean environment value, treating blank as default."""
+
+    value = os.getenv(var_name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
 # KAFKA
 KAFKA_SERVER = get_env_or_raise('KAFKA_BROKER')
 KAFKA_TOPIC_MARKET_TRADES = get_env_or_raise('KAFKA_TOPIC_MARKET_TRADES')
@@ -88,6 +97,11 @@ DEFAULT_CANDLE_INTERVALS = ",".join(SUPPORTED_CANDLE_INTERVALS)
 # Format: comma-separated, e.g., "BTCUSDT,ETHUSDT,BNBUSDT"
 TRADING_SYMBOLS = _split_env_list('TRADING_SYMBOLS', 'BTCUSDT')
 CANDLE_INTERVALS = [item.strip() for item in os.getenv('CANDLE_INTERVALS', DEFAULT_CANDLE_INTERVALS).split(',') if item.strip()]
+
+# Startup reconciliation is opt-out: the runner uses this same default when
+# the variable is missing or blank.
+STARTUP_RECONCILE_ENABLED = get_env_bool('STARTUP_RECONCILE_ENABLED', True)
+STARTUP_RECONCILE_REQUIRED = get_env_bool('STARTUP_RECONCILE_REQUIRED', True)
 
 # Mapping of interval names to milliseconds
 _INTERVAL_MS_MAP = {
