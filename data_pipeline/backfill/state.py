@@ -39,8 +39,9 @@ def write_backfill_state(
     interval: str,
     expected_count: int,
     dry_run: bool,
+    ranges: list | None = None,
 ) -> None:
-    """Persist the successfully reconciled candle window for the processor."""
+    """Atomically persist the successful startup cutover for the processor."""
 
     state_file = get_backfill_state_file()
     state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -48,18 +49,30 @@ def write_backfill_state(
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "start": start.astimezone(timezone.utc).isoformat(),
         "end": end.astimezone(timezone.utc).isoformat(),
+        "cutover": end.astimezone(timezone.utc).isoformat(),
         "symbols": symbols,
         "interval": interval,
         "expected_count": expected_count,
         "dry_run": dry_run,
+        "ranges": [
+            {
+                "symbol": item.symbol,
+                "start": item.start.astimezone(timezone.utc).isoformat() if item.start else None,
+                "end": item.end.astimezone(timezone.utc).isoformat(),
+                "watermark": item.watermark.astimezone(timezone.utc).isoformat() if item.watermark else None,
+                "bootstrap": item.bootstrap,
+                "expected_count": item.expected_count,
+            }
+            for item in (ranges or [])
+        ],
     }
     temp_file = state_file.with_name(f"{state_file.name}.{int(time.time() * 1000)}.tmp")
     temp_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     temp_file.replace(state_file)
 
 
-def read_backfill_end() -> datetime | None:
-    """Read the exclusive end timestamp of the last completed startup backfill."""
+def read_backfill_cutover() -> datetime | None:
+    """Read the exclusive startup cutover of the last completed backfill."""
 
     state_file = get_backfill_state_file()
     if not state_file.exists():
@@ -71,7 +84,7 @@ def read_backfill_end() -> datetime | None:
         if payload.get("dry_run"):
             logger.info(f"Startup backfill state file {state_file} is from a dry run; no DB write fence is active.")
             return None
-        raw_end = payload["end"]
+        raw_end = payload.get("cutover") or payload["end"]
         parsed = datetime.fromisoformat(str(raw_end).replace("Z", "+00:00"))
     except Exception:
         logger.warning(f"Failed to read startup backfill state file {state_file}; ignoring write fence.", exc_info=True)
@@ -80,3 +93,9 @@ def read_backfill_end() -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def read_backfill_end() -> datetime | None:
+    """Backward-compatible name for the exclusive startup cutover reader."""
+
+    return read_backfill_cutover()

@@ -33,11 +33,11 @@ INTERVAL = "1m"
 INTERVAL_MS = 60_000
 UPSERT_KEYS = "(timestamp, symbol, interval)"
 DEFAULT_BINANCE_REST_URL = "https://api.binance.com"
-RECONCILE_WINDOW_HOURS = 24
 DEFAULT_LIMIT = 1000
+MAX_BACKFILL_MINUTES = 8 * 60
+DEFAULT_BOOTSTRAP_CANDLES = MAX_BACKFILL_MINUTES
 DEFAULT_TOLERANCE = Decimal("0.00000001")
 MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
-RECONCILE_END_LAG_MINUTES = 0
 WAL_APPLY_TIMEOUT_SECONDS = 120.0
 DDL_RETRY_ATTEMPTS = 30
 DDL_RETRY_DELAY_SECONDS = 1.0
@@ -59,7 +59,7 @@ class CandleRow:
 
 @dataclass(frozen=True)
 class ReconciliationResult:
-    """Summary of one bounded reconciliation run."""
+    """Summary of one startup reconciliation run fenced at one cutover."""
 
     symbols: list[str]
     interval: str
@@ -67,6 +67,19 @@ class ReconciliationResult:
     end: datetime
     expected_count: int
     dry_run: bool
+    ranges: list["SymbolReconciliationRange"]
+
+
+@dataclass(frozen=True)
+class SymbolReconciliationRange:
+    """One symbol's independently selected startup fetch range."""
+
+    symbol: str
+    start: datetime | None
+    end: datetime
+    watermark: datetime | None
+    bootstrap: bool
+    expected_count: int
 
 
 def load_environment() -> None:
@@ -145,6 +158,8 @@ def is_valid_candle_row(row: CandleRow) -> bool:
     """Return whether a candle row has sane OHLCV values."""
 
     return (
+        all(value.is_finite() for value in (row.open, row.high, row.low, row.close, row.volume))
+        and
         row.open > 0
         and row.high > 0
         and row.low > 0
@@ -216,38 +231,26 @@ def fetch_binance_server_time(base_url: str) -> datetime:
     return datetime.fromtimestamp(server_time_ms / 1000, tz=timezone.utc)
 
 
-def resolve_latest_closed_end(base_url: str, end_lag_minutes: int | None = None) -> datetime:
-    """Return the exclusive end timestamp after Binance's newest closed candle.
+def resolve_startup_cutover(base_url: str) -> datetime:
+    """Return the next Binance UTC minute boundary after startup.
 
-    The short wait after a fresh minute boundary avoids choosing an unstable
-    exchange boundary. The returned value is the current Binance minute floor
-    minus the configured lag. Startup backfill normally uses zero lag because
-    the realtime processor has not started yet; the open in-progress candle is
-    still excluded by the minute floor.
+    This is intentionally resolved before waiting.  Resolving it after the
+    wait would move the handoff one minute forward and leave the startup minute
+    available to the realtime processor as a partial candle.
     """
 
     server_time = fetch_binance_server_time(base_url)
-    if server_time.second < MIN_SERVER_SECONDS_AFTER_BOUNDARY:
-        wait_seconds = MIN_SERVER_SECONDS_AFTER_BOUNDARY - server_time.second
-        logger.info(
-            f"Binance server time is {server_time.isoformat()}, waiting {wait_seconds}s "
-            "to avoid reconciling during the minute boundary."
-        )
-        time.sleep(wait_seconds)
-        server_time = fetch_binance_server_time(base_url)
-
-    safe_lag = parse_positive_int(end_lag_minutes, RECONCILE_END_LAG_MINUTES, minimum=0)
-    return server_time.replace(second=0, microsecond=0) - timedelta(minutes=safe_lag)
+    return server_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
 
 
-def wait_for_open_candle_close(base_url: str) -> datetime:
-    """Wait until the candle open at startup has closed and REST data is stable."""
+def wait_for_open_candle_close(base_url: str, cutover: datetime | None = None) -> datetime:
+    """Wait until the startup minute is closed and Binance REST is stable."""
 
     server_time = fetch_binance_server_time(base_url)
-    stable_next_boundary = (
-        server_time.replace(second=0, microsecond=0)
-        + timedelta(minutes=1, seconds=MIN_SERVER_SECONDS_AFTER_BOUNDARY)
+    startup_cutover = cutover or (
+        server_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
     )
+    stable_next_boundary = startup_cutover + timedelta(seconds=MIN_SERVER_SECONDS_AFTER_BOUNDARY)
     wait_seconds = max(0.0, (stable_next_boundary - server_time).total_seconds())
 
     if wait_seconds > 0:
@@ -258,19 +261,6 @@ def wait_for_open_candle_close(base_url: str) -> datetime:
         time.sleep(wait_seconds)
 
     return fetch_binance_server_time(base_url)
-
-
-def resolve_reconcile_window(
-    base_url: str,
-    window_hours: int | None = None,
-    end_lag_minutes: int | None = None,
-) -> tuple[datetime, datetime]:
-    """Return the one-shot closed candle window aligned to Binance time."""
-
-    hours = parse_positive_int(window_hours, RECONCILE_WINDOW_HOURS)
-    end = resolve_latest_closed_end(base_url, end_lag_minutes=end_lag_minutes)
-    start = end - timedelta(hours=hours)
-    return start, end
 
 
 def fetch_binance_klines(
@@ -369,12 +359,8 @@ def validate_rows(rows: list[CandleRow], symbol: str, start: datetime, end: date
                 f"got {row.timestamp.isoformat()}"
             )
 
-        if row.open <= 0 or row.high <= 0 or row.low <= 0 or row.close <= 0:
-            raise ValueError(f"{symbol}: non-positive OHLC at {row.timestamp.isoformat()}")
-        if row.volume < 0:
-            raise ValueError(f"{symbol}: negative volume at {row.timestamp.isoformat()}")
-        if row.high < max(row.open, row.close) or row.low > min(row.open, row.close) or row.high < row.low:
-            raise ValueError(f"{symbol}: inconsistent OHLC at {row.timestamp.isoformat()}")
+        if not is_valid_candle_row(row):
+            raise ValueError(f"{symbol}: invalid OHLCV at {row.timestamp.isoformat()}")
 
         expected_timestamp += timedelta(minutes=1)
 
@@ -880,6 +866,95 @@ def fetch_existing_timestamps(cursor, symbol: str, start: datetime, end: datetim
     return {normalize_db_timestamp(row[0]) for row in cursor.fetchall()}
 
 
+def is_minute_timestamp(timestamp: datetime) -> bool:
+    """Return whether a timestamp can identify a canonical UTC 1m candle."""
+
+    timestamp = timestamp.astimezone(timezone.utc)
+    return timestamp.second == 0 and timestamp.microsecond == 0
+
+
+def _row_from_db_values(values) -> CandleRow | None:
+    """Convert one QuestDB row without allowing malformed data to be a watermark."""
+
+    try:
+        row = CandleRow(
+            symbol=str(values[0]).upper(),
+            interval=str(values[1]),
+            timestamp=normalize_db_timestamp(values[2]),
+            open=decimal_from_db(values[3]),
+            high=decimal_from_db(values[4]),
+            low=decimal_from_db(values[5]),
+            close=decimal_from_db(values[6]),
+            volume=decimal_from_db(values[7]),
+        )
+    except (TypeError, ValueError, InvalidOperation):
+        return None
+    try:
+        valid = is_minute_timestamp(row.timestamp) and is_valid_candle_row(row)
+    except InvalidOperation:
+        return None
+    return row if valid else None
+
+
+def fetch_latest_valid_watermark(cursor, symbol: str, cutover: datetime) -> datetime | None:
+    """Find the newest valid final 1m row for one symbol before ``cutover``.
+
+    A plain ``MAX(timestamp)`` is not enough: malformed OHLCV rows must not
+    advance the catch-up start and hide a missing interval.
+    """
+
+    cursor.execute(
+        f"""
+        SELECT symbol, interval, timestamp, open, high, low, close, volume
+        FROM {TABLE_NAME}
+        WHERE symbol = %s AND interval = %s AND timestamp < %s
+        ORDER BY timestamp DESC
+        """,
+        (symbol, INTERVAL, to_questdb_timestamp(cutover)),
+    )
+    for values in cursor.fetchall():
+        row = _row_from_db_values(values)
+        if row is not None and row.symbol == symbol and row.interval == INTERVAL:
+            return row.timestamp
+    return None
+
+
+def resolve_symbol_range(
+    cursor,
+    symbol: str,
+    cutover: datetime,
+    bootstrap_candles: int,
+) -> SymbolReconciliationRange:
+    """Resolve a per-symbol range ending at ``cutover``, capped at eight hours."""
+
+    watermark = fetch_latest_valid_watermark(cursor, symbol, cutover)
+    if watermark is None:
+        expected_count = min(bootstrap_candles, MAX_BACKFILL_MINUTES)
+        start = cutover - timedelta(minutes=expected_count)
+        return SymbolReconciliationRange(
+            symbol=symbol,
+            start=start,
+            end=cutover,
+            watermark=None,
+            bootstrap=True,
+            expected_count=expected_count,
+        )
+
+    start = max(
+        watermark + timedelta(minutes=1),
+        cutover - timedelta(minutes=MAX_BACKFILL_MINUTES),
+    )
+    expected_count = max(0, int((cutover - start).total_seconds() // 60))
+    return SymbolReconciliationRange(
+        symbol=symbol,
+        start=start if expected_count else None,
+        end=cutover,
+        watermark=watermark,
+        bootstrap=False,
+        expected_count=expected_count,
+    )
+
+
 def fetch_db_rows(cursor, symbol: str, start: datetime, end: datetime) -> list[CandleRow]:
     """Read target-range rows back from QuestDB for post-write verification."""
 
@@ -1305,8 +1380,24 @@ def reconcile_symbol(
                 logger.info(f"{symbol}: created live table from {replacement_table} with {live_count} rows")
 
                 wait_for_symbol_window_count(cursor, symbol, start, end, len(binance_rows))
+                wait_for_symbol_window_match(
+                    cursor,
+                    symbol,
+                    start,
+                    end,
+                    binance_rows,
+                    tolerance,
+                    require_no_duplicates=True,
+                )
                 actual_rows = fetch_db_rows(cursor, symbol, start, end)
-                assert_rows_match(actual_rows, binance_rows, tolerance, symbol)
+                validate_rows(actual_rows, symbol, start, end)
+                assert_rows_match(
+                    actual_rows,
+                    binance_rows,
+                    tolerance,
+                    symbol,
+                    require_no_duplicates=True,
+                )
                 logger.info(f"{symbol}: swapped and verified {len(binance_rows)} candles")
         finally:
             swap_conn.close()
@@ -1390,19 +1481,10 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true", help="Fetch and validate Binance data without writing DB.")
     parser.add_argument("--keep-temp", action="store_true", help="Keep replacement/old tables after success.")
     parser.add_argument(
-        "--window-hours",
+        "--bootstrap-candles",
         type=int,
         default=None,
-        help=f"Closed 1m lookback window to reconcile. Defaults to {RECONCILE_WINDOW_HOURS}.",
-    )
-    parser.add_argument(
-        "--end-lag-minutes",
-        type=int,
-        default=None,
-        help=(
-            "Minutes to leave between the reconcile end and Binance's current minute floor. "
-            f"Defaults to {RECONCILE_END_LAG_MINUTES}."
-        ),
+        help=f"Closed 1m candles to fetch only when a symbol has no valid DB watermark. Defaults to {DEFAULT_BOOTSTRAP_CANDLES}.",
     )
     parser.add_argument(
         "--tolerance",
@@ -1418,66 +1500,87 @@ def run_reconciliation(
     dry_run: bool = False,
     keep_temp: bool = False,
     tolerance_arg: str | Decimal | None = None,
-    window_hours: int | None = None,
-    end_lag_minutes: int | None = None,
+    bootstrap_candles: int | None = None,
+    cutover: datetime | None = None,
 ) -> ReconciliationResult:
-    """Run candle reconciliation for the configured symbols.
-
-    This function is used by both the CLI maintenance command and the pipeline
-    startup runner. It runs a single bounded window and leaves a safety lag so
-    it does not target candles the realtime processor is currently closing.
-    """
+    """Catch each symbol up from its valid DB watermark to one Binance cutover."""
 
     load_environment()
 
     base_url = binance_rest_url or os.getenv("BINANCE_REST_URL") or DEFAULT_BINANCE_REST_URL
     symbols = parse_symbols(symbols_arg or os.getenv("TRADING_SYMBOLS"))
     tolerance = Decimal(str(tolerance_arg or DEFAULT_TOLERANCE))
-    resolved_window_hours = parse_positive_int(
-        window_hours if window_hours is not None else os.getenv("STARTUP_RECONCILE_WINDOW_HOURS"),
-        RECONCILE_WINDOW_HOURS,
+    requested_bootstrap_candles = parse_positive_int(
+        bootstrap_candles if bootstrap_candles is not None else os.getenv("STARTUP_RECONCILE_BOOTSTRAP_CANDLES"),
+        DEFAULT_BOOTSTRAP_CANDLES,
     )
-    resolved_end_lag_minutes = parse_positive_int(
-        end_lag_minutes if end_lag_minutes is not None else os.getenv("STARTUP_RECONCILE_END_LAG_MINUTES"),
-        RECONCILE_END_LAG_MINUTES,
-        minimum=0,
+    resolved_bootstrap_candles = min(
+        requested_bootstrap_candles,
+        MAX_BACKFILL_MINUTES,
     )
-    start, end = resolve_reconcile_window(
-        base_url,
-        window_hours=resolved_window_hours,
-        end_lag_minutes=resolved_end_lag_minutes,
-    )
-    expected_count = int((end - start).total_seconds() // 60)
+    if requested_bootstrap_candles > MAX_BACKFILL_MINUTES:
+        logger.warning(
+            "STARTUP_RECONCILE_BOOTSTRAP_CANDLES exceeds the eight-hour backfill cap; "
+            f"using {MAX_BACKFILL_MINUTES} minutes."
+        )
+    if cutover is None:
+        cutover = resolve_startup_cutover(base_url)
+        wait_for_open_candle_close(base_url, cutover)
+    cutover = cutover.astimezone(timezone.utc).replace(second=0, microsecond=0)
     logger.info(
         f"Reconciling {len(symbols)} symbol(s), interval={INTERVAL}, "
-        f"window=[{start.isoformat()}, {end.isoformat()}); "
-        f"expected_candles={expected_count}; "
-        f"window_hours={resolved_window_hours}; "
-        f"end_lag_minutes={resolved_end_lag_minutes}; "
-        "mode=ONE_SHOT_REPLACE"
+        f"cutover={cutover.isoformat()}; bootstrap_candles={resolved_bootstrap_candles}; "
+        "mode=DB_WATERMARK_BINANCE_CUTOVER"
     )
     active_temp_tables: set[str] = set()
 
-    if not dry_run:
-        conn = create_connection()
-        try:
-            with conn.cursor() as cursor:
-                if table_exists(cursor, TABLE_NAME):
+    conn = create_connection()
+    try:
+        with conn.cursor() as cursor:
+            if table_exists(cursor, TABLE_NAME):
+                if not dry_run:
                     ensure_market_table(cursor, allow_migration=True)
-                elif find_latest_old_table(cursor):
-                    recover_missing_live_table(cursor)
-                else:
+                ranges = [
+                    resolve_symbol_range(cursor, symbol, cutover, resolved_bootstrap_candles)
+                    for symbol in symbols
+                ]
+            elif not dry_run and find_latest_old_table(cursor):
+                recover_missing_live_table(cursor)
+                ensure_market_table(cursor, allow_migration=True)
+                ranges = [
+                    resolve_symbol_range(cursor, symbol, cutover, resolved_bootstrap_candles)
+                    for symbol in symbols
+                ]
+            else:
+                if not dry_run:
                     ensure_market_table(cursor, allow_migration=True)
-        finally:
-            conn.close()
+                ranges = [
+                    SymbolReconciliationRange(
+                        symbol=symbol,
+                        start=cutover - timedelta(minutes=resolved_bootstrap_candles),
+                        end=cutover,
+                        watermark=None,
+                        bootstrap=True,
+                        expected_count=resolved_bootstrap_candles,
+                    )
+                    for symbol in symbols
+                ]
+    finally:
+        conn.close()
 
-    for symbol in symbols:
+    for symbol_range in ranges:
+        if symbol_range.start is None:
+            logger.info(
+                f"{symbol_range.symbol}: valid watermark={symbol_range.watermark.isoformat()} is at the cutover; "
+                "no REST fetch or DB write is needed."
+            )
+            continue
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         reconcile_symbol(
             base_url=base_url,
-            symbol=symbol,
-            start=start,
-            end=end,
+            symbol=symbol_range.symbol,
+            start=symbol_range.start,
+            end=cutover,
             run_id=run_id,
             tolerance=tolerance,
             dry_run=dry_run,
@@ -1492,13 +1595,15 @@ def run_reconciliation(
         finally:
             conn.close()
 
+    fetch_starts = [item.start for item in ranges if item.start is not None]
     return ReconciliationResult(
         symbols=symbols,
         interval=INTERVAL,
-        start=start,
-        end=end,
-        expected_count=expected_count,
+        start=min(fetch_starts) if fetch_starts else cutover,
+        end=cutover,
+        expected_count=sum(item.expected_count for item in ranges),
         dry_run=dry_run,
+        ranges=ranges,
     )
 
 
@@ -1513,8 +1618,7 @@ def main() -> None:
         dry_run=args.dry_run,
         keep_temp=args.keep_temp,
         tolerance_arg=args.tolerance,
-        window_hours=args.window_hours,
-        end_lag_minutes=args.end_lag_minutes,
+        bootstrap_candles=args.bootstrap_candles,
     )
 
 

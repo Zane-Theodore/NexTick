@@ -47,7 +47,7 @@ def run_startup_backfill() -> bool:
 
     remove_backfill_state_file()
 
-    if not _env_bool("STARTUP_RECONCILE_ENABLED", False):
+    if not _env_bool("STARTUP_RECONCILE_ENABLED", True):
         logger.info("Startup backfill is disabled. Processor can start without a backfill write fence.")
         return True
 
@@ -59,34 +59,47 @@ def run_startup_backfill() -> bool:
     symbols = os.getenv("STARTUP_RECONCILE_SYMBOLS")
     base_url = os.getenv("STARTUP_RECONCILE_BINANCE_REST_URL") or os.getenv("BINANCE_REST_URL")
     tolerance = os.getenv("STARTUP_RECONCILE_TOLERANCE")
-    window_hours = os.getenv("STARTUP_RECONCILE_WINDOW_HOURS")
-    end_lag_minutes = os.getenv("STARTUP_RECONCILE_END_LAG_MINUTES")
+    bootstrap_candles = os.getenv("STARTUP_RECONCILE_BOOTSTRAP_CANDLES")
     wait_for_open_close = _env_bool("STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE", True)
+    if os.getenv("STARTUP_RECONCILE_WINDOW_HOURS"):
+        logger.warning(
+            "STARTUP_RECONCILE_WINDOW_HOURS is deprecated and ignored for startup. "
+            "Startup reconciliation uses each symbol's QuestDB watermark; "
+            "STARTUP_RECONCILE_BOOTSTRAP_CANDLES applies only to empty symbols."
+        )
 
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
             logger.info(f"Running startup candle backfill ({attempt}/{attempts}).")
+            cutover = reconciler.resolve_startup_cutover(base_url or reconciler.DEFAULT_BINANCE_REST_URL)
             if wait_for_open_close:
-                reconciler.wait_for_open_candle_close(base_url or reconciler.DEFAULT_BINANCE_REST_URL)
+                reconciler.wait_for_open_candle_close(
+                    base_url or reconciler.DEFAULT_BINANCE_REST_URL,
+                    cutover,
+                )
             result = reconciler.run_reconciliation(
                 symbols_arg=symbols,
                 binance_rest_url=base_url,
                 dry_run=dry_run,
                 keep_temp=keep_temp,
                 tolerance_arg=tolerance,
-                window_hours=window_hours,
-                end_lag_minutes=end_lag_minutes,
+                bootstrap_candles=bootstrap_candles,
+                cutover=cutover,
             )
-            write_backfill_state(
-                start=result.start,
-                end=result.end,
-                symbols=result.symbols,
-                interval=result.interval,
-                expected_count=result.expected_count,
-                dry_run=result.dry_run,
-            )
-            logger.info(f"Startup candle backfill completed. Processor fence end={result.end.isoformat()}.")
+            if not result.dry_run:
+                write_backfill_state(
+                    start=result.start,
+                    end=result.end,
+                    symbols=result.symbols,
+                    interval=result.interval,
+                    expected_count=result.expected_count,
+                    dry_run=False,
+                    ranges=result.ranges,
+                )
+                logger.info(f"Startup candle backfill completed. Processor cutover={result.end.isoformat()}.")
+            else:
+                logger.info("Startup backfill dry run completed without writing a processor fence.")
             return True
         except KeyboardInterrupt:
             raise
