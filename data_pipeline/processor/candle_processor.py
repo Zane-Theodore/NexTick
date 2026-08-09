@@ -1,13 +1,14 @@
 """Aggregate Binance raw trades into realtime candles and persist closed 1m bars."""
 
 import json
+import math
 import time
 from datetime import datetime, timezone
 
 import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
 
-from data_pipeline.backfill.state import read_backfill_end
+from data_pipeline.backfill.state import read_backfill_cutover
 from data_pipeline.common import config
 from data_pipeline.common.logger import get_logger
 from data_pipeline.common.retry import retry_with_backoff
@@ -30,7 +31,7 @@ class CandleProcessor:
         self.has_uncommitted_messages = False
         self.last_live_broadcast = time.monotonic()
         self.last_state_checkpoint = time.monotonic()
-        self.backfill_write_fence = read_backfill_end()
+        self.backfill_write_fence = read_backfill_cutover()
         self.running = True
         self._restore_state()
 
@@ -106,17 +107,48 @@ class CandleProcessor:
         if not state:
             return
 
-        self.aggregator.restore(state.get("aggregator") or {})
+        aggregator_state = state.get("aggregator") or {}
+        if self.backfill_write_fence is not None:
+            aggregator_state = self._discard_pre_cutover_aggregator_state(aggregator_state)
+        self.aggregator.restore(aggregator_state)
         for raw_candle in state.get("pending_candle_updates") or []:
             candle = self._deserialize_candle(raw_candle)
-            if candle is not None:
+            if candle is not None and not self._is_before_backfill_fence(candle):
                 self._queue_candle_retry(candle, persist=False)
         for raw_candle in state.get("pending_db_candles") or []:
             candle = self._deserialize_candle(raw_candle)
-            if candle is not None and candle["is_final"] and candle["interval"] == "1m":
+            if (
+                candle is not None
+                and not self._is_before_backfill_fence(candle)
+                and candle["is_final"]
+                and candle["interval"] == "1m"
+            ):
                 self._queue_db_retry(candle, persist=False)
 
         logger.info("Restored active candle state from the previous processor run.")
+
+    def _discard_pre_cutover_aggregator_state(self, state: dict) -> dict:
+        """Keep restart recovery, but never revive a candle owned by backfill."""
+
+        def is_at_or_after_cutover(raw_value) -> bool:
+            try:
+                timestamp = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+                timestamp = timestamp.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                return False
+            return timestamp >= self.backfill_write_fence
+
+        return {
+            **state,
+            "candles": [
+                candle for candle in state.get("candles") or []
+                if isinstance(candle, dict) and is_at_or_after_cutover(candle.get("timestamp"))
+            ],
+            "finalized_starts": [
+                marker for marker in state.get("finalized_starts") or []
+                if isinstance(marker, dict) and is_at_or_after_cutover(marker.get("timestamp"))
+            ],
+        }
 
     def _persist_state(self) -> None:
         write_processor_state(
@@ -126,10 +158,12 @@ class CandleProcessor:
                 "pending_candle_updates": [
                     self._serialize_candle(candle)
                     for candle in self.pending_candle_updates.values()
+                    if not self._is_before_backfill_fence(candle)
                 ],
                 "pending_db_candles": [
                     self._serialize_candle(candle)
                     for candle in self.pending_db_candles.values()
+                    if not self._is_before_backfill_fence(candle)
                 ],
             }
         )
@@ -212,13 +246,17 @@ class CandleProcessor:
         except (KeyError, TypeError, ValueError):
             return False
         return (
-            open_price > 0 and high >= max(open_price, close) and low <= min(open_price, close)
+            all(math.isfinite(value) for value in (open_price, high, low, close, volume))
+            and open_price > 0 and high > 0 and low > 0 and close > 0
+            and high >= max(open_price, close) and low <= min(open_price, close)
             and high >= low and volume >= 0
         )
 
     def save_to_db(self, candle: dict) -> bool:
         """Upsert one closed one-minute candle to QuestDB."""
 
+        if self._is_before_backfill_fence(candle):
+            return True
         if not self._is_valid_candle(candle):
             logger.error(f"Refusing to persist invalid candle: {candle}")
             return False
@@ -249,11 +287,15 @@ class CandleProcessor:
             return False
 
     def _queue_db_retry(self, candle: dict, *, persist: bool = True) -> None:
+        if self._is_before_backfill_fence(candle):
+            return
         self.pending_db_candles[(candle["symbol"], candle["timestamp"])] = candle
         if persist:
             self._persist_state()
 
     def _queue_candle_retry(self, candle: dict, *, persist: bool = True) -> None:
+        if self._is_before_backfill_fence(candle):
+            return
         key = (candle["symbol"], candle["interval"], candle["timestamp"])
         existing = self.pending_candle_updates.get(key)
         if existing is None or candle["is_final"] or not existing["is_final"]:
@@ -280,6 +322,8 @@ class CandleProcessor:
             self._persist_state()
 
     def _queue_live_candle(self, candle: dict) -> None:
+        if self._is_before_backfill_fence(candle):
+            return
         self.pending_live_candles[(candle["symbol"], candle["interval"], candle["timestamp"])] = candle
 
     def _flush_live_candles(self, *, force: bool = False) -> None:
@@ -319,6 +363,8 @@ class CandleProcessor:
         retry_with_backoff(_send, max_retries=4, base_delay=0.5, operation_name="Kafka candle publish")
 
     def broadcast_candle(self, candle: dict) -> bool:
+        if self._is_before_backfill_fence(candle):
+            return True
         try:
             self._send_to_topic(
                 {
@@ -362,6 +408,9 @@ class CandleProcessor:
         trade = self.normalize_trade(raw_trade)
         if trade is None:
             logger.debug(f"Skipped invalid raw trade input: {raw_trade}")
+            return True
+
+        if self.backfill_write_fence is not None and trade["timestamp"] < self.backfill_write_fence:
             return True
 
         candles = self.aggregator.process_trade(trade)
