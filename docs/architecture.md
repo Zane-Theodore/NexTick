@@ -72,7 +72,7 @@ Current behavior:
 2. Creates `market_candles` as a WAL/dedup table if it does not exist.
 3. Consumes `KAFKA_TOPIC_MARKET_TRADES` with group id `candle-processor-group` by default.
 4. Aggregates raw trade price and quantity into every configured interval.
-5. Skips candles before the startup backfill watermark.
+5. Drops candles before the successful startup cutover from persistence, publication, and retry paths.
 6. Publishes final and non-final candles to `KAFKA_TOPIC_KLINE_STREAM` before persisting final `1m` candles.
 7. Persists final `1m` candles only and retries failed upserts without withholding realtime output.
 
@@ -171,14 +171,14 @@ Current storage rules:
 | Insert path | Python processor plus startup/manual REST replacement reconciler. |
 
 Maintenance reconciliation is handled by `data_pipeline.backfill.reconciler`. In
-Docker startup, `data-producer` runs first so Binance raw trades are buffered in Kafka,
-then `data-backfill` exits without writes by default and `data-processor` starts
-`CandleProcessor`. If `STARTUP_RECONCILE_ENABLED=true`, backfill instead runs one
-Binance REST replacement pass before the processor. It ends at Binance's current
-minute floor, so only the open in-progress minute is excluded. The backfill
-service writes a shared watermark file; while draining the Kafka backlog, the
-processor skips final `1m` DB upserts before that watermark so partial replay
-candles cannot overwrite the canonical REST rows.
+Docker startup, `data-producer` runs first so Binance raw trades are buffered in Kafka.
+`data-backfill` is enabled by default and calls Binance `/api/v3/time` to choose
+the next UTC minute after startup as shared cutover `C`. It waits until the
+startup minute has closed and is stable, then independently catches each symbol
+up from valid watermark `W` over `[max(W + 1 minute, C - 480 minutes), C)`.
+Empty symbols bootstrap at most the preceding 480 closed minutes. After all ranges verify, the service writes
+the shared cutover state; while draining Kafka, the processor drops every candle
+timestamp before `C` from QuestDB writes, publication, and retry queues.
 Repairs use the startup/manual replacement reconciler while the live processor
 is stopped, so a bounded window is rebuilt and swapped instead of being patched
 by a second live writer.

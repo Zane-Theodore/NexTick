@@ -57,8 +57,8 @@ flowchart LR
 1. Binance emits individual trades through combined `@trade` streams.
 2. `BinanceCombinedTradeProducer` normalizes each trade and publishes to `KAFKA_TOPIC_MARKET_TRADES`.
 3. `data-producer` keeps publishing raw trades to Kafka.
-4. `data-backfill` is disabled by default; when enabled, it replaces a closed `1m` window from Binance REST and writes a backfill watermark before processing begins.
-5. `CandleProcessor` consumes buffered klines and skips final DB writes before a backfill watermark only when one exists.
+4. `data-backfill` is enabled by default. It chooses one Binance-time cutover, catches each symbol up from its valid QuestDB watermark through the preceding closed minute, then writes that cutover state.
+5. `CandleProcessor` consumes buffered raw trades and owns only candle timestamps at or after the cutover; it drops older replay candles completely.
 6. Final `1m` candles are upserted into QuestDB table `market_candles`.
 7. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
 8. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
@@ -102,9 +102,10 @@ KAFKA_AUTO_OFFSET_RESET=earliest
 BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
-STARTUP_RECONCILE_ENABLED=false
+STARTUP_RECONCILE_ENABLED=true
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
+STARTUP_RECONCILE_BOOTSTRAP_CANDLES=480
 ```
 
 ```env
@@ -141,8 +142,10 @@ Start infrastructure and the Python pipeline:
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
-Startup backfill is disabled by default. To opt in, set
-`STARTUP_RECONCILE_ENABLED=true` in `data_pipeline/.env` before starting Compose.
+Startup backfill is enabled by default. It uses Binance server time to select the
+next UTC minute as cutover, waits until the startup minute is closed and stable,
+then catches up each symbol from its valid QuestDB watermark. Set
+`STARTUP_RECONCILE_ENABLED=false` only when intentionally opting out.
 
 Start the backend:
 

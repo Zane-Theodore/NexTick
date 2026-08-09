@@ -41,8 +41,9 @@ Fill `data_pipeline/.env`, then start the infrastructure and pipeline:
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
-Startup backfill is disabled by default. Set `STARTUP_RECONCILE_ENABLED=true` in
-`data_pipeline/.env` before startup to enable it.
+Startup backfill is enabled by default. It selects a Binance-time cutover and
+catches each symbol up from its valid QuestDB watermark before the processor
+starts. Set `STARTUP_RECONCILE_ENABLED=false` only to intentionally opt out.
 
 Compose behavior:
 
@@ -53,8 +54,8 @@ Compose behavior:
 | `kafka-setup` | Reads `data_pipeline/.env`, waits for Kafka, creates market-trades and kline-stream topics with 3 partitions. |
 | `questdb` | Exposes the web console on `9000` and PostgreSQL wire on `8812`. |
 | `data-producer` | Overrides `KAFKA_BROKER=kafka:29092`, starts as soon as Kafka topics exist, then streams live Binance raw trades into Kafka. |
-| `data-backfill` | Runs `data_pipeline.backfill.runner`. It exits without writes when disabled; when enabled, it repairs the closed startup window and writes a shared watermark. |
-| `data-processor` | Starts after `data-backfill` exits, drains buffered klines, and skips DB upserts before a watermark only when one was written. |
+| `data-backfill` | Runs `data_pipeline.backfill.runner`. It keeps producer ingestion running, catches each symbol up through a shared Binance-time cutover, and atomically writes cutover state on success. |
+| `data-processor` | Starts after `data-backfill` exits, drains buffered raw trades, and drops every candle timestamp before the successful cutover from persistence, publishing, and retry queues. |
 
 Check logs:
 
@@ -130,10 +131,12 @@ python -m data_pipeline.processor.runner
 
 At normal Docker startup, `data-producer` starts first and buffers Binance raw trades in
 Kafka. `data-backfill` then runs `data_pipeline.backfill.runner` as a separate
-one-shot service before `data-processor` starts. It is disabled by default and
-exits without changing QuestDB. When enabled, the processor reads the shared
-`STARTUP_BACKFILL_STATE_FILE` watermark and refuses to upsert final candles
-older than that watermark while it drains the Kafka backlog.
+one-shot service before `data-processor` starts. It is enabled by default. The
+runner uses `/api/v3/time` to choose the first UTC minute after startup as one
+shared cutover `C`, waits for the startup minute to close and become stable,
+then catches each symbol up independently. The processor reads the shared
+`STARTUP_BACKFILL_STATE_FILE` cutover and drops all candles before `C` while it
+drains the Kafka backlog.
 
 Run `data_pipeline.backfill.reconciler` directly when you want to repair missing
 or incorrect stored `1m` candles outside normal startup. The normal path
@@ -150,14 +153,13 @@ also cleans up old reconciler temporary tables from previous runs. Use
 `--keep-temp` only when you intentionally want to inspect those temporary
 tables.
 
-The default startup reconcile window is 24 hours and ends at Binance's current
-minute floor, so it includes every closed candle and excludes only the currently
-open minute. The script runs one pass only; it does not chase newly closed tail
-candles while the processor is live. With defaults, each
-symbol expects exactly 1440 closed `1m` candles from
-`[safe_end - 24h, safe_end)`, where `safe_end = current_minute_floor`.
-When it starts inside the first seconds of a fresh minute, it waits briefly
-before resolving the window to avoid unstable exchange boundaries.
+For each symbol, the startup range is `[max(W + 1 minute, C - 480 minutes), C)`,
+where `W` is that symbol's newest valid final `1m` QuestDB candle and `C` is the
+shared Binance cutover. `C` is exclusive, so the open candle is never fetched.
+If no valid watermark exists, the bootstrap range is `[C - min(STARTUP_RECONCILE_BOOTSTRAP_CANDLES,
+480) minutes, C)`; the default is 480 candles. `DEFAULT_LIMIT=1000` is only the
+maximum number of Binance candles per REST request, not a fixed startup window.
+`STARTUP_RECONCILE_WINDOW_HOURS` is deprecated and ignored by the startup path.
 
 Windows PowerShell:
 
@@ -178,7 +180,7 @@ Useful options:
 ```bash
 python -m data_pipeline.backfill.reconciler --dry-run
 python -m data_pipeline.backfill.reconciler --symbols BTCUSDT,ETHUSDT
-python -m data_pipeline.backfill.reconciler --window-hours 24 --end-lag-minutes 2
+python -m data_pipeline.backfill.reconciler --bootstrap-candles 480
 python -m data_pipeline.backfill.reconciler --keep-temp
 ```
 
@@ -193,7 +195,7 @@ Operational notes:
 | Startup order | `data-producer` runs continuously, `data-backfill` exits (or completes when enabled), then `data-processor` starts. |
 | Startup failure | `data-backfill` retries according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, `data-processor` does not start if backfill fails. |
 | Manual full repair | Stop `data-processor` before running any repair workflow that drops, recreates, or migrates `market_candles`. |
-| Reconcile end | The startup run fills one 24-hour window and writes the exclusive end timestamp to `STARTUP_BACKFILL_STATE_FILE`. |
+| Reconcile cutover | The startup run writes shared cutover `C` plus every symbol's watermark/bootstrap fetch range to `STARTUP_BACKFILL_STATE_FILE` only after all ranges verify. |
 | Backup names | Full backups use `market_candles_old_<SYMBOL>_<RUN_ID>`. |
 | Replacement names | Replacement tables use `market_candles_replace_<SYMBOL>_<RUN_ID>`. |
 | Recovery | If `market_candles` is missing and an old backup exists, the script restores from the newest backup automatically. |
@@ -219,7 +221,7 @@ local `.env` values before startup.
 | `BINANCE_SOCKET_URL` | Yes | `wss://stream.binance.com:9443/stream` | Base Binance WebSocket endpoint used to build the combined stream URL. |
 | `TRADING_SYMBOLS` | Effectively required in `.env` | `BTCUSDT,ETHUSDT` | If unset, defaults to `BTCUSDT`; if present but blank, no symbols are produced. |
 | `CANDLE_INTERVALS` | Effectively required in `.env` | `1m,3m,5m,15m,30m,1h` | Intervals the processor derives from each raw trade; if blank, no candle updates are produced. |
-| `STARTUP_RECONCILE_ENABLED` | No | `false` | Enables the standalone startup backfill service. Disabled by default, so it exits without database writes. |
+| `STARTUP_RECONCILE_ENABLED` | No | `true` | Enables the standalone startup backfill service. Missing or blank defaults to `true`. |
 | `STARTUP_RECONCILE_REQUIRED` | No | `true` | Blocks processor startup if startup backfill fails after all retries. |
 | `STARTUP_RECONCILE_MAX_ATTEMPTS` | No | `3` | Number of startup reconciliation attempts before applying the failure policy. |
 | `STARTUP_RECONCILE_RETRY_DELAY_SECONDS` | No | `5` | Initial startup reconciliation retry delay with exponential backoff capped at 60 seconds. |
@@ -228,10 +230,10 @@ local `.env` values before startup.
 | `STARTUP_RECONCILE_KEEP_TEMP` | No | `false` | Keeps startup reconciliation temp tables for inspection when true. |
 | `STARTUP_RECONCILE_BINANCE_REST_URL` | No | `https://api.binance.com` | Optional startup-only REST endpoint override. |
 | `STARTUP_RECONCILE_TOLERANCE` | No | `0.00000001` | Optional startup verification tolerance override. |
-| `STARTUP_RECONCILE_WINDOW_HOURS` | No | `24` | Number of closed hours to fill in the one-shot startup pass. |
-| `STARTUP_RECONCILE_END_LAG_MINUTES` | No | `0` | Optional lag behind Binance's current minute floor. Keep `0` for startup so DB has no handoff gap before the processor starts. |
-| `STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE` | No | `true` | Waits briefly near a fresh minute boundary before resolving the startup backfill window. |
-| `STARTUP_BACKFILL_STATE_FILE` | No | `/tmp/nextick/startup-backfill.json` in Docker | Shared marker file containing the startup backfill watermark for the processor; blank uses the OS temp directory. |
+| `STARTUP_RECONCILE_BOOTSTRAP_CANDLES` | No | `480` | Number of closed `1m` candles to fetch only when a symbol has no valid DB watermark; it is capped at 480. |
+| `STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE` | No | `true` | Waits until `C + 10s` so the candle open at startup is closed and Binance REST is stable. |
+| `STARTUP_RECONCILE_WINDOW_HOURS` | Deprecated | — | Ignored by the startup path; the startup range is DB-watermark based, not a fixed lookback. |
+| `STARTUP_BACKFILL_STATE_FILE` | No | `/tmp/nextick/startup-backfill.json` in Docker | Shared marker file containing successful cutover `C`, processed symbols, and fetch ranges; blank uses the OS temp directory. |
 | `CANDLE_PROCESSOR_STATE_FILE` | No | `/tmp/nextick/candle-processor-state.json` in Docker | Persistent active-candle and retry state. Restored before consuming raw trades after a processor restart. |
 | `PROCESSOR_READY_FILE` | No | `/tmp/nextick/processor-ready` in Docker | Optional ready marker path written by `processor/runner.py`; Compose uses it for the `data-processor` healthcheck. |
 

@@ -58,9 +58,10 @@ BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
 TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 
-STARTUP_RECONCILE_ENABLED=false
+STARTUP_RECONCILE_ENABLED=true
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
+STARTUP_RECONCILE_BOOTSTRAP_CANDLES=480
 ```
 
 Docker Compose overrides `KAFKA_BROKER=kafka:29092` and `QUESTDB_HOST=questdb` inside pipeline containers.
@@ -112,8 +113,9 @@ From the repository root:
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
-Startup backfill is disabled by default. Set `STARTUP_RECONCILE_ENABLED=true` in
-`data_pipeline/.env` before startup to opt in.
+Startup backfill is enabled by default. It uses Binance server time to choose a
+cutover, waits for the startup minute to close, then catches each symbol up from
+its valid QuestDB watermark. Set `STARTUP_RECONCILE_ENABLED=false` only to opt out.
 
 Check containers:
 
@@ -143,8 +145,8 @@ Expected service order:
 2. `kafka-setup` creates `market-trades` and `kline-stream`.
 3. `questdb` becomes healthy.
 4. `data-producer` starts after Kafka topics exist and connects to Binance raw trade streams.
-5. `data-backfill` exits without database writes by default. When enabled, it repairs the closed startup candle window and writes a shared watermark.
-6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered klines. It skips final `1m` DB upserts before the watermark only when enabled backfill wrote one.
+5. `data-backfill` catches each symbol up to one Binance-time cutover and atomically writes shared cutover state after verification.
+6. `data-processor` starts after `data-backfill` exits successfully, then consumes buffered raw trades. It drops all candles before the cutover from QuestDB writes, publication, and retries.
 
 ## 4. Start the Backend
 
@@ -321,12 +323,13 @@ LIMIT 20;
 ## Reconcile Missing Candles
 
 Use the pipeline reconciler when stored `1m` candles are missing or need to be
-filled from Binance REST data. The startup backfill repairs one 24-hour window
-through Binance's latest closed minute and writes a watermark so the processor
-does not overwrite that window while draining buffered kline updates.
+filled from Binance REST data. Startup backfill uses `/api/v3/time` to choose
+cutover `C`, then fills each symbol from valid watermark `W` over
+`[max(W + 1 minute, C - 480 minutes), C)`. Empty symbols use at most the
+480-candle bootstrap fallback.
 
-Docker Compose runs `data-backfill` once before `data-processor` starts, but it
-does no work unless `STARTUP_RECONCILE_ENABLED=true`. The startup/manual
+Docker Compose runs `data-backfill` once before `data-processor` starts and it
+is enabled by default. The startup/manual
 `data_pipeline.backfill.reconciler` path builds replacement
 tables and swaps the bounded target window into `market_candles`. Stop the live
 writer before any manual repair workflow that drops, recreates, or migrates
@@ -343,7 +346,7 @@ Useful dry-run and inspection modes:
 ```bash
 python -m data_pipeline.backfill.reconciler --dry-run
 python -m data_pipeline.backfill.reconciler --symbols BTCUSDT,ETHUSDT
-python -m data_pipeline.backfill.reconciler --window-hours 24 --end-lag-minutes 2
+python -m data_pipeline.backfill.reconciler --bootstrap-candles 480
 python -m data_pipeline.backfill.reconciler --keep-temp
 ```
 

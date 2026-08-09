@@ -59,7 +59,7 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 | Static legal pages | `/terms` and `/privacy` in the frontend. |
 | API status | Frontend footer checks `VITE_API_HEALTH_URL`. |
 | Visible high/low overlay | Frontend marks visible-range price extrema on the chart. |
-| Startup backfill | Optional (`STARTUP_RECONCILE_ENABLED=true`); `data-backfill` fills a closed `1m` startup window before live processing. Disabled by default. |
+| Startup backfill | Enabled by default; `data-backfill` catches each symbol up for at most 480 minutes before one Binance-time cutover, then begins live processing. |
 
 Supported intervals in code:
 
