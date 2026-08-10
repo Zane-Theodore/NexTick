@@ -1,75 +1,58 @@
 # NexTick
 
-NexTick is a realtime cryptocurrency market-data streaming and charting system.
+NexTick is a real-time cryptocurrency market-data collection, processing, and charting system. It receives raw Binance trades, creates OHLCV candles, stores closed `1m` candles in QuestDB, and serves historical and real-time data to a chart interface.
 
-It ingests Binance raw trade streams, builds candle updates in the Python processor, stores final `1m` candles in QuestDB, exposes validated REST and Socket.IO contracts through NestJS, and renders historical plus realtime candles in a React chart UI.
+NexTick is for market data and charting only. It is not a trading bot and does not provide financial advice.
 
-NexTick is not a trading bot and does not provide financial, investment, tax, or legal advice.
-
-## Current Scope
-
-| Area | Current implementation |
-| --- | --- |
-| Ingestion | Python producer connects to Binance combined raw trade streams for configured symbols. |
-| Processing | Python processor aggregates raw trades into configured candle intervals, persists final `1m` candles, and republishes final/non-final updates. |
-| Storage | QuestDB stores final `1m` candles in `market_candles`; larger historical intervals are aggregated at read time. |
-| Backend | NestJS validates REST and Socket.IO payloads, reads QuestDB, consumes Kafka kline updates, caches the recent realtime tail, and fans out room updates. |
-| Frontend | React + Lightweight Charts loads history, joins Socket.IO rooms, and renders candles, volume, tooltip data, and indicators. |
-| Infrastructure | Docker Compose runs Kafka, Kafka UI, QuestDB, `data-producer`, `data-backfill`, and `data-processor`. |
-
-Kafka is the service boundary between the Python pipeline and the backend. QuestDB is the time-series contract for historical candle reads.
-
-## Architecture
+## Components and data flow
 
 ```mermaid
 flowchart LR
-  binance["Binance combined raw trade streams"] --> producer["Python producer"]
-  producer --> marketKlines[("Kafka market klines topic")]
-  marketKlines --> processor["Python candle processor"]
-  processor --> questdb[("QuestDB market_candles")]
-  processor --> kline[("Kafka kline stream topic")]
-
-  questdb --> backendRest["NestJS CandlesService"]
-  backendRest --> rest["GET /candles"]
-  kline --> kafkaConsumer["NestJS KafkaService"]
-  kafkaConsumer --> eventBus["EventEmitter2 candle.update"]
-  eventBus --> gateway["Socket.IO CandlesGateway"]
-
-  rest --> frontend["React chart UI"]
-  gateway --> frontend
-  frontend --> health["GET /health"]
-
-  questdb -. future extension .-> ai["AI/model services"]
-  kline -. future extension .-> ai
+  B[Binance combined @trade streams] --> P[Python producer]
+  P --> T1[(Kafka: market-trades)]
+  T1 --> C[Python candle processor]
+  C --> Q[(QuestDB: market_candles)]
+  C --> T2[(Kafka: kline-stream)]
+  Q --> A[NestJS API]
+  T2 --> A
+  A --> R[REST /candles]
+  A --> S[Socket.IO kline_update]
+  R --> F[React chart]
+  S --> F
 ```
 
-## Tech Stack
+| Component | Responsibility |
+| --- | --- |
+| `data_pipeline/` | Reads Binance trades, publishes Kafka messages, creates candles, runs startup backfill, and writes QuestDB. |
+| `backend/` | NestJS API that reads QuestDB history, consumes Kafka real-time updates, and exposes Socket.IO. |
+| `frontend/` | React application that renders charts and communicates only with the backend. |
+| Docker Compose | Runs Kafka, Kafka UI, QuestDB, and the three Python services. |
 
-| Module | Role | Main technologies |
-| --- | --- | --- |
-| `data_pipeline/` | Binance raw-trade ingestion, candle aggregation, QuestDB writes, kline publishing | Python 3.10, `kafka-python`, `websocket-client`, `psycopg2`, `python-dotenv` |
-| `backend/` | API gateway, DTO validation, QuestDB queries, recent realtime candle cache, Kafka consumer, Socket.IO fan-out, Swagger | NestJS 11, TypeScript 6, KafkaJS, Socket.IO, `pg`, `class-validator`, Swagger |
-| `frontend/` | Realtime chart UI, REST history loading, Socket.IO updates, indicator controls | React 19, Vite 8, TypeScript 6, Lightweight Charts 5, Axios, Socket.IO Client, Tailwind CSS 4 |
-| Infrastructure | Local streaming and storage runtime | Docker Compose, Kafka, Kafka UI, QuestDB |
+### Startup workflow
 
-## Runtime Flow
+1. `kafka-setup` creates the `market-trades` and `kline-stream` topics.
+2. `data-producer` connects to Binance and continuously writes raw trades to `market-trades`.
+3. `data-backfill` runs once. It is enabled by default, chooses a UTC cutover from Binance time, fills missing `1m` candles up to that cutover, and saves shared state.
+4. `data-processor` starts only after backfill completes. It consumes buffered Kafka trades, ignores candles before the backfill cutover, and creates real-time candles.
+5. The processor publishes both open and final candles to `kline-stream`; only final `1m` candles are written to `market_candles`.
+6. The backend keeps a recent real-time tail in memory, serves history over REST, and emits room-scoped Socket.IO messages in the form `SYMBOL_interval`.
 
-1. Binance emits individual trades through combined `@trade` streams.
-2. `BinanceCombinedTradeProducer` normalizes each trade and publishes to `KAFKA_TOPIC_MARKET_TRADES`.
-3. `data-producer` keeps publishing raw trades to Kafka.
-4. `data-backfill` is enabled by default. It chooses one Binance-time cutover, catches each symbol up from its valid QuestDB watermark through the preceding closed minute, then writes that cutover state.
-5. `CandleProcessor` consumes buffered raw trades and owns only candle timestamps at or after the cutover; it drops older replay candles completely.
-6. Final `1m` candles are upserted into QuestDB table `market_candles`.
-7. Final and non-final candles are published to `KAFKA_TOPIC_KLINE_STREAM`.
-8. NestJS consumes kline updates from Kafka and emits internal `candle.update` events.
-9. `CandlesGateway` broadcasts `kline_update` to rooms such as `BTCUSDT_1m`.
-10. React loads history through `GET /candles`, joins the matching Socket.IO room, and updates Lightweight Charts.
+This cutover ensures that each minute belongs to either backfill or the processor, never both.
 
-## Local Quickstart
+## Requirements
 
-This repository has no root `package.json`. Run backend and frontend commands inside their own folders.
+- Docker Desktop or Docker Engine with Docker Compose
+- Node.js and npm for the backend and frontend
+- Python 3.10+ only when running the pipeline outside Docker
+- Network access to Binance
 
-Copy env files from the repository root:
+## Run locally
+
+The repository has no root `package.json`. Run npm commands from `backend/` or `frontend/`.
+
+### 1. Create environment files
+
+From the repository root in PowerShell:
 
 ```powershell
 Copy-Item data_pipeline\.env.example data_pipeline\.env
@@ -77,36 +60,7 @@ Copy-Item backend\.env.example backend\.env
 Copy-Item frontend\.env.example frontend\.env
 ```
 
-macOS/Linux or Git Bash:
-
-```bash
-cp data_pipeline/.env.example data_pipeline/.env
-cp backend/.env.example backend/.env
-cp frontend/.env.example frontend/.env
-```
-
-Fill the env files with local values:
-
-```env
-# data_pipeline/.env
-QUESTDB_HOST=localhost
-QUESTDB_PORT=8812
-QUESTDB_USER=admin
-QUESTDB_PASSWORD=quest
-QUESTDB_DB_NAME=qdb
-KAFKA_BROKER=localhost:9092
-KAFKA_TOPIC_MARKET_TRADES=market-trades
-KAFKA_TOPIC_KLINE_STREAM=kline-stream
-KAFKA_CONSUMER_GROUP_ID=candle-processor-group
-KAFKA_AUTO_OFFSET_RESET=earliest
-BINANCE_SOCKET_URL=wss://stream.binance.com:9443/stream
-TRADING_SYMBOLS=BTCUSDT,ETHUSDT
-CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
-STARTUP_RECONCILE_ENABLED=true
-STARTUP_RECONCILE_REQUIRED=true
-STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
-STARTUP_RECONCILE_BOOTSTRAP_CANDLES=480
-```
+Fill `backend/.env` and `frontend/.env` with local values; both example files are intentionally blank:
 
 ```env
 # backend/.env
@@ -136,18 +90,34 @@ VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ```
 
-Start infrastructure and the Python pipeline:
+`data_pipeline/.env.example` already includes local defaults. Keep `TRADING_SYMBOLS`, `CANDLE_INTERVALS`, and Kafka topic names non-empty. Inside containers, Compose overrides `KAFKA_BROKER` to `kafka:29092` and `QUESTDB_HOST` to `questdb`.
+
+### 2. Start infrastructure and the pipeline
+
+```bash
+docker compose up -d kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
+```
+
+Compose builds the image automatically when no pipeline image exists. Add
+`--build` only to force a rebuild after changing `Dockerfile`,
+`requirements.txt`, or files under `data_pipeline/`:
 
 ```bash
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
-Startup backfill is enabled by default. It uses Binance server time to select the
-next UTC minute as cutover, waits until the startup minute is closed and stable,
-then catches up each symbol from its valid QuestDB watermark. Set
-`STARTUP_RECONCILE_ENABLED=false` only when intentionally opting out.
+Monitor startup, especially backfill:
 
-Start the backend:
+```bash
+docker compose ps
+docker compose logs -f kafka-setup data-producer data-backfill data-processor
+```
+
+Set `STARTUP_RECONCILE_ENABLED=false` in `data_pipeline/.env` only when intentionally skipping startup backfill. With the default `STARTUP_RECONCILE_REQUIRED=true`, the processor will not start if backfill exhausts its configured retries.
+
+Startup backfill waits for the Binance minute that was open at startup to close, which can take up to one minute. `STARTUP_RECONCILE_CLOSE_GRACE_SECONDS=2` keeps only a short post-boundary safety delay; increase it if a Binance endpoint needs more time to expose closed candles.
+
+### 3. Start the backend
 
 ```bash
 cd backend
@@ -155,7 +125,15 @@ npm install
 npm run start:dev
 ```
 
-Start the frontend:
+The backend starts even if QuestDB or Kafka is temporarily unavailable. It
+retries both dependencies in the background every five seconds; `/health`
+returns `503` until both are connected, while the Node.js process remains
+running. Invalid backend environment values still need to be corrected before
+the affected dependency can become available.
+
+### 4. Start the frontend
+
+In a separate terminal:
 
 ```bash
 cd frontend
@@ -163,140 +141,84 @@ npm install
 npm run dev
 ```
 
-## Default Local URLs
+Open `http://localhost:5173`. On a first run, data may appear only after startup backfill and the processor have produced valid data.
 
-| Service | URL |
+## Local URLs
+
+| Service | Address |
 | --- | --- |
 | Frontend | `http://localhost:5173` |
-| Backend API | `http://localhost:3000` |
-| Backend health | `http://localhost:3000/health` |
-| Swagger UI | `http://localhost:3000/api/docs` |
+| Backend | `http://localhost:3000` |
+| Health | `http://localhost:3000/health` |
+| Swagger | `http://localhost:3000/api/docs` |
 | Kafka UI | `http://localhost:8080` |
 | QuestDB Console | `http://localhost:9000` |
-| Kafka broker for host apps | `localhost:9092` |
-| QuestDB PostgreSQL wire for host apps | `localhost:8812` |
-| QuestDB ILP TCP for host apps | `localhost:9009` |
 
-## Project Structure
+## Primary data contracts
+
+- Raw trade (`market-trades`): `symbol`, `trade_id`, `timestamp` (Unix milliseconds), `event_time`, `price`, `quantity`.
+- Kline (`kline-stream`): UTC ISO 8601 `timestamp`, `symbol`, `interval`, `open`, `high`, `low`, `close`, `volume`, `is_final`.
+- REST: `GET /candles?symbol=BTCUSDT&interval=1m&limit=100`; `limit` ranges from 1 to 2000.
+- Socket.IO: clients send `join_kline_room`/`leave_kline_room` with `{ symbol, interval }`; the server emits `kline_update` to rooms such as `BTCUSDT_1m`.
+
+Supported intervals throughout the system:
 
 ```text
-NexTick/
-|-- backend/
-|   |-- src/
-|   |   |-- common/
-|   |   |-- modules/
-|   |   |   |-- candles/
-|   |   |   |-- database/
-|   |   |   `-- kafka/
-|   |   |-- app.controller.ts
-|   |   |-- app.module.ts
-|   |   |-- app.service.ts
-|   |   `-- main.ts
-|   |-- test/
-|   |-- package.json
-|   `-- README.md
-|-- data_pipeline/
-|   |-- backfill/
-|   |   |-- reconciler.py
-|   |   |-- runner.py
-|   |   `-- state.py
-|   |-- common/
-|   |   |-- config.py
-|   |   `-- logger.py
-|   |-- producer/
-|   |   `-- binance_producer.py
-|   |-- processor/
-|   |   |-- candle_processor.py
-|   |   `-- runner.py
-|   `-- README.md
-|-- docs/
-|   |-- architecture.md
-|   |-- overview.md
-|   `-- setup.md
-|-- frontend/
-|   |-- src/
-|   |   |-- components/
-|   |   |   |-- chart/
-|   |   |   |-- indicators/
-|   |   |   |-- layout/
-|   |   |   `-- legal/
-|   |   |-- hooks/
-|   |   |-- pages/
-|   |   |-- services/
-|   |   |-- types/
-|   |   `-- utils/
-|   |-- package.json
-|   `-- README.md
-|-- docker-compose.yml
-|-- Dockerfile
-|-- requirements.txt
-`-- README.md
+1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 ```
 
-QuestDB data is stored in the Docker-managed `questdb_data` named volume so its
-WAL and memory-mapped files remain on Docker's Linux filesystem. Do not use a
-Windows bind mount for `/var/lib/questdb`. A legacy `data/questdb` directory, if
-present, is an untouched backup from the previous storage layout.
+When adding a symbol, interval, topic, or changing a payload, update the pipeline, backend, frontend, and their corresponding `.env` files together.
 
-For an existing installation that still has `data/questdb`, stop the processor
-and QuestDB, run `docker compose --profile migration run --rm questdb-storage-migrate`,
-then bring the stack up again. The migration is idempotent and never deletes the
-legacy directory.
-`models/` and `warehouse/` are currently local placeholders with no tracked
-source files.
-
-## Module Summary
-
-| Module | Current features |
-| --- | --- |
-| `data_pipeline/` | Binance raw-trade ingestion, market-trade Kafka publishing, startup backfill, candle aggregation, final `1m` QuestDB writes, kline Kafka publishing, retry/backoff handling. |
-| `backend/` | `GET /`, `GET /health`, `GET /candles`, Swagger at `/api/docs`, validated QuestDB history reads, recent realtime tail cache, Kafka kline consumer/normalization, Socket.IO `join_kline_room`, `leave_kline_room`, and `kline_update`. |
-| `frontend/` | Realtime candlestick and volume chart, symbol/interval controls, OHLCV tooltip, visible high/low overlay, scroll-to-latest, persisted chart/indicator preferences, EMA/MA/volume-MA/RSI/MACD indicators, `/terms`, `/privacy`, and footer API status. |
-
-## Commands
-
-Backend:
+## Verification and operation
 
 ```bash
+# backend
 cd backend
 npm run build
-npm run lint
 npm run test
 npm run test:e2e
-```
 
-Frontend:
-
-```bash
-cd frontend
+# frontend
+cd ../frontend
 npm run build
 npm run lint
-```
 
-Pipeline operational checks:
-
-```bash
-docker compose ps
+# pipeline, from the repository root
+python -m unittest data_pipeline.tests.test_startup_backfill
 docker compose logs -f data-producer data-backfill data-processor
 ```
 
-## Documentation Index
+`backend/npm run lint` runs ESLint with `--fix`, so it may modify source files. Review its changes before committing.
 
-| File | Scope |
-| --- | --- |
-| [`docs/overview.md`](docs/overview.md) | Product scope, module map, current features, and out-of-scope items. |
-| [`docs/architecture.md`](docs/architecture.md) | Runtime boundaries, data contracts, storage model, validation, and scaling notes. |
-| [`docs/setup.md`](docs/setup.md) | Local setup, env values, verification commands, and troubleshooting. |
-| [`data_pipeline/README.md`](data_pipeline/README.md) | Python producer, processor, Kafka topics, QuestDB schema, timestamp rules. |
-| [`backend/README.md`](backend/README.md) | NestJS modules, REST endpoints, DTO validation, QuestDB queries, recent realtime cache, Socket.IO events. |
-| [`frontend/README.md`](frontend/README.md) | React chart UI, env config, REST and Socket.IO flow, chart and indicator behavior. |
+To inspect stored candles, use QuestDB Console or run:
 
-## Boundary Rules
+```sql
+SELECT *
+FROM market_candles
+WHERE symbol = 'BTCUSDT'
+ORDER BY timestamp DESC
+LIMIT 20;
+```
 
-| Rule | Current boundary |
-| --- | --- |
-| Frontend only talks to backend REST and Socket.IO. | It does not connect to Binance, Kafka, QuestDB, or model services. |
-| Backend is not the ingestion engine. | It does not connect to Binance or own candle ingestion. |
-| Python pipeline owns the write path. | It ingests Binance raw trades, aggregates candles, writes QuestDB, and publishes kline updates. |
-| Kafka and QuestDB are integration contracts. | Backend consumes processed kline updates from Kafka and reads history from QuestDB. |
-| AI/model services are future extensions. | Replay buffers, model training, online learning, and forecasting should consume Kafka or QuestDB outside the API request path. |
+QuestDB uses the `questdb_data` named volume, Kafka uses `kafka_data`, and backfill/processor state uses `pipeline_state`. `docker compose down` preserves these volumes. Do not use a Windows bind mount for `/var/lib/questdb`.
+
+## Repair stored candles
+
+The command below uses Binance REST data to validate and replace a closed `1m` candle window. Stop the live writer first because repair can create and swap temporary tables:
+
+```bash
+docker compose stop data-processor
+python -m data_pipeline.backfill.reconciler --dry-run
+python -m data_pipeline.backfill.reconciler
+docker compose start data-processor
+```
+
+See the [pipeline README](data_pipeline/README.md) for repair ranges, backups, and options.
+
+## Module documentation
+
+- [Python pipeline](data_pipeline/README.md)
+- [NestJS backend](backend/README.md)
+- [React frontend](frontend/README.md)
+- [Detailed architecture](docs/architecture.md)
+- [Extended setup guide](docs/setup.md)
