@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { CandleDto } from './dto/candle.dto';
 import { KlineUpdateDto } from './dto/kline-update.dto';
-import { AppLogger } from '../../common/logger';
+import { createLogger } from '../../common/logger';
 import { isValidCandleOhlcv } from './candle-validation';
 import {
   compareTimestampAsc,
@@ -12,7 +12,7 @@ import {
 
 @Injectable()
 export class RecentCandlesCacheService {
-  private readonly logger = new AppLogger(RecentCandlesCacheService.name);
+  private readonly logger = createLogger(RecentCandlesCacheService.name);
   private readonly maxCandlesPerRoom = 500;
   private readonly candlesByRoom = new Map<string, KlineUpdateDto[]>();
 
@@ -20,7 +20,7 @@ export class RecentCandlesCacheService {
     const normalizedCandle = normalizeKlineUpdate(candle);
 
     if (!normalizedCandle) {
-      this.logger.warning('Invalid realtime candle skipped from cache', {
+      this.logger.warn('Invalid realtime candle skipped from cache', {
         symbol: candle.symbol,
         interval: candle.interval,
         timestamp: candle.timestamp,
@@ -43,10 +43,7 @@ export class RecentCandlesCacheService {
     );
 
     if (existingIndex >= 0) {
-      if (
-        cachedCandles[existingIndex].is_final &&
-        !normalizedCandle.is_final
-      ) {
+      if (cachedCandles[existingIndex].is_final && !normalizedCandle.is_final) {
         return;
       }
 
@@ -87,7 +84,7 @@ export class RecentCandlesCacheService {
           klineUpdateToCandleDto(candle),
         );
       } else {
-        this.logger.warning('Invalid candle skipped from merge', {
+        this.logger.warn('Invalid candle skipped from merge', {
           symbol: candle.symbol,
           interval: candle.interval,
           timestamp: candle.timestamp,

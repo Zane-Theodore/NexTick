@@ -3,12 +3,12 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CandlesService } from './candles.service';
 import { CandlesQueryDto } from './dto/candles-query.dto';
 import { CandlesResponseDto } from './dto/candles-response.dto';
-import { AppLogger } from '../../common/logger';
+import { createLogger } from '../../common/logger';
 
 @ApiTags('Market Data')
 @Controller('candles')
 export class CandlesController {
-  private readonly logger = new AppLogger(CandlesController.name);
+  private readonly logger = createLogger(CandlesController.name);
 
   constructor(private readonly candlesService: CandlesService) {}
 

@@ -1,10 +1,10 @@
 import axios from 'axios';
-import { Logger } from '../utils/logger';
+import { createLogger } from '../utils/logger';
 import type { MarketCandle } from '../utils/formatters';
 
 export const API_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? '';
 export const API_HEALTH_URL = import.meta.env.VITE_API_HEALTH_URL?.replace(/\/$/, '') ?? '';
-const logger = new Logger('API');
+const logger = createLogger('API');
 
 interface CandlesResponse {
   success: boolean;

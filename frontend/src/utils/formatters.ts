@@ -1,6 +1,6 @@
-import { Logger } from './logger';
+import { createLogger } from './logger';
 
-const logger = new Logger('Formatters');
+const logger = createLogger('Formatters');
 
 export interface MarketCandle {
   timestamp: string | number | Date;
@@ -72,7 +72,7 @@ export const formatCandle = (candle: unknown): FormattedCandle | null => {
   if (!Number.isFinite(open) || !Number.isFinite(high) ||
       !Number.isFinite(low) || !Number.isFinite(close) ||
       !Number.isFinite(volume)) {
-    logger.error(`Invalid candle data received`, {
+    logger.error(`Invalid candle data received`, undefined, {
       open: rawCandle.open,
       high: rawCandle.high,
       low: rawCandle.low,
@@ -88,7 +88,7 @@ export const formatCandle = (candle: unknown): FormattedCandle | null => {
   const utcSeconds = parseCandleTime(timestamp);
 
   if (utcSeconds === null) {
-    logger.error(`Invalid candle timestamp received`, {
+    logger.error(`Invalid candle timestamp received`, undefined, {
       timestamp,
       symbol,
       interval,

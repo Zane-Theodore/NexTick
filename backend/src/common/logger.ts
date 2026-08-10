@@ -1,98 +1,154 @@
-import { Logger as NestLogger } from '@nestjs/common';
+import type { LoggerService } from '@nestjs/common';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
-export class AppLogger extends NestLogger {
-  private readonly moduleName: string;
+/**
+ * Application logger used by both application code and NestJS runtime logs.
+ *
+ * Public methods follow the same vocabulary as the frontend logger:
+ * debug, info, warn and error.
+ */
+export class AppLogger implements LoggerService {
+  constructor(
+    private readonly moduleName = 'Application',
+    private readonly isDevelopment = process.env.NODE_ENV !== 'production',
+  ) {}
 
-  constructor(moduleName: string) {
-    super(moduleName);
-    this.moduleName = moduleName;
+  debug(message: unknown, metadata?: unknown): void {
+    if (this.isDevelopment) {
+      this.write('DEBUG', message, metadata);
+    }
   }
 
-  debug(message: string, metadata?: unknown) {
-    super.debug(this.formatMessage('DEBUG', message, metadata));
+  info(message: unknown, metadata?: unknown): void {
+    this.write('INFO', message, metadata);
   }
 
-  info(message: string, metadata?: unknown) {
-    super.log(this.formatMessage('INFO', message, metadata));
+  warn(message: unknown, metadata?: unknown): void {
+    this.write('WARN', message, metadata);
   }
 
-  warning(message: string, metadata?: unknown) {
-    super.warn(this.formatMessage('WARN', message, metadata));
+  error(message: unknown, error?: unknown, metadata?: unknown): void {
+    this.write('ERROR', message, metadata, error);
   }
 
-  failure(message: string, error?: unknown, metadata?: unknown) {
-    const payload = this.mergeErrorMetadata(error, metadata);
+  // NestJS LoggerService compatibility. Application code should use info().
+  log(message: unknown, metadata?: unknown): void {
+    this.info(message, metadata);
+  }
 
-    if (error instanceof Error) {
-      super.error(this.formatMessage('ERROR', message, payload), error.stack);
+  verbose(message: unknown, metadata?: unknown): void {
+    this.debug(message, metadata);
+  }
+
+  fatal(message: unknown, error?: unknown, metadata?: unknown): void {
+    this.error(message, error, metadata);
+  }
+
+  private write(
+    level: LogLevel,
+    message: unknown,
+    metadata?: unknown,
+    error?: unknown,
+  ): void {
+    const details = this.mergeErrorMetadata(error, metadata);
+    const formattedMessage = `[${new Date().toISOString()}] [${level}] [${this.moduleName}] ${this.stringify(message)}`;
+    const log =
+      level === 'ERROR'
+        ? console.error
+        : level === 'WARN'
+          ? console.warn
+          : level === 'DEBUG'
+            ? console.debug
+            : console.info;
+
+    if (details === undefined) {
+      log(formattedMessage);
       return;
     }
 
-    super.error(this.formatMessage('ERROR', message, payload));
-  }
-
-  private formatMessage(
-    level: LogLevel,
-    message: string,
-    metadata?: unknown,
-  ): string {
-    const baseMessage = `[${level}] [${this.moduleName}] ${message}`;
-
-    if (metadata === undefined || metadata === null) {
-      return baseMessage;
-    }
-
-    return `${baseMessage} ${this.stringify(metadata)}`;
+    log(formattedMessage, details);
   }
 
   private mergeErrorMetadata(error?: unknown, metadata?: unknown): unknown {
-    if (!error) {
+    if (error === undefined) {
       return metadata;
     }
 
-    const errorMetadata =
+    const errorDetails =
       error instanceof Error
         ? {
-            error: error.name,
+            name: error.name,
             message: error.message,
+            stack: error.stack,
           }
-        : { error };
+        : error;
 
-    if (!metadata) {
-      return errorMetadata;
+    if (metadata === undefined) {
+      return { error: errorDetails };
     }
 
-    return {
-      ...errorMetadata,
-      metadata,
-    };
+    return { error: errorDetails, metadata };
   }
 
   private stringify(value: unknown): string {
+    if (typeof value === 'string') {
+      return value;
+    }
+
+    const serialized = this.serialize(value);
+    if (serialized !== undefined) {
+      return serialized;
+    }
+
+    if (value === null) {
+      return 'null';
+    }
+
+    switch (typeof value) {
+      case 'number':
+      case 'bigint':
+      case 'boolean':
+      case 'symbol':
+      case 'undefined':
+        return String(value);
+      default:
+        return '[Unserializable value]';
+    }
+  }
+
+  private serialize(value: unknown): string | undefined {
+    const visited = new WeakSet<object>();
+
     try {
-      return JSON.stringify(value);
+      return JSON.stringify(value, (_key, currentValue: unknown) => {
+        if (typeof currentValue === 'bigint') {
+          return currentValue.toString();
+        }
+
+        if (currentValue instanceof Error) {
+          return {
+            name: currentValue.name,
+            message: currentValue.message,
+            stack: currentValue.stack,
+          };
+        }
+
+        if (typeof currentValue === 'object' && currentValue !== null) {
+          if (visited.has(currentValue)) {
+            return '[Circular]';
+          }
+
+          visited.add(currentValue);
+        }
+
+        return currentValue;
+      });
     } catch {
-      if (value === null || value === undefined) {
-        return '';
-      }
-
-      if (typeof value === 'object' || typeof value === 'function') {
-        return '[Unserializable metadata]';
-      }
-
-      switch (typeof value) {
-        case 'string':
-          return value;
-        case 'number':
-        case 'bigint':
-        case 'boolean':
-        case 'symbol':
-          return value.toString();
-        default:
-          return '';
-      }
+      return undefined;
     }
   }
 }
+
+export const createLogger = (moduleName: string): AppLogger =>
+  new AppLogger(moduleName);

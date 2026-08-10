@@ -1,7 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Pool, types } from 'pg';
-import { AppLogger } from '../../common/logger';
+import { createLogger } from '../../common/logger';
 
 types.setTypeParser(1114, (value: string) => value);
 types.setTypeParser(1184, (value: string) => value);
@@ -10,7 +10,7 @@ types.setTypeParser(1184, (value: string) => value);
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly configService: ConfigService) {}
 
-  private readonly logger = new AppLogger(DatabaseService.name);
+  private readonly logger = createLogger(DatabaseService.name);
   private pool: Pool;
 
   async onModuleInit() {
@@ -31,7 +31,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       await this.pool.query('SELECT 1');
       this.logger.info('Database connection established successfully.');
     } catch (error) {
-      this.logger.failure('Failed to establish database connection.', error);
+      this.logger.error('Failed to establish database connection.', error);
       throw error;
     }
   }
@@ -58,7 +58,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
       return result;
     } catch (error) {
-      this.logger.failure('Query execution failed', error);
+      this.logger.error('Query execution failed', error);
       throw error;
     }
   }

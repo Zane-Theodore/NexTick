@@ -2,7 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Kafka, Consumer } from 'kafkajs';
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { AppLogger } from '../../common/logger';
+import { createLogger } from '../../common/logger';
 import {
   KlineUpdateInput,
   normalizeKlineUpdate,
@@ -10,7 +10,7 @@ import {
 
 @Injectable()
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new AppLogger(KafkaService.name);
+  private readonly logger = createLogger(KafkaService.name);
   private kafka: Kafka;
   private klineStreamConsumer: Consumer;
 
@@ -52,14 +52,14 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
 
       this.logger.info('Kline stream consumer initialized.');
     } catch (error) {
-      this.logger.failure('Failed to initialize kline stream consumer.', error);
+      this.logger.error('Failed to initialize kline stream consumer.', error);
       throw error;
     }
   }
 
   private handleKlineMessage(rawValue?: string): Promise<void> {
     if (!rawValue) {
-      this.logger.warning('Received message with empty value.');
+      this.logger.warn('Received message with empty value.');
       return Promise.resolve();
     }
 
@@ -68,7 +68,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       const normalizedCandle = this.normalizeKlineUpdate(candleData);
 
       if (!normalizedCandle) {
-        this.logger.failure('Invalid candle data received', undefined, {
+        this.logger.error('Invalid candle data received', undefined, {
           symbol: candleData.symbol,
           interval: candleData.interval,
           timestamp: candleData.timestamp,
@@ -103,7 +103,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       // Emit unified event with all candle data (both final and updating)
       this.eventEmitter.emit('candle.update', normalizedCandle);
     } catch (error) {
-      this.logger.failure('Failed to parse message value.', error, {
+      this.logger.error('Failed to parse message value.', error, {
         rawValue,
       });
     }

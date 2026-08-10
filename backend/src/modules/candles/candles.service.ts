@@ -6,7 +6,7 @@ import {
   CandleInterval,
   isValidCandleInterval,
 } from './enum/candle-interval.enum';
-import { AppLogger } from '../../common/logger';
+import { createLogger } from '../../common/logger';
 import { RecentCandlesCacheService } from './recent-candles-cache.service';
 import { isValidCandleOhlcv, parseCandleNumber } from './candle-validation';
 import { sanitizeCandleSymbol } from './candle-normalization';
@@ -28,7 +28,7 @@ type HistoricalCandlesQueryResult = {
 
 @Injectable()
 export class CandlesService {
-  private readonly logger = new AppLogger(CandlesService.name);
+  private readonly logger = createLogger(CandlesService.name);
 
   constructor(
     private readonly databaseService: DatabaseService,
@@ -184,7 +184,7 @@ export class CandlesService {
         const isValid = isValidCandleOhlcv(candle);
 
         if (!isValid) {
-          this.logger.warning(
+          this.logger.warn(
             'Invalid OHLC candle filtered from history response',
             {
               symbol,
@@ -254,7 +254,7 @@ export class CandlesService {
       );
       return candlesWithRealtimeTail;
     } catch (error) {
-      this.logger.failure('Failed to fetch historical candles', error, {
+      this.logger.error('Failed to fetch historical candles', error, {
         symbol,
         interval,
       });
@@ -293,7 +293,7 @@ export class CandlesService {
     }
 
     if (duplicates.length > 0) {
-      this.logger.warning(
+      this.logger.warn(
         'Duplicate candle open_time detected in history response',
         {
           symbol,
@@ -305,7 +305,7 @@ export class CandlesService {
     }
 
     if (missing.length > 0) {
-      this.logger.warning('Missing candles detected in history response', {
+      this.logger.warn('Missing candles detected in history response', {
         symbol,
         interval,
         missingGapCount: missing.length,

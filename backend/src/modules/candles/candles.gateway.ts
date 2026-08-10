@@ -12,7 +12,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { UsePipes, ValidationPipe } from '@nestjs/common';
 import { KlineRoomPayloadDto } from './dto/kline-room-payload.dto';
 import { KlineUpdateDto } from './dto/kline-update.dto';
-import { AppLogger } from '../../common/logger';
+import { createLogger } from '../../common/logger';
 import { RecentCandlesCacheService } from './recent-candles-cache.service';
 import { isValidCandleOhlcv } from './candle-validation';
 import { getCandleRoomKey } from './candle-normalization';
@@ -50,7 +50,7 @@ export class CandlesGateway
   @WebSocketServer()
   server: Server;
 
-  private readonly logger = new AppLogger(CandlesGateway.name);
+  private readonly logger = createLogger(CandlesGateway.name);
 
   constructor(private readonly recentCandlesCache: RecentCandlesCacheService) {}
 
@@ -96,19 +96,16 @@ export class CandlesGateway
   @OnEvent('candle.update')
   handleCandleUpdateEvent(candleData: KlineUpdateDto) {
     if (!isValidCandleOhlcv(candleData)) {
-      this.logger.warning(
-        'Invalid candle update skipped before websocket emit',
-        {
-          symbol: candleData.symbol,
-          interval: candleData.interval,
-          timestamp: candleData.timestamp,
-          open: candleData.open,
-          high: candleData.high,
-          low: candleData.low,
-          close: candleData.close,
-          volume: candleData.volume,
-        },
-      );
+      this.logger.warn('Invalid candle update skipped before websocket emit', {
+        symbol: candleData.symbol,
+        interval: candleData.interval,
+        timestamp: candleData.timestamp,
+        open: candleData.open,
+        high: candleData.high,
+        low: candleData.low,
+        close: candleData.close,
+        volume: candleData.volume,
+      });
       return;
     }
 

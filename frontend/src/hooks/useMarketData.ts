@@ -6,12 +6,12 @@ import { getIndicatorData, getIndicatorValues } from '../utils/chartIndicators';
 import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/socket';
 import type { KlineUpdate } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
-import { Logger } from '../utils/logger';
+import { createLogger } from '../utils/logger';
 import type { ISeriesApi, IChartApi, CandlestickData, Time } from 'lightweight-charts';
 import type { IndicatorSeriesConfig, IndicatorSetting, IndicatorValue } from '../types/chart';
 import { CHART_DOWN_COLOR, CHART_UP_COLOR } from '../components/chart/chartConstants';
 
-const logger = new Logger('MarketData');
+const logger = createLogger('MarketData');
 
 type RealtimeMergeResult = {
   history: FormattedCandle[];

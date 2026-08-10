@@ -2,12 +2,12 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { AppLogger } from './common/logger';
+import { createLogger } from './common/logger';
 import { ConfigService } from '@nestjs/config';
 
 async function bootstrap() {
-  const logger = new AppLogger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+  const logger = createLogger('Bootstrap');
+  const app = await NestFactory.create(AppModule, { logger });
   const configService = app.get(ConfigService);
   const frontendUrl = configService.get<string>('FRONTEND_URL');
   const backendUrl = configService.get<string>('BACKEND_URL');
