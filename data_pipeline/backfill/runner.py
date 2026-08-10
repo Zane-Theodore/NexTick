@@ -61,6 +61,11 @@ def run_startup_backfill() -> bool:
     tolerance = os.getenv("STARTUP_RECONCILE_TOLERANCE")
     bootstrap_candles = os.getenv("STARTUP_RECONCILE_BOOTSTRAP_CANDLES")
     wait_for_open_close = _env_bool("STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE", True)
+    close_grace_seconds = _env_float(
+        "STARTUP_RECONCILE_CLOSE_GRACE_SECONDS",
+        reconciler.DEFAULT_CLOSE_GRACE_SECONDS,
+        minimum=0.0,
+    )
     if os.getenv("STARTUP_RECONCILE_WINDOW_HOURS"):
         logger.warning(
             "STARTUP_RECONCILE_WINDOW_HOURS is deprecated and ignored for startup. "
@@ -77,6 +82,7 @@ def run_startup_backfill() -> bool:
                 reconciler.wait_for_open_candle_close(
                     base_url or reconciler.DEFAULT_BINANCE_REST_URL,
                     cutover,
+                    close_grace_seconds,
                 )
             result = reconciler.run_reconciliation(
                 symbols_arg=symbols,

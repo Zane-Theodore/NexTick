@@ -100,6 +100,22 @@ class StartupBackfillTests(unittest.TestCase):
         with patch.object(reconciler, "fetch_binance_server_time", return_value=at(8, 20) + timedelta(seconds=30)):
             self.assertEqual(reconciler.resolve_startup_cutover("https://example.test"), at(8, 21))
 
+    def test_close_grace_is_configurable(self):
+        server_time = at(8, 20) + timedelta(seconds=30)
+
+        with patch.object(
+            reconciler,
+            "fetch_binance_server_time",
+            side_effect=[server_time, at(8, 21) + timedelta(seconds=2)],
+        ), patch.object(reconciler.time, "sleep") as sleep:
+            reconciler.wait_for_open_candle_close(
+                "https://example.test",
+                at(8, 21),
+                close_grace_seconds=2,
+            )
+
+        sleep.assert_called_once_with(32)
+
     def test_watermark_range_is_exact_and_ignores_invalid_newer_row(self):
         cutover = at(8, 21)
         cursor = FakeCursor([

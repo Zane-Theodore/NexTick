@@ -37,7 +37,7 @@ DEFAULT_LIMIT = 1000
 MAX_BACKFILL_MINUTES = 8 * 60
 DEFAULT_BOOTSTRAP_CANDLES = MAX_BACKFILL_MINUTES
 DEFAULT_TOLERANCE = Decimal("0.00000001")
-MIN_SERVER_SECONDS_AFTER_BOUNDARY = 10
+DEFAULT_CLOSE_GRACE_SECONDS = 2.0
 WAL_APPLY_TIMEOUT_SECONDS = 120.0
 DDL_RETRY_ATTEMPTS = 30
 DDL_RETRY_DELAY_SECONDS = 1.0
@@ -243,14 +243,25 @@ def resolve_startup_cutover(base_url: str) -> datetime:
     return server_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
 
 
-def wait_for_open_candle_close(base_url: str, cutover: datetime | None = None) -> datetime:
-    """Wait until the startup minute is closed and Binance REST is stable."""
+def wait_for_open_candle_close(
+    base_url: str,
+    cutover: datetime | None = None,
+    close_grace_seconds: float = DEFAULT_CLOSE_GRACE_SECONDS,
+) -> datetime:
+    """Wait until the startup minute is closed and Binance REST is stable.
+
+    The short grace period avoids requesting a candle exactly at the exchange
+    boundary, while keeping startup latency low. The caller may increase it
+    when an exchange endpoint needs more time to expose closed candles.
+    """
 
     server_time = fetch_binance_server_time(base_url)
     startup_cutover = cutover or (
         server_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
     )
-    stable_next_boundary = startup_cutover + timedelta(seconds=MIN_SERVER_SECONDS_AFTER_BOUNDARY)
+    stable_next_boundary = startup_cutover + timedelta(
+        seconds=max(0.0, close_grace_seconds),
+    )
     wait_seconds = max(0.0, (stable_next_boundary - server_time).total_seconds())
 
     if wait_seconds > 0:
