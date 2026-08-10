@@ -13,7 +13,7 @@ Realtime charting needs separate runtime responsibilities:
 | Concern | NexTick boundary |
 | --- | --- |
 | Realtime trade ingestion | Python producer reads Binance combined raw trade streams. |
-| Candle processing | Python processor validates Binance candles and persists final `1m` rows. |
+| Candle processing | Python processor aggregates normalized raw trades into OHLCV candles and persists final `1m` rows. |
 | Historical reads | QuestDB stores final `1m` candles. |
 | Browser API | NestJS validates REST and Socket.IO contracts. |
 | Chart rendering | React and Lightweight Charts handle browser rendering. |
@@ -34,7 +34,7 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 1. Binance emits individual trades over combined `@trade` streams.
 2. `BinanceCombinedTradeProducer` normalizes each trade.
 3. The producer publishes raw trade JSON to `KAFKA_TOPIC_MARKET_TRADES`.
-4. `CandleProcessor` consumes kline updates and validates OHLCV values.
+4. `CandleProcessor` consumes raw trades, validates them, and aggregates OHLCV candles for each configured interval.
 5. Final `1m` candles are upserted into QuestDB table `market_candles`.
 6. Final and non-final candle updates are published to `KAFKA_TOPIC_KLINE_STREAM`.
 7. `KafkaService` in the backend consumes kline updates and emits internal `candle.update` events.
@@ -47,7 +47,7 @@ This keeps the browser away from Kafka, QuestDB, Binance internals, and streamin
 | --- | --- |
 | Binance raw-trade ingestion | `data_pipeline/producer/binance_producer.py`. |
 | Market-trade Kafka topic | Configured by `KAFKA_TOPIC_MARKET_TRADES`. |
-| Candle processing | Binance-provided OHLCV values are validated and forwarded. |
+| Candle processing | Raw trades are aggregated into OHLCV candles for every configured interval; open updates and final candles are published. |
 | QuestDB storage | Final `1m` candles in `market_candles`. |
 | Historical REST API | `GET /candles?symbol=BTCUSDT&interval=1m&limit=100`. |
 | Recent realtime tail cache | Backend keeps up to 500 recent kline updates per room and merges them into history responses. |
@@ -87,7 +87,7 @@ These are intentionally not implemented as current runtime features:
 | Financial advice | Out of scope. The UI shows market data only. |
 | Browser access to Kafka or QuestDB | Out of scope. Browser traffic goes through the backend. |
 | Backend Binance ingestion | Out of scope. Python owns ingestion. |
-| Backend candle ingestion | Out of scope. Python owns Binance stream ingestion. |
+| Backend raw-trade ingestion and candle aggregation | Out of scope. Python owns Binance stream ingestion and candle construction. |
 | AI forecasting | Future extension only. |
 | Replay buffer, model training, online learning | Future extension only. |
 

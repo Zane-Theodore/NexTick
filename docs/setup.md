@@ -61,6 +61,7 @@ CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 STARTUP_RECONCILE_ENABLED=true
 STARTUP_RECONCILE_REQUIRED=true
 STARTUP_RECONCILE_WAIT_FOR_OPEN_CANDLE_CLOSE=true
+STARTUP_RECONCILE_CLOSE_GRACE_SECONDS=2
 STARTUP_RECONCILE_BOOTSTRAP_CANDLES=480
 ```
 
@@ -91,7 +92,10 @@ FRONTEND_URL=http://localhost:5173
 BACKEND_URL=http://localhost:3000
 ```
 
-The backend connects to QuestDB and Kafka during startup.
+The backend starts even when QuestDB or Kafka is temporarily unavailable. It
+retries both dependencies in the background every five seconds. `/health`
+returns `503` until both dependencies are available, while the Node.js process
+remains running.
 
 ### `frontend/.env`
 
@@ -108,6 +112,14 @@ VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ## 3. Start Docker Services
 
 From the repository root:
+
+```bash
+docker compose up -d kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
+```
+
+Compose builds the pipeline image automatically when it does not exist. Use
+`--build` only to force a rebuild after changing `Dockerfile`,
+`requirements.txt`, or `data_pipeline/`:
 
 ```bash
 docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
@@ -239,7 +251,9 @@ Windows PowerShell, backfill terminal:
 python -m data_pipeline.backfill.runner
 ```
 
-Windows PowerShell, processor terminal:
+After the backfill command finishes successfully, start the processor in another
+Windows PowerShell terminal. This preserves the startup cutover and prevents
+the processor from overlapping the repaired window:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -261,7 +275,8 @@ source .venv/bin/activate
 python -m data_pipeline.backfill.runner
 ```
 
-macOS/Linux, processor terminal:
+After the backfill command finishes successfully, start the processor in another
+macOS/Linux terminal:
 
 ```bash
 source .venv/bin/activate
@@ -365,7 +380,7 @@ QuestDB writer.
 | Kafka is not ready | Broker is still starting or `kafka-setup` has not completed | Run `docker compose ps` and `docker compose logs -f kafka kafka-setup`. |
 | Topics are missing | `data_pipeline/.env` topic names are blank or `kafka-setup` did not finish | Fill env values and run `docker compose up -d kafka-setup`. |
 | QuestDB is not ready | QuestDB healthcheck has not passed | Check `http://localhost:9000` or `docker compose logs -f questdb`. |
-| Backend startup failed | Kafka or QuestDB is unavailable, or env values are blank | Confirm Docker services are healthy and `backend/.env` is filled. |
+| Backend health stays degraded | Kafka or QuestDB is unavailable, or backend env values are blank | Confirm Docker services are healthy and `backend/.env` is filled. The backend continues retrying every five seconds. |
 | `data-producer` does not start | Kafka topics are not ready or Binance WebSocket connection failed | Check `docker compose logs -f kafka-setup data-producer`. |
 | Frontend does not load data | Backend is down, `VITE_API_URL` is wrong, or no candles exist yet | Check `/health`, `/candles`, and frontend `.env`; wait for a final `1m` candle. |
 | Footer shows `Offline` | `VITE_API_HEALTH_URL` is missing or backend `/health` is unreachable | Set `VITE_API_HEALTH_URL=http://localhost:3000/health` and restart Vite. |
@@ -384,4 +399,6 @@ Stop containers:
 docker compose down
 ```
 
-Kafka data is stored in Docker volume `kafka_data`. QuestDB data is stored under `data/questdb`.
+Kafka, QuestDB, and pipeline recovery state are stored in the named Docker
+volumes `kafka_data`, `questdb_data`, and `pipeline_state`. `docker compose down`
+preserves them. Do not use a Windows bind mount for `/var/lib/questdb`.

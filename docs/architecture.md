@@ -171,7 +171,8 @@ Current storage rules:
 | Insert path | Python processor plus startup/manual REST replacement reconciler. |
 
 Maintenance reconciliation is handled by `data_pipeline.backfill.reconciler`. In
-Docker startup, `data-producer` runs first so Binance raw trades are buffered in Kafka.
+Docker startup, `data-producer` begins buffering Binance raw trades after the
+Kafka topics exist, while `data-backfill` runs after QuestDB is healthy.
 `data-backfill` is enabled by default and calls Binance `/api/v3/time` to choose
 the next UTC minute after startup as shared cutover `C`. It waits until the
 startup minute has closed and is stable, then independently catches each symbol
@@ -328,8 +329,8 @@ stretch factors.
 | Processor QuestDB upsert | Retry 3 times, then retain the final `1m` candle for retry. The candle is already published to realtime consumers. |
 | Startup reconciler failure | Retry the one-shot reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, Compose does not start `data-processor` after exhausted retries. |
 | Manual full-window reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
-| Backend QuestDB startup | Runs `SELECT 1`; startup fails if QuestDB is unreachable. |
-| Backend Kafka startup | Startup fails if consumer cannot connect or subscribe. |
+| Backend QuestDB availability | Runs `SELECT 1` and retries in the background every five seconds. The API process remains running while QuestDB is unavailable. |
+| Backend Kafka availability | Retries the kline consumer connection in the background every five seconds. The API process remains running while Kafka is unavailable. |
 | Frontend history load | Logs error and does not join the Socket.IO room if history load fails. |
 | Frontend tail gap repair | Refetches and merges recent history with retry delays of 1s, 2.5s, 5s, and 10s when a realtime update reveals a tail gap. |
 | Frontend health check | Times out after 5 seconds and marks API as `Offline`. |
@@ -338,7 +339,7 @@ stretch factors.
 
 | Area | Note |
 | --- | --- |
-| Kafka partitions | Compose creates 3 partitions for each topic; producers use `symbol_interval` as key. |
+| Kafka partitions | Compose creates 3 partitions for each topic. Raw-trade messages use `symbol` as key; kline messages use `symbol_interval`. |
 | More symbols | Add symbols to `TRADING_SYMBOLS` and `VITE_TRADING_SYMBOLS`. |
 | More backend instances | Socket.IO fan-out across multiple backend instances would need a shared Socket.IO adapter. |
 | More processors | Partition or symbol/interval ownership must be designed so two processors do not write the same candle stream independently. |
@@ -351,7 +352,7 @@ stretch factors.
 | REST query DTO | `CandlesQueryDto` validates `symbol`, `interval`, and `limit`. |
 | Socket room DTO | `KlineRoomPayloadDto` validates `symbol` and allowlisted `interval`. |
 | SQL interval | Interpolated only after checking `VALID_INTERVALS`. |
-| SQL scalars | `symbol` and `limit` are passed as query parameters. |
+| SQL scalars | `symbol`, the resolved query-window timestamps, and `limit` are passed as query parameters. |
 | REST CORS | Uses `FRONTEND_URL`. |
 | Socket.IO CORS | Allows `BACKEND_URL`, `FRONTEND_URL`, or no origin. |
 | Browser access | Browser cannot access Kafka or QuestDB directly. |
