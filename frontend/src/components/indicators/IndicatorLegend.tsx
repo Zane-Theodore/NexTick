@@ -32,6 +32,7 @@ interface IndicatorLegendProps {
   values: IndicatorValue[];
   hiddenGroups: IndicatorGroup[];
   paneLayouts: ChartPaneLayout[];
+  mainPaneTopOffset: number;
   settingsWindow: { id: number; initialGroup: IndicatorGroup | null } | null;
   onToggleGroupVisibility: (group: IndicatorGroup) => void;
   onDismissGroup: (group: IndicatorGroup) => void;
@@ -47,6 +48,7 @@ export default function IndicatorLegend({
   values,
   hiddenGroups,
   paneLayouts,
+  mainPaneTopOffset,
   settingsWindow,
   onToggleGroupVisibility,
   onDismissGroup,
@@ -101,6 +103,7 @@ export default function IndicatorLegend({
             groups={groups}
             values={values}
             hiddenGroups={hiddenGroups}
+            top={paneIndex === 0 ? paneLayout.top + mainPaneTopOffset : getPaneLegendTop(paneLayout)}
             isOpen={!collapsedPaneIndexes.includes(paneIndex)}
             onToggleOpen={() => handleTogglePaneLegend(paneIndex)}
             onToggleGroupVisibility={onToggleGroupVisibility}
@@ -133,6 +136,7 @@ interface PaneIndicatorLegendProps {
   }>;
   values: IndicatorValue[];
   hiddenGroups: IndicatorGroup[];
+  top: number;
   isOpen: boolean;
   onToggleOpen: () => void;
   onToggleGroupVisibility: (group: IndicatorGroup) => void;
@@ -145,6 +149,7 @@ function PaneIndicatorLegend({
   groups,
   values,
   hiddenGroups,
+  top,
   isOpen,
   onToggleOpen,
   onToggleGroupVisibility,
@@ -153,8 +158,8 @@ function PaneIndicatorLegend({
 }: PaneIndicatorLegendProps) {
   return (
     <div
-      className="absolute left-0 z-10 flex max-w-[calc(100%-56px)] items-start"
-      style={{ top: getPaneLegendTop(paneLayout) }}
+      className="absolute left-0 right-20 z-10 flex items-start"
+      style={{ top, containerType: 'inline-size' }}
     >
       <button
         type="button"
@@ -175,13 +180,13 @@ function PaneIndicatorLegend({
       </button>
 
       <div
-        className={`overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-out ${
-          isOpen ? 'max-w-[min(780px,calc(100vw-48px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-3'
+        className={`min-w-0 overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-out ${
+          isOpen ? 'max-w-[min(780px,calc(100%-28px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-3'
         }`}
       >
         <div
-          className="overflow-auto px-1.5 py-1 font-mono text-xs whitespace-nowrap"
-          style={{ maxHeight: Math.max(36, paneLayout.height - 12) }}
+          className="w-[min(780px,calc(100cqw-28px))] overflow-auto px-1.5 py-1 font-mono text-xs"
+          style={{ maxHeight: Math.max(36, paneLayout.height - (top - paneLayout.top) - 6) }}
         >
           {groups.map(({ group, label, settings: groupSettings }) => (
             <IndicatorLegendRow
@@ -489,8 +494,8 @@ function IndicatorLegendRow({
   onDismiss,
 }: IndicatorLegendRowProps) {
   return (
-    <div className="group min-h-6 flex w-fit max-w-full flex-nowrap items-center rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
-      <div className="flex min-w-0 flex-nowrap items-center gap-x-4 overflow-hidden">
+    <div className="group flex min-h-6 w-full items-start rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4">
         {group === 'macd'
           ? <MacdLegendValues settings={settings} values={values} />
           : settings.map((setting) => (

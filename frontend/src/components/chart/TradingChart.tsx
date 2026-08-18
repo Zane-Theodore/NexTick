@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 import { useMarketData } from '../../hooks/useMarketData';
 import IndicatorLegend from '../indicators/IndicatorLegend';
 import ChartFilterBar from './ChartFilterBar';
@@ -8,7 +10,12 @@ import { DEFAULT_INDICATOR_SETTINGS, SUPPORTED_INTERVALS, SUPPORTED_SYMBOLS } fr
 import { useTradingChartSetup } from './useTradingChartSetup';
 import { useTradingChartState } from './useTradingChartState';
 
+const COLLAPSED_LEGEND_HEIGHT = 28;
+const OHLCV_LEGEND_TOP = 4;
+const LEGEND_VERTICAL_GAP = 2;
+
 export default function TradingChart() {
+  const [ohlcvLegendHeight, setOhlcvLegendHeight] = useState(COLLAPSED_LEGEND_HEIGHT);
   const chartState = useTradingChartState();
   const {
     chartContainerRef,
@@ -103,6 +110,7 @@ export default function TradingChart() {
           {legendData && (
             <OhlcvTooltip
               legendData={legendData}
+              onHeightChange={setOhlcvLegendHeight}
             />
           )}
 
@@ -119,6 +127,7 @@ export default function TradingChart() {
             values={visibleIndicatorValues}
             hiddenGroups={hiddenIndicatorGroups}
             paneLayouts={paneLayouts}
+            mainPaneTopOffset={OHLCV_LEGEND_TOP + ohlcvLegendHeight + LEGEND_VERTICAL_GAP}
             settingsWindow={indicatorSettingsWindow}
             onToggleGroupVisibility={handleToggleIndicatorGroupVisibility}
             onDismissGroup={handleDismissIndicatorGroup}

@@ -1,24 +1,58 @@
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 
 import { formatChartValue, formatOhlcvLegendTime } from '../../utils/formatters';
 import type { LegendData } from '../../types/chart';
 import { CHART_DOWN_COLOR, CHART_UP_COLOR } from './chartConstants';
 
+const COLLAPSED_TOOLTIP_HEIGHT = 28;
+
 interface OhlcvTooltipProps {
   legendData: LegendData;
+  onHeightChange?: (height: number) => void;
 }
 
-export default function OhlcvTooltip({ legendData }: OhlcvTooltipProps) {
+export default function OhlcvTooltip({ legendData, onHeightChange }: OhlcvTooltipProps) {
   const [isOpen, setIsOpen] = useState(true);
+  const [reservesExpandedHeight, setReservesExpandedHeight] = useState(true);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const candleColor = legendData.close >= legendData.open ? CHART_UP_COLOR : CHART_DOWN_COLOR;
   const changePercent = calculatePercent(legendData.close - legendData.open, legendData.open);
   const rangePercent = calculatePercent(legendData.high - legendData.low, legendData.open);
 
+  useLayoutEffect(() => {
+    const tooltip = tooltipRef.current;
+    if (!tooltip || !onHeightChange) return;
+
+    const reportHeight = () => onHeightChange(
+      reservesExpandedHeight ? tooltip.getBoundingClientRect().height : COLLAPSED_TOOLTIP_HEIGHT,
+    );
+    const resizeObserver = new ResizeObserver(reportHeight);
+
+    resizeObserver.observe(tooltip);
+    reportHeight();
+
+    return () => resizeObserver.disconnect();
+  }, [onHeightChange, reservesExpandedHeight]);
+
+  const handleToggle = () => {
+    if (isOpen) {
+      setIsOpen(false);
+      return;
+    }
+
+    setReservesExpandedHeight(true);
+    setIsOpen(true);
+  };
+
   return (
-    <div className="pointer-events-none absolute left-0 top-1 z-20 flex max-w-[calc(100%-56px)] items-start">
+    <div
+      ref={tooltipRef}
+      className="pointer-events-none absolute left-0 right-20 top-1 z-20 flex items-start"
+      style={{ containerType: 'inline-size' }}
+    >
       <button
         type="button"
-        onClick={() => setIsOpen((current) => !current)}
+        onClick={handleToggle}
         className="pointer-events-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-[#9099aa] transition-colors hover:border-[#6b7280] hover:text-white"
         title={isOpen ? 'Hide candle info' : 'Show candle info'}
       >
@@ -26,11 +60,16 @@ export default function OhlcvTooltip({ legendData }: OhlcvTooltipProps) {
       </button>
 
       <div
-        className={`overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-out ${
-          isOpen ? 'max-w-[min(1100px,calc(100vw-72px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-3'
+        className={`min-w-0 overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-out ${
+          isOpen ? 'max-w-[min(1100px,calc(100%-28px))] opacity-100 translate-x-0' : 'max-w-0 opacity-0 -translate-x-3'
         }`}
+        onTransitionEnd={(event) => {
+          if (event.propertyName === 'max-width' && !isOpen) {
+            setReservesExpandedHeight(false);
+          }
+        }}
       >
-        <div className="flex min-h-7 flex-nowrap items-center gap-x-2 overflow-hidden font-mono text-xs font-medium leading-6 text-[#d1d4dc] whitespace-nowrap sm:text-sm">
+        <div className="flex min-h-7 w-[min(1100px,calc(100cqw-28px))] flex-wrap items-center gap-x-2 font-mono text-xs font-medium leading-6 text-[#d1d4dc] sm:text-sm">
           <span className="whitespace-nowrap font-semibold" style={{ color: candleColor }}>
             {formatOhlcvLegendTime(legendData.time)}
           </span>
