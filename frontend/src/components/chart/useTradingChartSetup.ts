@@ -72,12 +72,13 @@ export function useTradingChartSetup({
   }, [chartViewSettings]);
 
   useEffect(() => {
-    if (!chartContainerRef.current) return;
+    const chartContainer = chartContainerRef.current;
+    if (!chartContainer) return;
 
     const initialChartViewSettings = initialChartViewSettingsRef.current;
-    const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight,
+    const chart = createChart(chartContainer, {
+      width: chartContainer.clientWidth,
+      height: chartContainer.clientHeight,
       layout: {
         background: { type: ColorType.Solid, color: '#0b0f16' },
         textColor: '#d1d4dc',
@@ -194,25 +195,36 @@ export function useTradingChartSetup({
     panes[0]?.setStretchFactor(initialChartViewSettings.paneStretchFactors?.main ?? MAIN_CHART_DEFAULT_STRETCH_FACTOR);
     panes[1]?.setStretchFactor(initialChartViewSettings.paneStretchFactors?.volume ?? VOLUME_CHART_DEFAULT_STRETCH_FACTOR);
     let paneLayoutFrameId: number | null = null;
+    let paneLayoutMonitorFrameId: number | null = null;
     let visibleExtremaFrameId: number | null = null;
     let chartViewFrameId: number | null = null;
+    let lastPaneLayouts: ChartPaneLayout[] = [];
     let lastVisibleLogicalRange: LogicalRange | null = null;
     let lastMainVolumePaneStretchFactors: ChartPaneStretchFactors | null = null;
     let isDisposed = false;
+    const syncPaneLayouts = () => {
+      if (isDisposed) return;
+      const nextPaneLayouts = getPaneLayouts(chart);
+
+      if (arePaneLayoutsEqual(lastPaneLayouts, nextPaneLayouts)) return false;
+
+      lastPaneLayouts = nextPaneLayouts;
+      setPaneLayouts(nextPaneLayouts);
+      return true;
+    };
     const updatePaneLayouts = () => {
       if (isDisposed) return;
       lastMainVolumePaneStretchFactors = getMainVolumePaneStretchFactors(chart) ?? lastMainVolumePaneStretchFactors;
-      setPaneLayouts(getPaneLayouts(chart));
-      paneLayoutFrameId = null;
+      syncPaneLayouts();
     };
     const updateVisiblePriceExtrema = () => {
-      if (isDisposed || !chartContainerRef.current) return;
+      if (isDisposed) return;
       setVisiblePriceExtrema(getVisiblePriceExtrema({
         chart,
         candlestickSeries,
         history: candleHistoryRef.current,
-        width: chartContainerRef.current.clientWidth,
-        height: chartContainerRef.current.clientHeight,
+        width: chartContainer.clientWidth,
+        height: chartContainer.clientHeight,
       }));
     };
     const schedulePaneLayoutUpdate = () => {
@@ -221,6 +233,7 @@ export function useTradingChartSetup({
         cancelAnimationFrame(paneLayoutFrameId);
       }
       paneLayoutFrameId = requestAnimationFrame(() => {
+        paneLayoutFrameId = null;
         updatePaneLayouts();
         updateVisiblePriceExtrema();
       });
@@ -269,6 +282,29 @@ export function useTradingChartSetup({
 
       lastMainVolumePaneStretchFactors = nextStretchFactors ?? lastMainVolumePaneStretchFactors;
       schedulePaneLayoutUpdate();
+    };
+    const monitorPaneLayoutChanges = () => {
+      if (isDisposed) return;
+
+      if (syncPaneLayouts()) {
+        updateVisiblePriceExtrema();
+      }
+
+      paneLayoutMonitorFrameId = requestAnimationFrame(monitorPaneLayoutChanges);
+    };
+    const startPaneLayoutMonitoring = () => {
+      if (isDisposed || paneLayoutMonitorFrameId !== null) return;
+      paneLayoutMonitorFrameId = requestAnimationFrame(monitorPaneLayoutChanges);
+    };
+    const stopPaneLayoutMonitoring = () => {
+      if (paneLayoutMonitorFrameId !== null) {
+        cancelAnimationFrame(paneLayoutMonitorFrameId);
+        paneLayoutMonitorFrameId = null;
+      }
+      persistPaneStretchFactorsIfChanged();
+    };
+    const handleChartMouseDown = (event: MouseEvent) => {
+      if (event.button === 0) startPaneLayoutMonitoring();
     };
     schedulePaneLayoutUpdate();
 
@@ -334,14 +370,14 @@ export function useTradingChartSetup({
     chart.subscribeCrosshairMove(handleCrosshair);
 
     const resizeObserver = new ResizeObserver((entries) => {
-      if (entries.length === 0 || entries[0].target !== chartContainerRef.current) return;
+      if (entries.length === 0 || entries[0].target !== chartContainer) return;
       chart.applyOptions({
         width: entries[0].contentRect.width,
         height: entries[0].contentRect.height,
       });
       schedulePaneLayoutUpdate();
     });
-    resizeObserver.observe(chartContainerRef.current);
+    resizeObserver.observe(chartContainer);
 
     const handleVisibleLogicalRangeChange = (visibleLogicalRange: LogicalRange | null) => {
       scheduleVisiblePriceExtremaUpdate();
@@ -356,14 +392,20 @@ export function useTradingChartSetup({
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
 
-    const handlePaneResizeEnd = persistPaneStretchFactorsIfChanged;
-    window.addEventListener('mouseup', handlePaneResizeEnd);
-    window.addEventListener('pointerup', handlePaneResizeEnd);
+    chartContainer.addEventListener('mousedown', handleChartMouseDown);
+    chartContainer.addEventListener('touchstart', startPaneLayoutMonitoring, { passive: true });
+    window.addEventListener('mouseup', stopPaneLayoutMonitoring);
+    window.addEventListener('touchend', stopPaneLayoutMonitoring);
+    window.addEventListener('touchcancel', stopPaneLayoutMonitoring);
+    window.addEventListener('blur', stopPaneLayoutMonitoring);
 
     return () => {
       isDisposed = true;
       if (paneLayoutFrameId !== null) {
         cancelAnimationFrame(paneLayoutFrameId);
+      }
+      if (paneLayoutMonitorFrameId !== null) {
+        cancelAnimationFrame(paneLayoutMonitorFrameId);
       }
       if (visibleExtremaFrameId !== null) {
         cancelAnimationFrame(visibleExtremaFrameId);
@@ -374,8 +416,12 @@ export function useTradingChartSetup({
       chart.unsubscribeCrosshairMove(handleCrosshair);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       resizeObserver.disconnect();
-      window.removeEventListener('mouseup', handlePaneResizeEnd);
-      window.removeEventListener('pointerup', handlePaneResizeEnd);
+      chartContainer.removeEventListener('mousedown', handleChartMouseDown);
+      chartContainer.removeEventListener('touchstart', startPaneLayoutMonitoring);
+      window.removeEventListener('mouseup', stopPaneLayoutMonitoring);
+      window.removeEventListener('touchend', stopPaneLayoutMonitoring);
+      window.removeEventListener('touchcancel', stopPaneLayoutMonitoring);
+      window.removeEventListener('blur', stopPaneLayoutMonitoring);
       setIsChartReady(false);
       setPaneLayouts([]);
       setVisiblePriceExtrema(null);
@@ -619,6 +665,24 @@ function getPaneLayouts(chart: IChartApi): ChartPaneLayout[] {
     top += height;
     return layout;
   });
+}
+
+function arePaneLayoutsEqual(
+  currentLayouts: ChartPaneLayout[],
+  nextLayouts: ChartPaneLayout[],
+) {
+  return (
+    currentLayouts.length === nextLayouts.length
+    && currentLayouts.every((currentLayout, index) => {
+      const nextLayout = nextLayouts[index];
+
+      return (
+        currentLayout.index === nextLayout.index
+        && currentLayout.top === nextLayout.top
+        && currentLayout.height === nextLayout.height
+      );
+    })
+  );
 }
 
 function getMainVolumePaneStretchFactors(chart: IChartApi): ChartPaneStretchFactors | null {

@@ -113,7 +113,7 @@ function OhlcvLegendValue({
 }) {
   return (
     <span className="inline-flex whitespace-nowrap">
-      <span className="text-[#d1d4dc]">{label}</span>
+      <span className="text-[#d1d4dc]">{label}:</span>
       <span className="ml-1 font-semibold" style={{ color }}>{value}</span>
     </span>
   );

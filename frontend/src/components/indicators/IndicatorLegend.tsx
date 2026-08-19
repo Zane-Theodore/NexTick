@@ -494,7 +494,7 @@ function IndicatorLegendRow({
   onDismiss,
 }: IndicatorLegendRowProps) {
   return (
-    <div className="group flex min-h-6 w-full items-start rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
+    <div className="group flex min-h-6 w-fit max-w-full items-center rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4">
         {group === 'macd'
           ? <MacdLegendValues settings={settings} values={values} />
@@ -903,7 +903,7 @@ function ColorInput({
 
 function GearIcon() {
   return (
-    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path fillRule="evenodd" d="M11.49 2.17a1 1 0 00-2 0l-.08.88a7.94 7.94 0 00-1.32.55l-.68-.57a1 1 0 00-1.41.07L4.6 4.5a1 1 0 00-.07 1.41l.57.68c-.22.42-.4.86-.55 1.32l-.88.08a1 1 0 000 2l.88.08c.15.46.33.9.55 1.32l-.57.68a1 1 0 00.07 1.41l1.4 1.4a1 1 0 001.41.07l.68-.57c.42.22.86.4 1.32.55l.08.88a1 1 0 002 0l.08-.88c.46-.15.9-.33 1.32-.55l.68.57a1 1 0 001.41-.07l1.4-1.4a1 1 0 00.07-1.41l-.57-.68c.22-.42.4-.86.55-1.32l.88-.08a1 1 0 000-2l-.88-.08a7.94 7.94 0 00-.55-1.32l.57-.68a1 1 0 00-.07-1.41l-1.4-1.4a1 1 0 00-1.41-.07l-.68.57c-.42-.22-.86-.4-1.32-.55l-.08-.88zM10.5 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" clipRule="evenodd" />
     </svg>
   );
@@ -911,7 +911,7 @@ function GearIcon() {
 
 function CloseIcon() {
   return (
-    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path fillRule="evenodd" d="M6.22 5.22a.75.75 0 011.06 0L10 7.94l2.72-2.72a.75.75 0 111.06 1.06L11.06 9l2.72 2.72a.75.75 0 11-1.06 1.06L10 10.06l-2.72 2.72a.75.75 0 01-1.06-1.06L8.94 9 6.22 6.28a.75.75 0 010-1.06z" clipRule="evenodd" />
     </svg>
   );
