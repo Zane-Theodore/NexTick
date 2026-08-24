@@ -1,112 +1,164 @@
-# NexTick Architecture
+# NexTick System Architecture
 
-NexTick is a realtime market-data system with explicit runtime boundaries.
+This document is the authoritative description of NexTick's runtime design, cross-component contracts, reliability semantics, and architectural trade-offs. Component implementation details live in the [pipeline](../data_pipeline/README.md), [backend](../backend/README.md), and [frontend](../frontend/README.md) guides.
 
-Binance raw trades enter the Python pipeline, where candles are aggregated before Kafka output to the backend. QuestDB stores final `1m` candles, NestJS exposes validated API contracts, and React renders the chart. AI forecasting, replay buffers, model training, and online learning are future extensions only.
+NexTick is a realtime market-data and charting system. Trading execution, portfolio management, forecasting, and financial advice are outside the implemented system.
 
-## System Diagram
+## Non-Functional Goals
+
+The repository does not define service-level objectives or benchmark targets. Its design nevertheless makes these priorities visible:
+
+| Goal | Architectural support |
+| --- | --- |
+| Data correctness | Validated trade/candle inputs, a closed-candle backfill, an explicit cutover fence, QuestDB dedup keys, and complete-bucket filtering for most historical intervals |
+| Transient-failure recovery | Kafka buffering, bounded retries, persisted processor state and retry maps, backend reconnect loops, and a reconciliation workflow |
+| Low-latency chart updates | Direct trade aggregation, coalesced open-candle updates, Kafka kline delivery, Socket.IO rooms, and incremental chart updates |
+| Deterministic historical/realtime ownership | Backfill owns candle timestamps before an exclusive cutover; the processor owns timestamps at or after it |
+| Separation of responsibilities | Python owns exchange ingestion and candle writes, NestJS owns browser-facing contracts, and React owns rendering and interaction |
+| Extensibility | Kafka topics and the canonical `1m` table are explicit integration boundaries for additional consumers |
+
+These are design goals, not quantified guarantees.
+
+## System Architecture
 
 ```mermaid
 flowchart LR
-  binance["Binance combined raw trade streams"] --> producer["Python BinanceCombinedTradeProducer"]
-  producer --> marketTrades[("Kafka: KAFKA_TOPIC_MARKET_TRADES")]
-  marketTrades --> processor["Python CandleProcessor"]
-  processor --> questdb[("QuestDB: market_candles")]
-  processor --> kline[("Kafka: KAFKA_TOPIC_KLINE_STREAM")]
+  subgraph Exchange["Binance"]
+    Trades["Combined @trade WebSocket"]
+    RestKlines["REST time and 1m klines"]
+  end
 
-  questdb --> candlesApi["NestJS CandlesService"]
-  candlesApi --> rest["REST: GET /candles"]
-  kline --> kafkaSvc["NestJS KafkaService"]
-  kafkaSvc --> eventBus["EventEmitter2: candle.update"]
-  eventBus --> gateway["CandlesGateway"]
-  gateway --> socket["Socket.IO: kline_update"]
+  subgraph Pipeline["Python data pipeline"]
+    Producer["Trade producer"]
+    Backfill["Startup backfill / reconciler"]
+    Processor["Candle processor"]
+    State[("Cutover and processor state")]
+  end
 
-  rest --> frontend["React + Lightweight Charts"]
-  socket --> frontend
-  frontend --> health["GET /health"]
+  subgraph Infrastructure["Docker infrastructure"]
+    MarketTrades[("Kafka: market-trades")]
+    KlineStream[("Kafka: kline-stream")]
+    QuestDB[("QuestDB: market_candles")]
+  end
 
-  questdb -. future extension .-> ai["AI/model services"]
-  kline -. future extension .-> ai
+  subgraph API["NestJS backend"]
+    KafkaConsumer["Kafka consumer"]
+    Cache[("Recent in-memory cache")]
+    RestApi["REST API"]
+    Gateway["Socket.IO gateway"]
+  end
+
+  Browser["React + Lightweight Charts"]
+
+  Trades --> Producer --> MarketTrades --> Processor
+  RestKlines --> Backfill --> QuestDB
+  Backfill --> State --> Processor
+  Processor --> State
+  Processor --> QuestDB
+  Processor --> KlineStream --> KafkaConsumer
+  KafkaConsumer --> Cache
+  KafkaConsumer --> Gateway --> Browser
+  QuestDB --> RestApi
+  Cache --> RestApi --> Browser
+  Cache --> Gateway
 ```
 
-## Runtime Boundaries
+Docker Compose starts the infrastructure and Python services. The backend and frontend are intentionally not Compose services in the current repository; they run from their own directories.
 
-| Boundary | Owner | Contract |
+## Component Boundaries
+
+| Component | Owns | Does not own |
 | --- | --- | --- |
-| Binance to market-trade Kafka | Python producer | Normalized Binance raw-trade JSON in `KAFKA_TOPIC_MARKET_TRADES`. |
-| Market-trade Kafka to processor | Python processor | `CandleProcessor` consumes trades and aggregates candles. |
-| Processor to QuestDB | Python processor | Final `1m` candles upserted into `market_candles`. |
-| Processor to kline Kafka | Python processor | Final and non-final candle JSON in `KAFKA_TOPIC_KLINE_STREAM`. |
-| QuestDB to REST | NestJS backend | `GET /candles` response DTO, with valid OHLCV filtering and recent realtime tail merge. |
-| Kline Kafka to Socket.IO | NestJS backend | `candle.update` internal event to `kline_update` room broadcast. |
-| REST/Socket.IO to chart | React frontend | Axios history load and Socket.IO realtime updates. |
+| Python producer | Binance WebSocket connection, raw-trade normalization, `market-trades` publishing | Candle state, database writes, browser delivery |
+| Startup backfill | Binance REST fetch, trailing `1m` reconciliation, cutover state | Continuous gap detection, arbitrary historical range repair |
+| Python processor | Trade consumption, candle aggregation, kline publishing, final `1m` writes, local recovery state | REST, Socket.IO, UI state |
+| Kafka | Durable asynchronous boundaries and partition ordering | End-to-end exactly-once semantics |
+| QuestDB | Canonical final `1m` rows and time-bucket queries | Open candle state, browser access |
+| NestJS backend | Query validation, QuestDB reads, Kafka kline consumption, recent cache, REST and Socket.IO | Binance ingestion, canonical candle writes, chart rendering |
+| React frontend | Historical/live merge, rendering, indicators, interaction, session preferences | Direct Kafka, QuestDB, or Binance access |
 
-## Data Pipeline Layer
+## End-to-End Data Flow
 
-### Producer
+### Normal runtime
 
-`data_pipeline/producer/binance_producer.py` runs `BinanceCombinedTradeProducer`.
+1. The producer subscribes to one Binance combined `@trade` stream built from `TRADING_SYMBOLS`.
+2. It validates and normalizes each trade, then publishes it to `KAFKA_TOPIC_MARKET_TRADES` with the uppercase symbol as the Kafka key.
+3. The processor consumes raw trades, filters invalid or already-seen trade IDs, and updates an active OHLCV candle for every configured interval.
+4. Open candles are coalesced and normally published at most once per second. Final candles are published immediately to `KAFKA_TOPIC_KLINE_STREAM` with `symbol_interval` as the key.
+5. Final `1m` candles are upserted into `market_candles`. Other final intervals are not persisted.
+6. The backend consumes kline updates, normalizes them, updates a bounded in-memory cache, and emits `kline_update` to the matching Socket.IO room.
+7. The frontend loads history over REST, joins that room, and merges live updates by timestamp.
 
-Current behavior:
+### Startup backfill and cutover
 
-1. Reads `BINANCE_SOCKET_URL` and `TRADING_SYMBOLS` from config.
-2. Lowercases configured symbols for Binance stream names.
-3. Builds a combined raw trade stream URL from `BINANCE_SOCKET_URL`, like:
+Let `C` be the next UTC minute boundary according to Binance server time when startup reconciliation begins.
 
-```text
-wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade
+```mermaid
+sequenceDiagram
+  participant Producer as Trade producer
+  participant Kafka as market-trades
+  participant Backfill as Startup backfill
+  participant Binance as Binance REST
+  participant DB as QuestDB
+  participant State as Shared state
+  participant Processor as Candle processor
+
+  Producer->>Kafka: Buffer trades while backfill runs
+  Backfill->>Binance: Read server time and choose C
+  Backfill->>Backfill: Wait until C plus close grace
+  Backfill->>DB: Read each symbol's newest valid 1m watermark W
+  Backfill->>Binance: Fetch and validate [max(W + 1m, C - 480m), C)
+  Backfill->>DB: Stage, replace, and verify each selected range
+  Backfill->>State: Atomically write cutover C after all symbols succeed
+  Processor->>State: Restore C and processor state
+  Processor->>Kafka: Consume buffered trades
+  Processor->>Processor: Drop trade/candle timestamps before C
+  Processor->>Processor: Aggregate timestamps at or after C
 ```
 
-4. Converts Binance payloads into the market raw-trade input contract.
-5. Drops invalid trades with invalid timestamp, price, or quantity.
-6. Publishes to `KAFKA_TOPIC_MARKET_TRADES` with `symbol` as the Kafka key.
-7. Reconnects to Binance with exponential backoff when the WebSocket drops.
+For a symbol without a valid watermark, the start is `C - min(STARTUP_RECONCILE_BOOTSTRAP_CANDLES, 480 minutes)`. A valid but old watermark is also capped to the trailing 480 minutes. Backfill fetches a continuous, closed, minute-aligned Binance range and verifies OHLCV before replacing data.
 
-### Processor
+The handoff invariant is:
 
-`data_pipeline/processor/candle_processor.py` runs `CandleProcessor`.
+- backfill may write candle timestamps in `[start, C)`;
+- the processor rejects raw trades, recovered candles, publications, and retry writes with candle timestamps before `C`;
+- the processor accepts timestamps at or after `C`.
 
-Current behavior:
+This prevents overlapping ownership at startup. It does not prove that every post-cutover Binance trade reached Kafka: the producer has no readiness handshake with backfill and the Binance WebSocket is not replayable.
 
-1. Connects to QuestDB through PostgreSQL wire protocol.
-2. Creates `market_candles` as a WAL/dedup table if it does not exist.
-3. Consumes `KAFKA_TOPIC_MARKET_TRADES` with group id `candle-processor-group` by default.
-4. Aggregates raw trade price and quantity into every configured interval.
-5. Drops candles before the successful startup cutover from persistence, publication, and retry paths.
-6. Publishes final and non-final candles to `KAFKA_TOPIC_KLINE_STREAM` before persisting final `1m` candles.
-7. Persists final `1m` candles only and retries failed upserts without withholding realtime output.
+## Kafka Contracts
 
-## Kafka Topics
+Compose disables topic auto-creation. `kafka-setup` creates both configured topics with three partitions and replication factor `1`.
 
-| Topic env | Current producer | Current consumer | Message shape |
-| --- | --- | --- | --- |
-| `KAFKA_TOPIC_MARKET_TRADES` | Python producer | Python processor | Binance raw-trade JSON. |
-| `KAFKA_TOPIC_KLINE_STREAM` | Python processor | NestJS backend | Candle JSON plus `is_final`. |
+| Environment name | Example topic | Producer | Consumer | Kafka key |
+| --- | --- | --- | --- | --- |
+| `KAFKA_TOPIC_MARKET_TRADES` | `market-trades` | Python producer | Python processor | `symbol` |
+| `KAFKA_TOPIC_KLINE_STREAM` | `kline-stream` | Python processor | NestJS backend | `symbol_interval` |
 
-Docker Compose creates both topics in `kafka-setup` using values from `data_pipeline/.env`. Each topic is created with 3 partitions and replication factor `1`.
+Topic names are configuration, not hard-coded contracts. The payload shapes are code contracts and must change together across producers and consumers.
 
-## Data Shapes
-
-### Market Trade Input
+### Raw trade
 
 ```json
 {
   "symbol": "BTCUSDT",
   "trade_id": 123456789,
-  "timestamp": 1779254400123,
-  "event_time": 1779254460123,
+  "timestamp": 1787558400123,
+  "event_time": 1787558400150,
   "price": 105120.1,
   "quantity": 0.125
 }
 ```
 
-### Kline Update
+`timestamp` is Binance trade time in Unix milliseconds. `event_time` is preserved in the Kafka record but is not used by candle aggregation.
+
+### Kline update
 
 ```json
 {
-  "timestamp": "2026-05-20T08:00:00+00:00",
   "symbol": "BTCUSDT",
   "interval": "1m",
+  "timestamp": "2026-08-24T08:00:00+00:00",
   "open": 105000.5,
   "high": 105250.75,
   "low": 104900.25,
@@ -116,34 +168,11 @@ Docker Compose creates both topics in `kafka-setup` using values from `data_pipe
 }
 ```
 
-### REST Candle Response
+`timestamp` is the UTC bucket start. `is_final=false` is a mutable view of the active bucket; `is_final=true` means the processor closed that bucket. Neither Kafka topic carries a schema identifier or version field.
 
-```json
-{
-  "success": true,
-  "symbol": "BTCUSDT",
-  "interval": "1m",
-  "count": 1,
-  "data": [
-    {
-      "timestamp": "2026-05-20T08:00:00.000Z",
-      "symbol": "BTCUSDT",
-      "interval": "1m",
-      "open": 105000.5,
-      "high": 105250.75,
-      "low": 104900.25,
-      "close": 105120.1,
-      "volume": 12.34567
-    }
-  ]
-}
-```
+## Storage Model
 
-These shapes must stay in sync across Python publishing, backend DTOs, and frontend formatters.
-
-## QuestDB Storage Model
-
-The processor creates this table:
+The processor creates the live table through QuestDB's PostgreSQL wire protocol:
 
 ```sql
 CREATE TABLE IF NOT EXISTS market_candles (
@@ -160,223 +189,291 @@ PARTITION BY MONTH
 DEDUP UPSERT KEYS(timestamp, symbol, interval);
 ```
 
-Current storage rules:
+Only final `1m` candles are written during normal processing. The dedup key makes repeated writes for the same timestamp, symbol, and interval converge after QuestDB applies WAL records.
 
-| Rule | Current behavior |
-| --- | --- |
-| Stored interval | Final `1m` candles only. |
-| Historical larger intervals | Built by backend SQL using QuestDB `SAMPLE BY`. |
-| Table partitioning | Monthly. |
-| Timestamp column | Designated QuestDB timestamp. |
-| Insert path | Python processor plus startup/manual REST replacement reconciler. |
+The reconciliation code validates that the live table is WAL/dedup enabled. If it finds an older non-WAL/non-dedup table, it can recreate it through a backup table before continuing. For a selected symbol range it stages Binance rows in a `BYPASS WAL` table, builds a full replacement excluding that range, takes a full backup, recreates the live WAL/dedup table, and verifies the replacement. This full-table copy/swap is why the processor must not write concurrently with reconciliation.
 
-Maintenance reconciliation is handled by `data_pipeline.backfill.reconciler`. In
-Docker startup, `data-producer` begins buffering Binance raw trades after the
-Kafka topics exist, while `data-backfill` runs after QuestDB is healthy.
-`data-backfill` is enabled by default and calls Binance `/api/v3/time` to choose
-the next UTC minute after startup as shared cutover `C`. It waits until the
-startup minute has closed and is stable, then independently catches each symbol
-up from valid watermark `W` over `[max(W + 1 minute, C - 480 minutes), C)`.
-Empty symbols bootstrap at most the preceding 480 closed minutes. After all ranges verify, the service writes
-the shared cutover state; while draining Kafka, the processor drops every candle
-timestamp before `C` from QuestDB writes, publication, and retry queues.
-Repairs use the startup/manual replacement reconciler while the live processor
-is stopped, so a bounded window is rebuilt and swapped instead of being patched
-by a second live writer.
+### Historical query behavior
 
-## Backend Layer
+`CandlesService` always reads canonical `1m` rows. It:
 
-NestJS modules:
+1. bounds the candidate query to at least 24 hours or twice the requested interval window;
+2. filters invalid OHLCV rows;
+3. groups each minute and accepts it only when one physical version is visible;
+4. aggregates the stable minutes with `SAMPLE BY <interval> ALIGN TO CALENDAR`;
+5. requires the expected number of one-minute rows for fixed-size buckets;
+6. reverses the newest-first database result to oldest-first API order; and
+7. merges the recent cache by timestamp before applying the requested limit.
 
-| Module | Role |
-| --- | --- |
-| `CandlesModule` | `GET /candles`, `CandlesService`, recent candle cache, validation helpers, and Socket.IO gateway. |
-| `DatabaseModule` | `pg.Pool` connection to QuestDB. |
-| `KafkaModule` | KafkaJS kline consumer. |
+`1M` is calendar-bucketed by QuestDB but does not use the fixed minute-count completeness filter because month length varies. The TypeScript interval-duration map uses 30 days only for query-window sizing and gap detection.
 
-`RecentCandlesCacheService` stores up to 500 normalized kline updates per
-`SYMBOL_interval` room. New Socket.IO subscribers receive the cached tail, and
-`GET /candles` merges the same cache into QuestDB history so the API can include
-the newest realtime candle before the final `1m` write is visible in QuestDB.
+## REST and Realtime Architecture
 
-REST endpoints:
+### REST
 
-| Method | Path | Description |
+| Method | Path | Behavior |
 | --- | --- | --- |
-| `GET` | `/` | Returns `Hello World!`. |
-| `GET` | `/health` | Returns status and timestamp. |
-| `GET` | `/candles` | Returns historical candles. |
+| `GET` | `/` | Returns `Hello World!`; it is not a health check |
+| `GET` | `/health` | Returns `200` only while both QuestDB and Kafka are marked available; otherwise returns `503` |
+| `GET` | `/candles` | Returns historical candles plus the matching recent cache tail |
+| `GET` | `/api/docs` | Swagger UI |
 
-Swagger is available at:
+`GET /candles` requires `symbol`; `interval` defaults to `1m`; `limit` defaults to `100` and must be an integer from `1` through `2000`. The interval is allowlisted before it is interpolated into SQL, while symbol and time values use query parameters. The response is sorted oldest to newest.
 
-```text
-/api/docs
-```
+### Socket.IO
 
-### REST Query Path
-
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Controller as CandlesController
-  participant Service as CandlesService
-  participant DB as QuestDB
-
-  Client->>Controller: GET /candles?symbol=BTCUSDT&interval=5m&limit=100
-  Controller->>Controller: CandlesQueryDto validation
-  Controller->>Service: getHistoricalCandles(symbol, limit, interval)
-  Service->>Service: allowlist interval, sanitize symbol, and resolve bounded query window
-  Service->>DB: dedupe/filter 1m rows, then SAMPLE BY 5m ALIGN TO CALENDAR
-  DB-->>Service: rows newest first
-  Service->>Service: reverse oldest-first and merge recent realtime cache
-  Service-->>Controller: CandlesResponseDto data
-  Controller-->>Client: CandlesResponseDto
-```
-
-### Socket.IO Path
-
-```mermaid
-sequenceDiagram
-  participant UI as Frontend
-  participant Gateway as CandlesGateway
-  participant KafkaSvc as KafkaService
-  participant Kafka as Kline topic
-
-  UI->>Gateway: join_kline_room { symbol, interval }
-  Gateway->>UI: socket joins SYMBOL_interval
-  Kafka->>KafkaSvc: kline message
-  KafkaSvc->>Gateway: internal candle.update event
-  Gateway->>UI: kline_update to room
-  UI->>Gateway: leave_kline_room on cleanup
-```
-
-Socket.IO events:
-
-| Event | Direction | Payload |
+| Event | Direction | Payload or effect |
 | --- | --- | --- |
-| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` |
-| `leave_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` |
-| `kline_update` | Server to client | Kline update JSON. |
+| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }`; joins `BTCUSDT_1m` and replays the cached room tail |
+| `leave_kline_room` | Client to server | Same payload; leaves the room |
+| `kline_update` | Server to client | Normalized kline update, including `is_final` |
 
-## Frontend Layer
+Room payloads are transformed and validated with NestJS pipes. The gateway accepts WebSocket and polling transports. Socket.IO is a live notification path, not a durable replay log; the REST/cache path provides convergence after missed updates within the cache and database windows.
 
-The frontend is a Vite React app.
+## Data and Reliability Guarantees
 
-Key files:
+NexTick combines at-least-once-style replay handling with idempotent or deduplicating boundaries. It does **not** implement a transactional exactly-once pipeline.
 
-| File | Role |
+| Concern | Implemented semantics | Boundary or caveat |
+| --- | --- | --- |
+| Raw-trade ordering | `symbol` is the Kafka key, so accepted records for a symbol are ordered within its partition | No total order across partitions or symbols; order before Kafka depends on the live Binance connection |
+| Kline ordering | `symbol_interval` is the key, so a series stays in one Kafka partition | Socket.IO delivery is not persisted or acknowledged by application code |
+| Duplicate and late trades | The aggregator drops any `trade_id` less than or equal to the last accepted ID for that symbol | This assumes increasing trade IDs; a valid late record with an older ID is intentionally discarded |
+| Candle construction | Trades update open/high/low/close and summed quantity inside UTC buckets | No synthetic zero-volume candle is created when no trade occurs |
+| Candle finalization | A candle closes when a later bucket arrives or when its end is at least two seconds in the past | Open updates are coalesced to roughly one per second; delivery frequency is not guaranteed |
+| Final versus non-final | Final updates are published immediately; retry maps do not replace a queued final update with a non-final one; the backend cache rejects non-final replacement of a final key | Live transport can still redeliver or reorder events; consumers must not infer exactly-once delivery from `is_final` |
+| Processor offsets | Auto-commit is disabled. Approximately once per second, the processor atomically replaces its JSON state file, then calls `consumer.commit()` | State and Kafka offsets are not one transaction; a commit failure is logged and may cause replay |
+| Processor recovery state | Active candles, finalized markers, last trade IDs, failed kline updates, and failed DB writes are persisted | The in-memory coalescing map for not-yet-broadcast open candles is not stored; files rely on the local/shared volume being intact |
+| Publish retries | Kline sends wait for broker acknowledgement and retry four times before entering a persisted retry map | A crash can still duplicate a previously published kline when its trade is replayed |
+| Database retries | Final `1m` writes retry three times, then enter a persisted retry map | Kafka publication occurs before the database write, so realtime can lead WAL visibility |
+| QuestDB idempotency | WAL dedup/upsert keys are `(timestamp, symbol, interval)` | Dedup is applied by QuestDB, not atomically with Kafka offset commits; duplicate physical versions may be temporarily visible |
+| Producer delivery | Kafka producer uses `acks=all`, client retries, and symbol keys | Asynchronous delivery failures are logged but not replayed from Binance; WebSocket reconnect cannot recover missed trades |
+| Backfill ownership | State is written only after every selected symbol verifies; processor timestamps before the cutover are fenced | Completeness after the cutover depends on producer coverage; catch-up is capped at 480 minutes |
+| Recent backend cache | Up to 500 unique timestamps are kept per room, sorted, and merged by timestamp; final entries resist non-final cache overwrite | Cache is process-local and lost on backend restart; the gateway still emits live messages independently of whether the cache accepted an overwrite |
+| Frontend out-of-order updates | Binary insertion keeps history sorted. Updates behind the tail trigger full candle/volume resynchronization while preserving the visible range | Same-timestamp updates replace unconditionally and frontend history does not retain finality, so final-over-non-final precedence is not enforced in the browser |
+| Frontend gap recovery | A detected gap within the last 12 candles schedules REST merge attempts after 1, 2.5, 5, and 10 seconds | Initial history failure is not retried by this path, older gaps are not detected, and retries are bounded |
+
+## Failure and Recovery Behavior
+
+| Failure | Current response |
 | --- | --- |
-| `src/App.tsx` | Selects `/`, `/terms`, or `/privacy` based on `window.location.pathname`. |
-| `src/services/api.ts` | Calls `GET {VITE_API_URL}/candles`. |
-| `src/services/socket.ts` | Creates Socket.IO client and room helpers. |
-| `src/hooks/useMarketData.ts` | Loads history, joins/leaves rooms, applies realtime candles, repairs recent tail gaps, and syncs indicators. |
-| `src/components/chart/TradingChart.tsx` | Composes chart controls, chart container, overlays, and indicator legend. |
-| `src/components/chart/chartPreferences.ts` | Loads, validates, saves, and resets session-scoped chart preferences. |
-| `src/components/chart/useTradingChartState.ts` | Owns chart refs, selected market, indicator settings, and chart UI state. |
-| `src/components/chart/useTradingChartSetup.ts` | Creates Lightweight Charts series, crosshair behavior, pane layout tracking, and visible high/low overlay data. |
-| `src/components/indicators/IndicatorLegend.tsx` | Displays indicator values and settings window. |
-| `src/components/indicators/indicatorSettingsModel.ts` | Indicator settings tabs, slot defaults, pane placement helpers, and settings-window positioning. |
-| `src/utils/indicatorSettings.ts` | Clones, merges, and compares indicator setting collections. |
-| `src/utils/chartIndicators.ts` | Maps indicator settings and series configs to calculated chart values. |
-| `src/components/layout/useApiHealthStatus.ts` | Checks `VITE_API_HEALTH_URL` and returns API status for the footer. |
+| Kafka unavailable when a Python client starts | Shared bounded exponential retry attempts client creation up to 60 times |
+| Binance WebSocket closes | Producer retries up to 10 times with exponential delay capped at 300 seconds; Compose's `unless-stopped` policy can restart the container afterward |
+| QuestDB unavailable when processor starts | Processor construction fails; the Compose container restart policy retries the process after QuestDB's startup wait |
+| Kline publish or final `1m` write fails | Processor records the latest failed side effect in a keyed retry map and persists it in recovery state |
+| Processor restarts | It restores aggregation and retry state, filters restored entries against the latest backfill fence, and resumes from the Kafka consumer group offset |
+| Startup backfill fails | It retries according to environment settings. With `STARTUP_RECONCILE_REQUIRED=true`, the one-shot service exits unsuccessfully and Compose does not start the processor |
+| Reconciliation swap fails | Code attempts to restore `market_candles` from the full backup and may retain failed/old tables for manual recovery |
+| Backend starts without Kafka or QuestDB | The HTTP process starts, retries each dependency every five seconds, and reports `503` from `/health` until both are available |
+| KafkaJS consumer crashes | KafkaJS may restart it under its retry policy; non-restartable failures trigger the backend reconnect loop |
+| Browser Socket.IO transport disconnects | The client makes up to five reconnect attempts with a 1–5 second delay |
 
-Chart update rules:
+The frontend reference-counts room subscriptions, but it does not re-emit active `join_kline_room` messages on a new Socket.IO connection. A successful transport reconnection can therefore remain outside the server room until the market selection effect runs again.
 
-| Case | API |
-| --- | --- |
-| Historical load | `setData()` for candles, volume, and indicator series. |
-| Symbol or interval switch | Clear series, fetch history, then `setData()`. |
-| Realtime candle | `update()` for candle and volume series. |
-| Out-of-order realtime candle | Merge by timestamp and refresh candle/volume series with `setData()` while preserving visible range. |
-| Realtime indicators | Recalculate visible indicator history and call indicator `setData()`. |
+## Security and Validation Boundaries
 
-Indicator groups:
+- Browsers connect only to the backend. Kafka, QuestDB, and Binance details are not exposed as frontend data sources.
+- REST CORS allows the configured `FRONTEND_URL`. Socket.IO allows `FRONTEND_URL`, `BACKEND_URL`, or requests without an `Origin` header.
+- REST DTO validation strips unknown properties, normalizes symbols to uppercase, allowlists intervals, and bounds `limit`. The service strips non-alphanumeric characters from symbols before querying.
+- Kafka kline messages are parsed, normalized, and checked for finite, internally consistent OHLCV values before reaching the cache or gateway.
+- The producer and processor reject malformed identifiers, timestamps, non-positive prices/quantities, and invalid candle shapes.
+- Reconciler SQL values are parameterized. Dynamic temporary table names are generated and checked against restricted identifier patterns.
+- Current Kafka listeners are plaintext, QuestDB uses example local credentials, and the backend has no authentication, authorization, rate limiting, or application-level TLS. CORS is not an access-control substitute.
 
-| Group | Pane behavior |
-| --- | --- |
-| EMA | Main chart pane. |
-| MA | Main chart pane; hidden by default through the group visibility state. |
-| Volume MA | Volume pane. |
-| RSI | Secondary pane when enabled. |
-| MACD | Secondary pane with MACD and signal line when enabled. |
+## Scalability Boundaries
 
-Chart and indicator preferences are saved to browser `sessionStorage` under
-`nextick:trading-chart:preferences:v1`. The saved preferences include
-indicator settings, hidden indicator groups, bar spacing, and main/volume pane
-stretch factors.
+- The local broker has three partitions per application topic, replication factor `1`, and two-hour log retention. It is a development topology, not a highly available Kafka cluster.
+- One processor owns all active aggregation state. Although symbol keying places one symbol in one partition, adding consumer-group members can move a partition during rebalance; active candle state and JSON recovery files are not transferred between replicas.
+- Backend replicas using the same `KAFKA_GROUP_ID` would divide kline partitions. Each process would then have only part of the cache and only emit its own messages. Horizontal scaling requires a shared pub/sub or different consumption design plus a Socket.IO adapter and connection-routing plan.
+- QuestDB is a single local instance. The repository contains no replication, backup schedule, retention policy, or production failover plan.
+- Reconciliation copies the full candle table for each selected symbol range before a swap. Its time and temporary-space cost grows with the table, and it requires a single-writer maintenance window.
+- The recent cache is bounded by count, not time or memory budget, and is rebuilt only from new Kafka messages after a backend restart.
 
-## Time Format Rules
+## Architecture Decisions and Trade-offs
 
-| Boundary | Format |
-| --- | --- |
-| Binance raw-trade input | Milliseconds since Unix epoch from trade time field `T`. |
-| Python processor | UTC-aware `datetime`. |
-| Kafka kline output | ISO 8601 string, usually with `+00:00`. |
-| QuestDB insert | `%Y-%m-%d %H:%M:%S`. |
-| Backend response | ISO 8601 string, usually ending in `Z`. |
-| Frontend chart | Unix seconds for Lightweight Charts. |
+The rationales below are inferred from the implemented boundaries. The repository contains no benchmark study comparing the alternatives.
 
-## Failure Handling
+### 1. Kafka between ingestion, processing, and backend
 
-| Area | Current handling |
-| --- | --- |
-| Producer Kafka startup | Retry with exponential backoff, up to 60 attempts. |
-| Producer Binance disconnect | Reconnect with exponential backoff, up to 10 attempts. |
-| Invalid producer trade | Drop missing symbol/id/timestamp or non-positive price/quantity. |
-| Processor Kafka startup | Retry with exponential backoff. |
-| Invalid raw-trade input | Skip missing symbol, trade id, timestamp, price, or quantity. |
-| Processor QuestDB startup | Startup fails if connection cannot be opened. |
-| Processor QuestDB upsert | Retry 3 times, then retain the final `1m` candle for retry. The candle is already published to realtime consumers. |
-| Startup reconciler failure | Retry the one-shot reconciliation according to `STARTUP_RECONCILE_MAX_ATTEMPTS`; with `STARTUP_RECONCILE_REQUIRED=true`, Compose does not start `data-processor` after exhausted retries. |
-| Manual full-window reconciler failure | Keeps full-table backups in `market_candles_old_*`; if `market_candles` is missing, the next run restores from the newest backup before reconciling. |
-| Backend QuestDB availability | Runs `SELECT 1` and retries in the background every five seconds. The API process remains running while QuestDB is unavailable. |
-| Backend Kafka availability | Retries the kline consumer connection in the background every five seconds. The API process remains running while Kafka is unavailable. |
-| Frontend history load | Logs error and does not join the Socket.IO room if history load fails. |
-| Frontend tail gap repair | Refetches and merges recent history with retry delays of 1s, 2.5s, 5s, and 10s when a realtime update reveals a tail gap. |
-| Frontend health check | Times out after 5 seconds and marks API as `Offline`. |
+**Context.** Exchange ingestion, stateful aggregation, and browser delivery have different failure and restart behavior.
 
-## Scaling Notes
+**Decision.** Use a raw-trade topic between producer and processor and a kline topic between processor and backend.
 
-| Area | Note |
-| --- | --- |
-| Kafka partitions | Compose creates 3 partitions for each topic. Raw-trade messages use `symbol` as key; kline messages use `symbol_interval`. |
-| More symbols | Add symbols to `TRADING_SYMBOLS` and `VITE_TRADING_SYMBOLS`. |
-| More backend instances | Socket.IO fan-out across multiple backend instances would need a shared Socket.IO adapter. |
-| More processors | Partition or symbol/interval ownership must be designed so two processors do not write the same candle stream independently. |
-| QuestDB | Current table partitions by month and stores final `1m` candles as the source for historical aggregation. |
+**Why it fits NexTick.** Kafka lets the producer continue buffering while startup backfill runs, gives the processor consumer offsets for recovery, and keeps browser delivery out of the write path.
 
-## Security and Validation Notes
+**Alternatives.** Direct in-process calls would be simpler for one process. Redis Streams, NATS JetStream, or RabbitMQ could also provide asynchronous boundaries.
 
-| Layer | Current protection |
-| --- | --- |
-| REST query DTO | `CandlesQueryDto` validates `symbol`, `interval`, and `limit`. |
-| Socket room DTO | `KlineRoomPayloadDto` validates `symbol` and allowlisted `interval`. |
-| SQL interval | Interpolated only after checking `VALID_INTERVALS`. |
-| SQL scalars | `symbol`, the resolved query-window timestamps, and `limit` are passed as query parameters. |
-| REST CORS | Uses `FRONTEND_URL`. |
-| Socket.IO CORS | Allows `BACKEND_URL`, `FRONTEND_URL`, or no origin. |
-| Browser access | Browser cannot access Kafka or QuestDB directly. |
+**Trade-offs.** Components can restart independently and replay retained records, but local operation now requires a broker, schemas are informal JSON, retention is only two hours, and state/offset side effects are not transactional.
 
-## Data That Must Stay in Sync
+**Revisit when.** Reconsider the broker or topology if deployment simplicity matters more than replay, retention must grow substantially, schemas need governance, or measured workload exceeds the current partition model.
 
-| Change | Update these places |
-| --- | --- |
-| Add interval | `data_pipeline/common/config.py`, `backend/src/modules/candles/enum/candle-interval.enum.ts`, `data_pipeline/.env`, `frontend/.env`, docs. |
-| Add symbol | `data_pipeline/.env`, `frontend/.env`, docs/examples if needed. |
-| Rename topics | `data_pipeline/.env`, `backend/.env`, `docker-compose.yml`, docs. |
-| Change kline payload | Python `broadcast_candle`, backend DTOs, frontend `MarketCandle` and `KlineUpdate`, docs. |
-| Change QuestDB schema | Processor DDL and insert, backend SQL, docs, and data migration plan. |
-| Change health route | `AppController`, frontend `VITE_API_HEALTH_URL`, docs. |
+### 2. QuestDB for candle persistence
 
-## Future AI Boundary
+**Context.** Historical data is timestamped OHLCV and higher intervals require calendar-aligned time buckets.
 
-AI features are not in the current request path.
+**Decision.** Store candles in a QuestDB table with a designated timestamp, time partitions, WAL, and dedup keys.
 
-Future services such as replay buffers, model training, online learning, and forecasting should:
+**Why it fits NexTick.** The implemented queries use `SAMPLE BY`, first/last/min/max/sum aggregation, and time windows directly against the candle workload. PostgreSQL wire clients are available in both Python and Node.
 
-| Rule | Reason |
-| --- | --- |
-| Consume Kafka or QuestDB contracts. | Keeps model code decoupled from processor memory. |
-| Publish to dedicated topics, tables, or explicit backend APIs. | Avoids hidden dependencies in the chart path. |
-| Stay outside `GET /candles` and Socket.IO kline fan-out. | Prevents model latency from slowing market data delivery. |
-| Be documented as separate runtime services. | Keeps portfolio documentation accurate. |
+**Alternatives.** PostgreSQL with TimescaleDB, ClickHouse, InfluxDB, or plain PostgreSQL tables are plausible. No comparative benchmark is present.
+
+**Trade-offs.** Time-bucket SQL and dedup are concise, but the code depends on QuestDB-specific SQL and WAL behavior, and the current deployment is one unpinned local instance.
+
+**Revisit when.** Reevaluate if operational support, replication, joins with relational data, retention management, or workload measurements favor another store.
+
+### 3. Python for ingestion and candle processing
+
+**Context.** The pipeline needs WebSocket and REST access, Kafka clients, stateful aggregation, validation, and maintenance scripting.
+
+**Decision.** Implement the producer, processor, and reconciler as Python modules in one small container image.
+
+**Why it fits NexTick.** The current logic is straightforward I/O plus per-trade arithmetic, and the selected Python libraries cover Binance connectivity, Kafka, and QuestDB's PostgreSQL wire protocol with little framework overhead.
+
+**Alternatives.** Node.js, Java/Kotlin, Go, or a stream-processing framework could own the same path.
+
+**Trade-offs.** Python keeps the implementation approachable and repair tooling reusable, but the current process is single-threaded, state is local JSON, and `kafka-python` is pinned to an older client.
+
+**Revisit when.** Reconsider if profiling shows CPU or client limitations, partition-parallel processing is required, or state must move to a distributed stream processor.
+
+### 4. Separate NestJS backend and Python pipeline
+
+**Context.** Exchange-facing writes and browser-facing reads have different APIs, dependencies, and security boundaries.
+
+**Decision.** Keep ingestion and persistence in Python while NestJS owns REST, health, validation, Swagger, Kafka consumption, and Socket.IO.
+
+**Why it fits NexTick.** A pipeline restart does not require restarting the HTTP application, and the browser API can evolve without adding request handling to the stateful processor.
+
+**Alternatives.** A single Node or Python service would reduce process count; separate read and realtime services would split it further.
+
+**Trade-offs.** Responsibilities are clear, but local setup uses three language/runtime processes and shared JSON contracts can drift without generated schemas.
+
+**Revisit when.** Consolidate if operational overhead dominates, or split further if API and realtime delivery need independent scaling.
+
+### 5. REST for history and Socket.IO for realtime updates
+
+**Context.** A chart needs an ordered snapshot at load time and small updates while it remains open.
+
+**Decision.** Fetch history with `GET /candles` and receive live kline changes through room-scoped Socket.IO events.
+
+**Why it fits NexTick.** REST provides a retryable snapshot and query parameters; Socket.IO supports long-lived delivery, rooms, reconnection transports, and a small frontend client.
+
+**Alternatives.** Polling alone, Server-Sent Events, GraphQL subscriptions, or a raw WebSocket protocol could serve the UI.
+
+**Trade-offs.** The two-path design keeps snapshot and update concerns explicit, but clients must merge them correctly, Socket.IO events are not durable, and room membership must be restored after reconnect.
+
+**Revisit when.** Consider another protocol if bidirectional room control is unnecessary, delivery acknowledgement is required, or a public API needs protocol stability beyond Socket.IO.
+
+### 6. Browsers isolated from Kafka and QuestDB
+
+**Context.** Broker and database protocols are not suitable public browser contracts, and their credentials and topology should not be client concerns.
+
+**Decision.** The frontend communicates only with NestJS.
+
+**Why it fits NexTick.** The backend centralizes validation, query limits, CORS, cache merging, and translation from Kafka events to per-market rooms.
+
+**Alternatives.** A managed database HTTP API or broker WebSocket gateway could expose infrastructure more directly.
+
+**Trade-offs.** Infrastructure stays replaceable behind one API boundary, but the backend is another availability and scaling layer.
+
+**Revisit when.** Reconsider only with a deliberately secured public data gateway and a clear replacement for backend validation and aggregation policy.
+
+### 7. Final `1m` candles as canonical history
+
+**Context.** Storing every configured interval duplicates the same market history and complicates corrections.
+
+**Decision.** Persist only closed `1m` candles; open candles and higher intervals remain streaming data.
+
+**Why it fits NexTick.** One-minute rows preserve enough granularity for every currently supported historical interval and give reconciliation one canonical key per minute.
+
+**Alternatives.** Persist every interval, store raw trades, or maintain materialized rollups.
+
+**Trade-offs.** Corrections and storage are simpler, but historical queries spend compute aggregating `1m` rows, raw trade replay is impossible after Kafka retention, and sub-minute views cannot be derived.
+
+**Revisit when.** Add raw storage or rollups if audit/replay requirements emerge or measured query cost becomes material.
+
+### 8. Derive higher historical intervals
+
+**Context.** Users select intervals from `1m` through `1M`, while realtime updates should still arrive without waiting for a database query.
+
+**Decision.** Aggregate configured higher intervals directly from trades for realtime publication, but derive historical higher intervals from canonical `1m` rows in QuestDB.
+
+**Why it fits NexTick.** Live charts receive immediate higher-bucket changes while refreshes converge on one persisted source.
+
+**Alternatives.** Persist each final interval, calculate all intervals in the browser, or use database materialized views.
+
+**Trade-offs.** It avoids redundant historical tables, but live and historical values travel through different calculation paths. Fixed buckets require complete `1m` counts, while `1M` needs special handling.
+
+**Revisit when.** Persist or materialize popular intervals if query latency or database load is measured as unacceptable.
+
+### 9. Startup backfill/realtime cutover
+
+**Context.** Starting aggregation mid-minute would create a partial candle, while pausing ingestion during REST backfill could lose trades after the backfill window.
+
+**Decision.** Start the producer, choose a future closed-minute boundary `C`, backfill through `[start, C)`, persist `C`, then let the processor drain Kafka while rejecting timestamps before `C`.
+
+**Why it fits NexTick.** It gives each candle timestamp one owner and includes the minute that was open when backfill started.
+
+**Alternatives.** Start realtime immediately and patch overlaps, pause the exchange feed, or replay from a durable exchange/raw-trade archive.
+
+**Trade-offs.** Ownership is deterministic and startup gaps are bounded, but startup waits up to roughly a minute plus grace, catch-up is capped at eight hours, and producer readiness is not coordinated with `C`.
+
+**Revisit when.** Extend the design when downtime can exceed retention/backfill caps or when producer readiness and complete post-cutover coverage must be proven.
+
+### 10. Persist processor recovery state
+
+**Context.** Kafka offsets alone cannot reconstruct the exact active candle if side effects and an offset checkpoint occur at different times.
+
+**Decision.** Atomically replace a local JSON snapshot containing active candles, finalized markers, last trade IDs, and failed side effects before committing offsets.
+
+**Why it fits NexTick.** The single processor can resume an open bucket and suppress replayed trade IDs without introducing another state service.
+
+**Alternatives.** Kafka Streams/Flink state stores, compacted changelog topics, Redis, or recomputation from a longer raw-trade log.
+
+**Trade-offs.** Recovery is simple for one Compose replica, but the file and offset are not one transaction, state cannot move safely between replicas, and loss of `pipeline_state` removes this protection.
+
+**Revisit when.** Move state to partition-owned durable storage before horizontal processor scaling or stronger recovery guarantees.
+
+### 11. Maintain a recent realtime cache in the backend
+
+**Context.** A final kline can reach the backend before the QuestDB WAL write is visible, and a new Socket.IO subscriber needs the recent live tail.
+
+**Decision.** Keep up to 500 normalized updates per `SYMBOL_interval`, merge them into REST results, and replay them when a client joins a room.
+
+**Why it fits NexTick.** It closes the common publication/database visibility gap without making REST wait for WAL application.
+
+**Alternatives.** Query Kafka, persist open candles, delay realtime publication, or use a shared cache.
+
+**Trade-offs.** Refreshes converge quickly on recent updates, but memory is process-local, cold after restart, and inconsistent across replicas.
+
+**Revisit when.** Introduce a shared cache or fan-out layer when multiple backend instances or longer replay windows are required.
+
+### 12. Lightweight Charts for the UI
+
+**Context.** The frontend needs candlesticks, volume, multiple panes, crosshair interaction, incremental updates, and explicit control over series synchronization.
+
+**Decision.** Build the chart with Lightweight Charts and calculate indicators in TypeScript.
+
+**Why it fits NexTick.** The source uses its candlestick/line series, pane API, logical ranges, and `update`/`setData` distinction directly, without a larger dashboard framework.
+
+**Alternatives.** Apache ECharts, Highcharts Stock, Plotly, D3, or a custom canvas layer could provide different feature and licensing trade-offs.
+
+**Trade-offs.** The UI has fine-grained chart control and a small domain model, but NexTick owns indicator math, pane state, out-of-order resync, and preference validation itself.
+
+**Revisit when.** Reevaluate if required drawing tools, accessibility, indicator breadth, or measured rendering scale exceed the current library and custom code.
+
+## Known Architectural Limitations
+
+| Current implementation | Limitation | Future possibility |
+| --- | --- | --- |
+| Single KRaft broker, plaintext listeners, replication factor `1`, two-hour retention | Broker loss or a long outage can remove replay coverage | Multi-broker secured Kafka with explicit retention and backup policy |
+| `questdb/questdb:latest` on one named volume | Rebuilds are not reproducible and there is no database failover | Pin a tested version and document backup/restore and replication strategy |
+| One processor with local JSON state | Consumer-group scale-out can split or move stateful partitions incorrectly | Partition-owned distributed state or a stream-processing runtime |
+| Process-local backend cache and Socket.IO server | Replicas do not share cache entries, Kafka messages, or rooms | Shared pub/sub/cache and Socket.IO adapter with connection routing |
+| No authentication, authorization, rate limiting, or TLS termination | Exposed deployments would have weak access controls | Add an authenticated edge/API policy and secured infrastructure listeners |
+| Startup backfill follows the newest valid watermark and stops at 480 minutes | Older holes and valid-but-wrong rows can remain undetected | Explicit range repair and scheduled integrity scans |
+| Live Binance WebSocket with no raw-trade archive | Disconnect gaps cannot be replayed from NexTick | Durable raw-trade retention or continuous closed-candle reconciliation |
+| Frontend does not restore room joins after socket reconnect | A reconnected socket can stop receiving room updates | Rejoin every active subscription on `connect` |
+| Frontend same-timestamp merge ignores finality | A late non-final event can replace a final chart value until another refresh/update | Track `is_final` and enforce final precedence |
+| Minimal unit/smoke tests and no frontend test runner | Cross-service and UI regressions are weakly protected | Contract, integration, failure-recovery, and browser tests |
+| Logs only; no metrics or tracing backend | Health and data-quality trends are not observable over time | Structured metrics, traces, dashboards, and alerting |
+| Local Compose plus separate dev servers | No verified production topology or release procedure | Versioned images, CI gates, deployment manifests, and rollback documentation |
