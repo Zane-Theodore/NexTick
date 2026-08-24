@@ -1,172 +1,223 @@
 # NexTick Backend
 
-`backend/` is NexTick's NestJS API gateway. It does not ingest Binance data or create candles. It reads history from QuestDB, receives processed klines from Kafka, and exposes REST and Socket.IO to browsers.
+The backend is NexTick's browser-facing boundary. It reads canonical candle history from QuestDB, consumes realtime kline updates from Kafka, maintains a recent in-memory tail, and exposes validated REST and Socket.IO contracts.
 
-## Scope
+It does not connect to Binance, aggregate raw trades, or write canonical candles. Those responsibilities belong to the [data pipeline](../data_pipeline/README.md). System-level rationale and reliability semantics are in [System Architecture](../docs/architecture.md).
 
-| Capability | Implementation |
+## Technology Stack
+
+| Area | Technology |
 | --- | --- |
-| REST | `GET /`, `GET /health`, `GET /candles`, and Swagger at `/api/docs`. |
-| Candle history | `CandlesService` reads final `1m` candles from `market_candles` and aggregates them for the requested interval. |
-| Real time | `KafkaService` consumes `kline-stream`, normalizes it, and emits an internal `candle.update` event. |
-| Socket.IO | `CandlesGateway` caches then emits `kline_update` to `SYMBOL_interval` rooms. |
-| Database | `DatabaseService` uses `pg.Pool` over the QuestDB PostgreSQL wire protocol. |
+| Application framework | NestJS 11, TypeScript 6 |
+| REST validation/docs | `class-validator`, `class-transformer`, Swagger |
+| Realtime transport | NestJS WebSockets and Socket.IO |
+| Event consumption | KafkaJS 2 |
+| Database access | `pg` 8 through QuestDB's PostgreSQL wire protocol |
+| Internal dispatch | NestJS EventEmitter2 |
+| Tests | Jest 30, `ts-jest`, Supertest |
 
-Browsers must not connect directly to Kafka or QuestDB.
+## Responsibilities and Boundaries
 
-## Run locally
-
-First start Kafka, QuestDB, and the pipeline from the repository root as described in the [root README](../README.md). Create `backend/.env` from the example and fill every value:
-
-```powershell
-Copy-Item .env.example .env
-npm install
-npm run start:dev
+```mermaid
+flowchart LR
+  QuestDB[("QuestDB: final 1m candles")] --> CandlesService
+  Kline[("Kafka kline topic")] --> KafkaService
+  KafkaService -->|"candle.update"| Gateway["CandlesGateway"]
+  Gateway --> Cache[("Recent candle cache")]
+  Cache --> CandlesService
+  CandlesService -->|"GET /candles"| Browser
+  Gateway -->|"kline_update"| Browser
 ```
 
-Example local `.env`:
+- `CandlesService` owns historical query construction and cache/history merging.
+- `KafkaService` owns the kline consumer and converts Kafka JSON into normalized internal updates.
+- `CandlesGateway` owns Socket.IO rooms and live emission.
+- `RecentCandlesCacheService` owns the process-local recent tail shared by REST and Socket.IO.
+- `DatabaseService` owns the QuestDB connection pool and availability state.
+- `AppService` combines Kafka and QuestDB availability for `/health`.
 
-```env
-QUESTDB_HOST=localhost
-QUESTDB_PORT=8812
-QUESTDB_USER=admin
-QUESTDB_PASSWORD=quest
-QUESTDB_DB_NAME=qdb
-QUESTDB_POOL_MAX=10
-QUESTDB_POOL_TIMEOUT=5000
-QUESTDB_POOL_IDLE_TIMEOUT=30000
-KAFKA_BROKER=localhost:9092
-KAFKA_TOPIC_KLINE_STREAM=kline-stream
-KAFKA_CLIENT_ID=nextick-backend
-KAFKA_GROUP_ID=nextick-backend-group
-PORT=3000
-FRONTEND_URL=http://localhost:5173
-BACKEND_URL=http://localhost:3000
-```
+## Module Structure
 
-The backend starts even when Kafka or QuestDB is temporarily unavailable. It retries each dependency in the background every five seconds and exposes a degraded health status until both reconnect. Existing requests to `/candles` can still fail while QuestDB is down, but the Node process remains alive.
+| Path | Role |
+| --- | --- |
+| `src/main.ts` | Global validation, CORS, Swagger, shutdown hooks, and HTTP listener |
+| `src/app.controller.ts` | Root and health endpoints |
+| `src/modules/database/` | QuestDB pool and reconnect loop |
+| `src/modules/kafka/` | KafkaJS kline consumer and internal event emission |
+| `src/modules/candles/candles.controller.ts` | Historical candle REST endpoint |
+| `src/modules/candles/candles.service.ts` | QuestDB aggregation, row validation, cache merge, and gap logging |
+| `src/modules/candles/candles.gateway.ts` | Socket.IO room join/leave and kline fan-out |
+| `src/modules/candles/recent-candles-cache.service.ts` | Bounded, final-aware recent cache |
+| `src/modules/candles/dto/` | REST and Socket.IO DTOs |
+| `src/modules/candles/candle-validation.ts` | Finite and internally consistent OHLCV checks |
+| `src/modules/candles/candle-normalization.ts` | Symbol, timestamp, numeric, room-key, and update normalization |
 
-## API
+Path aliases such as `@modules/*` are configured in `tsconfig.json`.
 
-| Method | Path | Result |
+## REST API
+
+| Method | Path | Response |
 | --- | --- | --- |
-| `GET` | `/` | The string `Hello World!`. |
-| `GET` | `/health` | Returns dependency status; uses `200` when both are available and `503` while either is reconnecting. |
-| `GET` | `/candles` | Validated historical OHLCV data. |
+| `GET` | `/` | Plain text `Hello World!` |
+| `GET` | `/health` | `200` with dependency state when Kafka and QuestDB are available; `503` otherwise |
+| `GET` | `/candles` | Historical candles merged with the recent realtime tail |
+| `GET` | `/api/docs` | Swagger UI |
 
-Swagger: `http://localhost:3000/api/docs`.
+Example request:
 
-### `GET /candles`
-
-```text
-GET /candles?symbol=BTCUSDT&interval=1m&limit=100
+```http
+GET /candles?symbol=BTCUSDT&interval=5m&limit=100
 ```
 
-| Query | Required | Default | Rule |
-| --- | --- | --- | --- |
-| `symbol` | Yes | — | Must be non-empty; the DTO uppercases it and the service removes characters outside `A-Z0-9` before querying. |
-| `interval` | No | `1m` | Must be a supported interval. |
-| `limit` | No | `100` | Integer from 1 through 2000. |
+| Query | Required | Validation |
+| --- | --- | --- |
+| `symbol` | Yes | Non-empty string, normalized to uppercase; non-alphanumeric characters are removed before the database query |
+| `interval` | No | Defaults to `1m`; must be in the backend interval allowlist |
+| `limit` | No | Defaults to `100`; integer from `1` through `2000` |
 
-Supported intervals: `1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M`.
+The response envelope contains `success`, the requested `symbol` and `interval`, `count`, and an oldest-to-newest `data` array. The complete payload contract is documented once in [System Architecture](../docs/architecture.md#rest-and-realtime-architecture) and generated in Swagger from the DTOs.
 
-Response:
+### Validation behavior
 
-```json
-{
-  "success": true,
-  "symbol": "BTCUSDT",
-  "interval": "1m",
-  "count": 1,
-  "data": [
-    {
-      "timestamp": "2026-08-10T08:00:00.000Z",
-      "symbol": "BTCUSDT",
-      "interval": "1m",
-      "open": 100,
-      "high": 102,
-      "low": 99,
-      "close": 101,
-      "volume": 12.5
-    }
-  ]
-}
-```
+The global `ValidationPipe` enables transformation and strips properties not present in DTOs. REST and room intervals use the same allowlist; the exact identifiers are maintained with environment guidance in the [setup guide](../docs/setup.md#data_pipelineenv).
 
-### How history is built
+Kafka updates do not pass through controller DTO decorators. `KafkaService` explicitly normalizes timestamps, symbols, numeric fields, and `is_final`, then rejects missing identities or non-finite/internally inconsistent OHLCV. `CandlesService` applies the same OHLCV rules to database rows before returning them.
 
-The pipeline stores only closed `1m` candles. The backend reads a time window of at least 24 hours, or a larger window according to the requested `limit` and interval; it filters invalid OHLCV data and ambiguous duplicate `1m` rows, then aggregates through QuestDB `SAMPLE BY`.
+## Historical Candle Aggregation
 
-- For fixed intervals, only buckets containing every expected minute are returned.
-- `1M` uses calendar-month buckets, so it has no fixed minute-count filter.
-- Results are sorted from oldest to newest, normalized to ISO 8601 timestamps, and merged with the recent real-time cache before limiting to `limit`. A historical minute with more than one stored version is excluded rather than choosing an ambiguous version.
-- Scalar values are parameterized. The `interval` SQL fragment is interpolated only after an allowlist check.
+QuestDB stores final `1m` candles only. `CandlesService` derives every requested historical interval from that canonical table.
 
-## Socket.IO real time
+The query path:
 
-Rooms use this form:
+1. Builds a time window equal to the larger of 24 hours or twice `interval * limit`.
+2. Selects valid rows for the sanitized symbol and `interval='1m'`.
+3. Uses a one-minute `SAMPLE BY` stage and retains a minute only when one physical version is visible. This avoids combining fields from multiple visible versions while QuestDB dedup catches up.
+4. Uses `first(open)`, `max(high)`, `min(low)`, `last(close)`, and `sum(volume)` with calendar alignment for the requested interval.
+5. For fixed-size intervals, returns only buckets containing the expected number of one-minute rows. `1M` omits that count filter because calendar months have different lengths.
+6. Reads newest first for the SQL `LIMIT`, reverses to oldest first, filters invalid mapped rows, and merges cache entries by timestamp.
+7. Logs duplicate timestamps and interval gaps found in the merged response; logging does not synthesize missing candles.
 
-```text
-BTCUSDT_1m
-```
+The bounded query window means a sparse result can contain fewer than `limit` rows even when older rows exist outside the window.
 
-| Event | Direction | Payload | Behavior |
-| --- | --- | --- | --- |
-| `join_kline_room` | Client → server | `{ "symbol": "BTCUSDT", "interval": "1m" }` | Joins the room and receives its existing cached tail. |
-| `leave_kline_room` | Client → server | Same shape | Leaves the room. |
-| `kline_update` | Server → client | The kline below | Emitted only to the matching symbol/interval room. |
+## Kafka Consumer
 
-```json
-{
-  "timestamp": "2026-08-10T08:00:00+00:00",
-  "symbol": "BTCUSDT",
-  "interval": "1m",
-  "open": 100,
-  "high": 102,
-  "low": 99,
-  "close": 101,
-  "volume": 12.5,
-  "is_final": false
-}
-```
+`KafkaService` creates one KafkaJS consumer using `KAFKA_GROUP_ID`, subscribes to `KAFKA_TOPIC_KLINE_STREAM` with `fromBeginning: false`, and processes one message at a time through `eachMessage`.
 
-The real-time cache holds up to 500 candles per room. An update for an existing timestamp replaces the cached value, but a non-final update cannot overwrite a final candle.
+For every valid kline it emits a synchronous internal `candle.update` event. Invalid JSON or candle data is logged and skipped. KafkaJS's normal `eachMessage` auto-commit behavior applies; the backend does not maintain a dead-letter topic or application retry queue for invalid messages.
 
-REST CORS allows only `FRONTEND_URL`. Socket.IO allows `BACKEND_URL`, `FRONTEND_URL`, and requests with no `Origin` header.
+The producer key is `symbol_interval`, so one market/interval series is ordered within a Kafka partition. This is not global ordering across all series.
 
-## Source structure
+### Failure and reconnect behavior
 
-```text
-src/
-├── app.controller.ts          # / and /health
-├── main.ts                    # CORS, ValidationPipe, Swagger, listen
-├── common/logger.ts
-└── modules/
-    ├── candles/               # REST, DTOs, cache, Socket.IO, validation
-    ├── database/              # QuestDB pool
-    └── kafka/                 # Kline consumer
-```
+- Initial connection failures retry in a backend loop every five seconds.
+- KafkaJS also uses bounded client retries and `restartOnFailure` for consumer crashes.
+- Group join marks Kafka available; crash and initialization failure mark it unavailable.
+- A non-restartable crash triggers the outer reconnect loop.
+- `/health` returns `503` while Kafka is unavailable, but the HTTP process stays up.
+- On module shutdown, the consumer disconnects cleanly.
 
-The global `ValidationPipe` and the gateway both enable `transform` and `whitelist`. `candle-normalization.ts` normalizes symbols, timestamps, OHLCV numbers, and room keys; invalid payloads are discarded before caching or emitting to clients.
+The broker-to-backend path can redeliver around failures. The cache upserts by candle timestamp, but Socket.IO clients can still observe repeated events.
 
-## npm commands
+## Socket.IO Contract
 
-| Command | Purpose |
+The gateway supports WebSocket and polling transports.
+
+| Event | Direction | Payload |
+| --- | --- | --- |
+| `join_kline_room` | Client to server | `{ "symbol": "BTCUSDT", "interval": "1m" }` |
+| `leave_kline_room` | Client to server | Same payload |
+| `kline_update` | Server to client | Kline payload with OHLCV, UTC timestamp, symbol, interval, and `is_final` |
+
+Rooms use `UPPERCASE_SYMBOL_interval`, for example `BTCUSDT_1m`. A join defaults the interval to `1m`, validates the payload, joins the room, then emits every cached update for that room to the new client. Each accepted internal update is cached and broadcast to the matching room.
+
+REST CORS accepts the configured `FRONTEND_URL`. Socket.IO accepts `FRONTEND_URL`, `BACKEND_URL`, or requests without an `Origin` header. Credentials are allowed, but the backend currently has no authentication or authorization.
+
+## Recent Realtime Cache
+
+`RecentCandlesCacheService` stores at most 500 candle timestamps per room:
+
+- updates are normalized and validated before insertion;
+- the key within a room is ISO timestamp;
+- entries are kept in ascending timestamp order;
+- an existing final entry is not replaced in the cache by a later non-final entry;
+- REST merge lets a cache entry replace the same historical timestamp; and
+- the final REST result is sorted and trimmed to `limit`.
+
+The cache closes the normal interval between Kafka publication and QuestDB WAL visibility and gives new room members a recent tail. It is memory-only, process-local, and empty after a backend restart. The gateway broadcasts the incoming event even if cache finality rules reject that event as an overwrite.
+
+## QuestDB Connection Behavior
+
+`DatabaseService` creates a `pg.Pool` during module initialization and probes it in the background. Failed queries or pool errors mark QuestDB unavailable and start a five-second reconnect loop. Successful probes or queries mark it available again. Pool shutdown is tied to NestJS shutdown hooks.
+
+Historical requests fail normally if QuestDB is unavailable; the cache is a merge source, not a standalone REST fallback.
+
+## Backend Design Decisions
+
+- **Separate read and write ownership.** The backend never writes `market_candles`; this prevents browser traffic from becoming part of canonical ingestion. The Python pipeline remains the single live writer.
+- **Internal event boundary.** Kafka parsing emits `candle.update` instead of calling the gateway directly. This keeps transport consumption separate from Socket.IO delivery, at the cost of another in-process contract.
+- **Recent cache at the API edge.** Merging the Kafka tail into REST avoids waiting for QuestDB WAL application. The trade-off is process-local state that does not scale across replicas.
+- **Allowlisted SQL intervals.** QuestDB requires the interval in `SAMPLE BY`; validation occurs before interpolation. Symbols and timestamps remain query parameters.
+
+Broader rationale and alternatives are in [Architecture Decisions and Trade-offs](../docs/architecture.md#architecture-decisions-and-trade-offs).
+
+## Environment Variables
+
+Create `.env` from `.env.example`. Exact local values are maintained in the [setup guide](../docs/setup.md#backendenv).
+
+| Variable | Use |
 | --- | --- |
-| `npm run start` | Start once. |
-| `npm run start:dev` | Start in watch mode. |
-| `npm run start:debug` | Start in debug watch mode. |
-| `npm run build` | Compile into `dist/`. |
-| `npm run start:prod` | Run `dist/main`. |
-| `npm run test` | Run unit tests. |
-| `npm run test:e2e` | Run the e2e test. |
-| `npm run test:cov` | Run tests with coverage. |
-| `npm run lint` | Run ESLint with `--fix`; it may edit source files. |
-| `npm run format` | Run Prettier for `src/` and `test/`. |
+| `QUESTDB_HOST`, `QUESTDB_PORT`, `QUESTDB_USER`, `QUESTDB_PASSWORD`, `QUESTDB_DB_NAME` | QuestDB PostgreSQL wire connection |
+| `QUESTDB_POOL_MAX` | Maximum `pg.Pool` connections |
+| `QUESTDB_POOL_TIMEOUT` | Connection timeout in milliseconds |
+| `QUESTDB_POOL_IDLE_TIMEOUT` | Idle connection timeout in milliseconds |
+| `KAFKA_BROKER` | Comma-separated Kafka brokers |
+| `KAFKA_TOPIC_KLINE_STREAM` | Processor kline topic |
+| `KAFKA_CLIENT_ID` | KafkaJS client identifier |
+| `KAFKA_GROUP_ID` | Backend consumer group |
+| `PORT` | HTTP and Socket.IO listener port |
+| `FRONTEND_URL` | Allowed browser origin |
+| `BACKEND_URL` | Logged public backend URL and allowed Socket.IO origin |
 
-## Architecture boundaries
+The source does not define a configuration schema or startup validation for these variables. Empty or malformed values can leave a dependency retrying or prevent the listener from starting.
 
-- Do not ingest Binance data in the backend.
-- Do not write candles directly to QuestDB from the backend.
-- Do not expose Kafka or QuestDB to browsers.
-- Future AI services should use dedicated Kafka or QuestDB contracts rather than sit in the `/candles` or Socket.IO request path.
+## Development Commands
+
+```bash
+npm ci
+npm run start:dev
+npm run build
+npm test
+npm run test:e2e
+npm run test:cov
+```
+
+Other scripts:
+
+| Command | Purpose | Note |
+| --- | --- | --- |
+| `npm start` | Start NestJS once | Development TypeScript entrypoint |
+| `npm run start:debug` | Watch with Node inspector | Local debugging |
+| `npm run start:prod` | Run `dist/main` | Requires `npm run build` first |
+| `npm run test:watch` | Jest watch mode | Unit specs under `src/` |
+| `npm run lint` | ESLint | Includes `--fix` and can modify source files |
+| `npm run format` | Prettier | Writes matching source and test files |
+
+## Test Coverage Status
+
+The committed backend tests currently verify:
+
+- `AppController` returns the root string;
+- `/health` reports healthy dependency state and throws while a dependency is unavailable;
+- database, Kafka, candle service, controller, and gateway providers can be constructed with mocks; and
+- the e2e suite starts a Nest application with mocked database/Kafka providers and checks `GET /`.
+
+They do **not** exercise a real Kafka broker, QuestDB, historical SQL results, cache merge/finality behavior, Socket.IO room delivery, reconnects, DTO edge cases, or the full pipeline-to-browser path. Treat `npm run test:e2e` as an application wiring check, not an infrastructure integration test.
+
+## Current Backend Limitations
+
+- No authentication, authorization, rate limiting, or transport-security configuration.
+- Process-local cache and Socket.IO rooms prevent correct same-group horizontal scaling without a shared fan-out design.
+- Invalid Kafka messages are logged and skipped; there is no dead-letter stream.
+- The history query uses a bounded heuristic window and can return fewer rows than requested for sparse data.
+- Cache contents are not persisted or restored after restart.
+- Tests provide limited behavioral coverage and no real dependency integration.

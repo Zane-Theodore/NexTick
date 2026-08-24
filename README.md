@@ -1,58 +1,81 @@
 # NexTick
 
-NexTick is a real-time cryptocurrency market-data collection, processing, and charting system. It receives raw Binance trades, creates OHLCV candles, stores closed `1m` candles in QuestDB, and serves historical and real-time data to a chart interface.
+<p align="center">
+  <img src="frontend/public/logo.png" alt="NexTick logo" width="96">
+</p>
 
-NexTick is for market data and charting only. It is not a trading bot and does not provide financial advice.
+NexTick is a realtime cryptocurrency market-data pipeline and charting system. It ingests Binance trades, builds OHLCV candles, persists canonical one-minute history, and delivers historical and live data to a browser chart.
 
-## Components and data flow
+NexTick is not a trading bot: it does not place orders, manage portfolios, or provide financial advice.
+
+## Preview
+
+A current application screenshot is not committed to this repository. The UI is a dark, multi-pane candlestick chart with volume, configurable indicators, symbol and interval controls, OHLCV details, and visible-range high/low labels.
+
+<!-- Add a screenshot captured from the current UI here when one is available. -->
+
+## Key Features
+
+- Binance combined `@trade` stream ingestion for configured symbols.
+- OHLCV aggregation for 15 configured intervals, with open updates and final candles.
+- Kafka boundaries between ingestion, candle processing, and browser delivery.
+- Startup reconciliation from Binance REST data, with a deterministic backfill/realtime cutover.
+- Final `1m` candle persistence in a QuestDB WAL/dedup table.
+- Historical aggregation through `GET /candles` and live delivery through Socket.IO rooms.
+- A bounded backend cache that bridges recent Kafka updates into REST responses and new Socket.IO subscriptions.
+- Client-side EMA, MA, volume MA, RSI, and MACD indicators with session-scoped preferences.
+- Persisted processor state and retry queues for restart recovery.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  B[Binance combined @trade streams] --> P[Python producer]
-  P --> T1[(Kafka: market-trades)]
-  T1 --> C[Python candle processor]
-  C --> Q[(QuestDB: market_candles)]
-  C --> T2[(Kafka: kline-stream)]
-  Q --> A[NestJS API]
-  T2 --> A
-  A --> R[REST /candles]
-  A --> S[Socket.IO kline_update]
-  R --> F[React chart]
-  S --> F
+  Binance["Binance trades"] --> Producer["Python producer"]
+  Producer --> Trades[("Kafka: market-trades")]
+  Trades --> Processor["Python candle processor"]
+  Backfill["Startup backfill"] --> QuestDB[("QuestDB: final 1m candles")]
+  Backfill --> Cutover["Cutover state"]
+  Cutover --> Processor
+  Processor --> QuestDB
+  Processor --> Klines[("Kafka: kline-stream")]
+  QuestDB --> Backend["NestJS backend"]
+  Klines --> Backend
+  Backend -->|"REST history"| Frontend["React chart"]
+  Backend -->|"Socket.IO updates"| Frontend
 ```
 
-| Component | Responsibility |
+Docker Compose runs Kafka, Kafka UI, QuestDB, and the Python services. The NestJS backend and React frontend run as separate local processes. See [System Architecture](docs/architecture.md) for contracts, guarantees, failure behavior, and design trade-offs.
+
+## Tech Stack
+
+| Layer | Primary technologies |
 | --- | --- |
-| `data_pipeline/` | Reads Binance trades, publishes Kafka messages, creates candles, runs startup backfill, and writes QuestDB. |
-| `backend/` | NestJS API that reads QuestDB history, consumes Kafka real-time updates, and exposes Socket.IO. |
-| `frontend/` | React application that renders charts and communicates only with the backend. |
-| Docker Compose | Runs Kafka, Kafka UI, QuestDB, and the three Python services. |
+| Frontend | React 19, TypeScript 6, Vite 8, Tailwind CSS 4 |
+| Charting | Lightweight Charts 5, client-side indicator calculations |
+| Backend | NestJS 11, KafkaJS 2, `pg` 8, Swagger, Socket.IO |
+| Data pipeline | Python 3.10, `kafka-python` 2.0, `psycopg2` 2.9, `websocket-client` 1.6 |
+| Event streaming | Confluent Kafka 7.4 image, two three-partition topics |
+| Database | QuestDB through its PostgreSQL wire protocol |
+| Infrastructure | Docker Compose and named volumes |
+| Testing/tooling | Python `unittest`, Jest 30, ESLint 10, TypeScript build checks |
 
-### Startup workflow
+Dependency ranges are declared in the component package files; lockfiles contain the resolved Node dependency versions. The QuestDB and Kafka UI images currently use the unpinned `latest` tag.
 
-1. `kafka-setup` creates the `market-trades` and `kline-stream` topics.
-2. `data-producer` connects to Binance and continuously writes raw trades to `market-trades`.
-3. `data-backfill` runs once. It is enabled by default, chooses a UTC cutover from Binance time, fills missing `1m` candles up to that cutover, and saves shared state.
-4. `data-processor` starts only after backfill completes. It consumes buffered Kafka trades, ignores candles before the backfill cutover, and creates real-time candles.
-5. The processor publishes both open and final candles to `kline-stream`; only final `1m` candles are written to `market_candles`.
-6. The backend keeps a recent real-time tail in memory, serves history over REST, and emits room-scoped Socket.IO messages in the form `SYMBOL_interval`.
+## Engineering Highlights
 
-This cutover ensures that each minute belongs to either backfill or the processor, never both.
+**Deterministic startup handoff.** The producer can buffer trades while the one-shot backfill reconciles closed Binance `1m` candles. Backfill records an exclusive cutover; the processor rejects trades, recovered candles, and retry entries before that boundary.
 
-## Requirements
+**Explicit ordering boundaries.** Raw trades use `symbol` as their Kafka key, and candle updates use `symbol_interval`. This preserves Kafka partition order for a symbol or series without claiming global ordering across symbols.
 
-- Docker Desktop or Docker Engine with Docker Compose
-- Node.js and npm for the backend and frontend
-- Python 3.10+ only when running the pipeline outside Docker
-- Network access to Binance
+**Replay-tolerant processing.** Processor state is written before consumer offsets are committed. Replayed trade IDs are filtered, failed Kafka and QuestDB side effects enter persisted retry maps, and QuestDB upserts repeated candle keys. These mechanisms reduce replay effects, but they are not an exactly-once transaction.
 
-## Run locally
+**One historical source of truth.** Only final `1m` candles are durable. The backend derives larger historical intervals with QuestDB time-bucket queries while the processor emits configured higher-interval updates for the live chart.
 
-The repository has no root `package.json`. Run npm commands from `backend/` or `frontend/`.
+**History/live convergence.** The backend merges its recent in-memory Kafka tail into REST history. The frontend merges candles by timestamp, performs a full series resync for out-of-order inserts, and makes bounded history refetches when it detects a recent gap.
 
-### 1. Create environment files
+## Quick Start
 
-From the repository root in PowerShell:
+Prerequisites and complete environment values are in [Local Setup and Operations](docs/setup.md).
 
 ```powershell
 Copy-Item data_pipeline\.env.example data_pipeline\.env
@@ -60,165 +83,60 @@ Copy-Item backend\.env.example backend\.env
 Copy-Item frontend\.env.example frontend\.env
 ```
 
-Fill `backend/.env` and `frontend/.env` with local values; both example files are intentionally blank:
-
-```env
-# backend/.env
-QUESTDB_HOST=localhost
-QUESTDB_PORT=8812
-QUESTDB_USER=admin
-QUESTDB_PASSWORD=quest
-QUESTDB_DB_NAME=qdb
-QUESTDB_POOL_MAX=10
-QUESTDB_POOL_TIMEOUT=5000
-QUESTDB_POOL_IDLE_TIMEOUT=30000
-KAFKA_BROKER=localhost:9092
-KAFKA_TOPIC_KLINE_STREAM=kline-stream
-KAFKA_CLIENT_ID=nextick-backend
-KAFKA_GROUP_ID=nextick-backend-group
-PORT=3000
-FRONTEND_URL=http://localhost:5173
-BACKEND_URL=http://localhost:3000
-```
-
-```env
-# frontend/.env
-VITE_API_URL=http://localhost:3000
-VITE_API_HEALTH_URL=http://localhost:3000/health
-VITE_SOCKET_URL=http://localhost:3000
-VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
-VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
-```
-
-`data_pipeline/.env.example` already includes local defaults. Keep `TRADING_SYMBOLS`, `CANDLE_INTERVALS`, and Kafka topic names non-empty. Inside containers, Compose overrides `KAFKA_BROKER` to `kafka:29092` and `QUESTDB_HOST` to `questdb`.
-
-### 2. Start infrastructure and the pipeline
+Fill the blank backend and frontend files as documented, then start the pipeline and infrastructure:
 
 ```bash
 docker compose up -d kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
 ```
 
-Compose builds the image automatically when no pipeline image exists. Add
-`--build` only to force a rebuild after changing `Dockerfile`,
-`requirements.txt`, or files under `data_pipeline/`:
-
-```bash
-docker compose up -d --build kafka kafka-ui kafka-setup questdb data-producer data-backfill data-processor
-```
-
-Monitor startup, especially backfill:
-
-```bash
-docker compose ps
-docker compose logs -f kafka-setup data-producer data-backfill data-processor
-```
-
-Set `STARTUP_RECONCILE_ENABLED=false` in `data_pipeline/.env` only when intentionally skipping startup backfill. With the default `STARTUP_RECONCILE_REQUIRED=true`, the processor will not start if backfill exhausts its configured retries.
-
-Startup backfill waits for the Binance minute that was open at startup to close, which can take up to one minute. `STARTUP_RECONCILE_CLOSE_GRACE_SECONDS=2` keeps only a short post-boundary safety delay; increase it if a Binance endpoint needs more time to expose closed candles.
-
-### 3. Start the backend
+Run the application processes in two terminals:
 
 ```bash
 cd backend
-npm install
+npm ci
 npm run start:dev
 ```
 
-The backend starts even if QuestDB or Kafka is temporarily unavailable. It
-retries both dependencies in the background every five seconds; `/health`
-returns `503` until both are connected, while the Node.js process remains
-running. Invalid backend environment values still need to be corrected before
-the affected dependency can become available.
-
-### 4. Start the frontend
-
-In a separate terminal:
-
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`. On a first run, data may appear only after startup backfill and the processor have produced valid data.
+Open `http://localhost:5173`. Startup backfill intentionally waits for the Binance minute that was open at startup to close, so first-run data is not immediate.
 
-## Local URLs
+## Documentation
 
-| Service | Address |
+| Document | Scope |
 | --- | --- |
-| Frontend | `http://localhost:5173` |
-| Backend | `http://localhost:3000` |
-| Health | `http://localhost:3000/health` |
-| Swagger | `http://localhost:3000/api/docs` |
-| Kafka UI | `http://localhost:8080` |
-| QuestDB Console | `http://localhost:9000` |
+| [Architecture](docs/architecture.md) | Authoritative system design, contracts, reliability semantics, decisions, and limitations |
+| [Setup and operations](docs/setup.md) | Environment configuration, startup, verification, repair, migration, troubleshooting, and reset procedures |
+| [Backend](backend/README.md) | NestJS modules, REST, Kafka consumer, cache, Socket.IO, and tests |
+| [Frontend](frontend/README.md) | React chart architecture, data synchronization, indicators, preferences, and build status |
+| [Data pipeline](data_pipeline/README.md) | Producer, aggregation, persistence, recovery, reconciliation, and tests |
 
-## Primary data contracts
-
-- Raw trade (`market-trades`): `symbol`, `trade_id`, `timestamp` (Unix milliseconds), `event_time`, `price`, `quantity`.
-- Kline (`kline-stream`): UTC ISO 8601 `timestamp`, `symbol`, `interval`, `open`, `high`, `low`, `close`, `volume`, `is_final`.
-- REST: `GET /candles?symbol=BTCUSDT&interval=1m&limit=100`; `limit` ranges from 1 to 2000.
-- Socket.IO: clients send `join_kline_room`/`leave_kline_room` with `{ symbol, interval }`; the server emits `kline_update` to rooms such as `BTCUSDT_1m`.
-
-Supported intervals throughout the system:
-
-```text
-1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
-```
-
-When adding a symbol, interval, topic, or changing a payload, update the pipeline, backend, frontend, and their corresponding `.env` files together.
-
-## Verification and operation
+## Verification
 
 ```bash
-# backend
-cd backend
-npm run build
-npm run test
-npm run test:e2e
-
-# frontend
-cd ../frontend
-npm run build
-npm run lint
-
-# pipeline, from the repository root
-python -m unittest data_pipeline.tests.test_startup_backfill
-docker compose logs -f data-producer data-backfill data-processor
+cd backend && npm test && npm run build
+cd ../frontend && npm run lint && npm run build
+cd .. && python -m unittest data_pipeline.tests.test_startup_backfill
 ```
 
-`backend/npm run lint` runs ESLint with `--fix`, so it may modify source files. Review its changes before committing.
+The backend lint script runs ESLint with `--fix`; use it deliberately because it can modify TypeScript files. The full command matrix and runtime checks are in the [setup guide](docs/setup.md#verification).
 
-To inspect stored candles, use QuestDB Console or run:
+## Current Limitations
 
-```sql
-SELECT *
-FROM market_candles
-WHERE symbol = 'BTCUSDT'
-ORDER BY timestamp DESC
-LIMIT 20;
-```
+- The Compose topology is local and single-node: Kafka uses plaintext listeners and replication factor `1`; QuestDB is one instance.
+- Binance WebSocket ingestion and Socket.IO delivery are best-effort. There is no end-to-end exactly-once guarantee or replayable browser session.
+- Startup reconciliation is capped at eight hours per symbol and starts after the newest valid watermark; it does not scan older history for gaps.
+- The backend cache and Socket.IO rooms are process-local. Multiple backend replicas would need a shared fan-out/cache strategy and Socket.IO scaling configuration.
+- The processor's local aggregation state is not designed for consumer-group rebalances across multiple processor replicas.
+- There is no authentication, authorization, rate limiting, TLS termination, metrics backend, alerting, or documented production deployment.
+- Backend tests are mostly module-construction smoke tests plus health behavior; pipeline tests focus on startup cutover logic. The frontend has no automated test command.
+- QuestDB and Kafka UI use `latest` image tags, which makes rebuilds less reproducible.
+- The repository has no committed application screenshot, hosted demo, benchmark results, or project license.
 
-QuestDB uses the `questdb_data` named volume, Kafka uses `kafka_data`, and backfill/processor state uses `pipeline_state`. `docker compose down` preserves these volumes. Do not use a Windows bind mount for `/var/lib/questdb`.
+## Future Work
 
-## Repair stored candles
-
-The command below uses Binance REST data to validate and replace a closed `1m` candle window. Stop the live writer first because repair can create and swap temporary tables:
-
-```bash
-docker compose stop data-processor
-python -m data_pipeline.backfill.reconciler --dry-run
-python -m data_pipeline.backfill.reconciler
-docker compose start data-processor
-```
-
-See the [pipeline README](data_pipeline/README.md) for repair ranges, backups, and options.
-
-## Module documentation
-
-- [Python pipeline](data_pipeline/README.md)
-- [NestJS backend](backend/README.md)
-- [React frontend](frontend/README.md)
-- [Detailed architecture](docs/architecture.md)
-- [Extended setup guide](docs/setup.md)
+The current boundaries support a focused next set of improvements: pin infrastructure images, add Kafka/QuestDB/Socket.IO integration tests, make room subscriptions reconnect-safe, add shared realtime fan-out for backend replicas, extend reconciliation beyond the trailing eight-hour window, and add production-oriented authentication, transport security, metrics, and deployment guidance.
