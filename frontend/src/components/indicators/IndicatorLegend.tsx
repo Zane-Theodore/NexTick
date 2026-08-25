@@ -158,13 +158,13 @@ function PaneIndicatorLegend({
 }: PaneIndicatorLegendProps) {
   return (
     <div
-      className="absolute left-0 right-20 z-10 flex items-start"
+      className="pointer-events-none absolute left-0 right-20 z-10 flex items-start"
       style={{ top, containerType: 'inline-size' }}
     >
       <button
         type="button"
         onClick={onToggleOpen}
-        className="h-7 w-7 shrink-0 border border-transparent rounded-md text-[#d1d4dc] hover:border-[#6b7280] hover:text-white flex items-center justify-center transition-colors"
+        className="pointer-events-auto h-7 w-7 shrink-0 border border-transparent rounded-md text-[#d1d4dc] hover:border-[#6b7280] hover:text-white flex items-center justify-center transition-colors"
         title={isOpen ? 'Hide indicators' : 'Show indicators'}
       >
         <svg
@@ -494,7 +494,7 @@ function IndicatorLegendRow({
   onDismiss,
 }: IndicatorLegendRowProps) {
   return (
-    <div className="group flex min-h-6 w-fit max-w-full items-center rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
+    <div className="group pointer-events-auto flex min-h-6 w-fit max-w-full items-center rounded-md border border-transparent px-1 transition-colors duration-200 hover:border-[#6b7280]">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4">
         {group === 'macd'
           ? <MacdLegendValues settings={settings} values={values} />
