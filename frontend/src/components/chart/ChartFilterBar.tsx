@@ -127,13 +127,6 @@ export default function ChartFilterBar({
         >
           <LineChartIcon />
         </button>
-
-        <div className="ml-auto flex items-center gap-2 text-sm text-[#d1d4dc]">
-          <span className="h-2 w-2 rounded-full bg-[#26a69a] shadow-[0_0_8px_rgba(38,166,154,0.8)]" />
-          <span className="font-semibold">{symbol}</span>
-          <span className="text-[#5b6472]">/</span>
-          <span className="text-[#9099aa]">{formatIntervalLabel(interval)}</span>
-        </div>
       </div>
     </div>
   );
