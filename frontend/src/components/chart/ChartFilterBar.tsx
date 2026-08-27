@@ -99,7 +99,7 @@ export default function ChartFilterBar({
   onOpenIndicatorSettings,
 }: ChartFilterBarProps) {
   return (
-    <div className="shrink-0 border-b border-[#3f4654] bg-[#0f1117] px-4 py-3">
+    <div className="shrink-0 border-b border-[#3f4654] bg-[#0b0f16] px-4 py-3">
       <div className="flex flex-wrap items-center gap-3">
         <FilterDropdown
           label="Symbol"

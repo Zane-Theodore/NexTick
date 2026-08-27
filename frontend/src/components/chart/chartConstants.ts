@@ -30,7 +30,7 @@ export const VOLUME_CHART_DEFAULT_STRETCH_FACTOR = 15;
 export const CHART_UP_COLOR = '#26a69a';
 export const CHART_DOWN_COLOR = '#ef5350';
 export const CHART_DEFAULT_BAR_SPACING = 12;
-export const CHART_MIN_BAR_SPACING = 10;
+export const CHART_MIN_BAR_SPACING = 4;
 export const CHART_MAX_BAR_SPACING = 80;
 
 export const SUPPORTED_SYMBOLS = parseEnvList(import.meta.env.VITE_TRADING_SYMBOLS, ['BTCUSDT']);

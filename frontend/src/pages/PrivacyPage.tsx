@@ -6,7 +6,7 @@ export default function PrivacyPage() {
   return (
     <LegalPageLayout
       title="Privacy Policy"
-      updatedAt="August 18, 2026"
+      updatedAt="August 27, 2026"
       intro="This Policy explains what data NexTick processes when you use its cryptocurrency market-data visualization and charting features. It describes the current product reflected in the application code."
     >
       <section>
@@ -92,10 +92,10 @@ export default function PrivacyPage() {
         <p>
           Candles, trades, prices, volumes, symbols, intervals, timestamps, and
           calculated indicators are public market information rather than user
-          account data. NexTick receives Binance market data on its server-side
-          pipeline; your browser does not connect directly to Binance through the
-          current frontend. Market data may be stored in QuestDB and processed
-          through Kafka to provide historical and realtime charts.
+          account data. Trades, candles, and Order Book depth pass through
+          NexTick&apos;s server-side pipeline. Your browser does not connect directly
+          to Binance. Market data may be stored in QuestDB and processed through
+          Kafka to provide historical and realtime charts.
         </p>
       </section>
 

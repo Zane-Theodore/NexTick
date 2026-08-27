@@ -14,7 +14,12 @@ const COLLAPSED_LEGEND_HEIGHT = 28;
 const OHLCV_LEGEND_TOP = 4;
 const LEGEND_VERTICAL_GAP = 2;
 
-export default function TradingChart() {
+interface TradingChartProps {
+  symbol?: string;
+  onSymbolChange?: (symbol: string) => void;
+}
+
+export default function TradingChart({ symbol: controlledSymbol, onSymbolChange }: TradingChartProps) {
   const [ohlcvLegendHeight, setOhlcvLegendHeight] = useState(COLLAPSED_LEGEND_HEIGHT);
   const chartState = useTradingChartState();
   const {
@@ -27,7 +32,7 @@ export default function TradingChart() {
     latestCandleRef,
     candleHistoryRef,
     isChartReady,
-    symbol,
+    symbol: chartSymbol,
     interval,
     legendData,
     visiblePriceExtrema,
@@ -39,7 +44,7 @@ export default function TradingChart() {
     hiddenIndicatorGroups,
     paneLayouts,
     indicatorSettingsWindow,
-    setSymbol,
+    setSymbol: setChartSymbol,
     setInterval,
     setIsChartReady,
     setLegendData,
@@ -55,6 +60,8 @@ export default function TradingChart() {
     handleOpenIndicatorSettingsWindow,
     handleChartViewSettingsChange,
   } = chartState;
+  const symbol = controlledSymbol ?? chartSymbol;
+  const handleSymbolChange = onSymbolChange ?? setChartSymbol;
 
   useTradingChartSetup({
     chartContainerRef,
@@ -94,13 +101,13 @@ export default function TradingChart() {
   );
 
   return (
-    <div className="h-full flex flex-col bg-[#0f1117] overflow-hidden">
+    <div className="h-full flex flex-col bg-[#0b0f16] overflow-hidden">
       <ChartFilterBar
         symbol={symbol}
         interval={interval}
         supportedSymbols={SUPPORTED_SYMBOLS}
         supportedIntervals={SUPPORTED_INTERVALS}
-        onSymbolChange={setSymbol}
+        onSymbolChange={handleSymbolChange}
         onIntervalChange={setInterval}
         onOpenIndicatorSettings={() => handleOpenIndicatorSettingsWindow(null)}
       />

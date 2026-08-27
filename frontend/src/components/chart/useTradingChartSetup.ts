@@ -113,6 +113,7 @@ export function useTradingChartSetup({
       rightPriceScale: {
         autoScale: true,
         alignLabels: true,
+        entireTextOnly: true,
         borderVisible: true,
         borderColor: '#6b7280',
         scaleMargins: {
@@ -183,6 +184,7 @@ export function useTradingChartSetup({
     chart.priceScale('right', 1).applyOptions({
       autoScale: true,
       alignLabels: true,
+      entireTextOnly: true,
       borderVisible: true,
       borderColor: '#6b7280',
       scaleMargins: {

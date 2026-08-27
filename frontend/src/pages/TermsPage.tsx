@@ -6,7 +6,7 @@ export default function TermsPage() {
   return (
     <LegalPageLayout
       title="Terms of Service"
-      updatedAt="August 18, 2026"
+      updatedAt="August 27, 2026"
       intro="These Terms govern access to NexTick, a cryptocurrency market-data visualization and charting service. By using NexTick, you agree to these Terms. If you do not agree, do not use the service."
     >
       <section>
@@ -14,9 +14,9 @@ export default function TermsPage() {
         <p>
           NexTick displays historical and realtime cryptocurrency OHLCV candles,
           chart tools, visible price extrema, and configurable technical
-          indicators. The service currently obtains public Binance trade and
-          candle data through a server-side data pipeline, aggregates and stores
-          that data, and delivers it to the browser through REST and Socket.IO.
+          indicators. Public Binance trade, candle, and Order Book data pass
+          through a server-side pipeline and reach the browser through REST and
+          Socket.IO.
         </p>
         <p className="mt-3">
           NexTick does not currently provide accounts, authentication, paid

@@ -69,17 +69,19 @@ export default function OhlcvTooltip({ legendData, onHeightChange }: OhlcvToolti
           }
         }}
       >
-        <div className="pointer-events-auto flex min-h-7 w-fit max-w-[calc(100cqw-28px)] flex-wrap items-center gap-x-2 rounded-md border border-transparent px-1 font-mono text-xs font-medium leading-6 text-[#d1d4dc] transition-colors hover:border-[#6b7280] sm:text-sm">
-          <span className="whitespace-nowrap font-semibold" style={{ color: candleColor }}>
-            {formatOhlcvLegendTime(legendData.time)}
-          </span>
-          <OhlcvLegendValue label="Open" value={formatChartValue(legendData.open)} color={candleColor} />
-          <OhlcvLegendValue label="High" value={formatChartValue(legendData.high)} color={candleColor} />
-          <OhlcvLegendValue label="Low" value={formatChartValue(legendData.low)} color={candleColor} />
-          <OhlcvLegendValue label="Close" value={formatChartValue(legendData.close)} color={candleColor} />
-          <OhlcvLegendValue label="Volume" value={formatChartValue(legendData.volume)} color={candleColor} />
-          <OhlcvLegendValue label="CHANGE" value={formatPercent(changePercent)} color={candleColor} />
-          <OhlcvLegendValue label="Range" value={formatPercent(rangePercent)} color={candleColor} />
+        <div className="w-[min(1100px,calc(100cqw-28px))]">
+          <div className="pointer-events-auto flex min-h-7 w-fit max-w-full flex-wrap items-center gap-x-2 rounded-md border border-transparent px-1 font-mono text-xs font-medium leading-6 text-[#d1d4dc] transition-colors hover:border-[#6b7280] sm:text-sm">
+            <span className="whitespace-nowrap font-semibold" style={{ color: candleColor }}>
+              {formatOhlcvLegendTime(legendData.time)}
+            </span>
+            <OhlcvLegendValue label="Open" value={formatChartValue(legendData.open)} color={candleColor} />
+            <OhlcvLegendValue label="High" value={formatChartValue(legendData.high)} color={candleColor} />
+            <OhlcvLegendValue label="Low" value={formatChartValue(legendData.low)} color={candleColor} />
+            <OhlcvLegendValue label="Close" value={formatChartValue(legendData.close)} color={candleColor} />
+            <OhlcvLegendValue label="Volume" value={formatChartValue(legendData.volume)} color={candleColor} />
+            <OhlcvLegendValue label="CHANGE" value={formatPercent(changePercent)} color={candleColor} />
+            <OhlcvLegendValue label="Range" value={formatPercent(rangePercent)} color={candleColor} />
+          </div>
         </div>
       </div>
     </div>

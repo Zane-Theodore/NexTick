@@ -1,5 +1,5 @@
 import MainLayout from './components/layout/MainLayout';
-import TradingChart from './components/chart/TradingChart';
+import TradingWorkspace from './components/trading/TradingWorkspace';
 import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
 
@@ -9,7 +9,7 @@ function App() {
     ? <TermsPage />
     : pathname === '/privacy'
       ? <PrivacyPage />
-      : <TradingChart />;
+      : <TradingWorkspace />;
 
   return (
     <MainLayout>
