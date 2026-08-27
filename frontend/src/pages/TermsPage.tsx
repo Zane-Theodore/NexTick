@@ -13,10 +13,10 @@ export default function TermsPage() {
         <h2 className="mb-2 text-xl font-semibold text-blue-400">1. What NexTick Provides</h2>
         <p>
           NexTick displays historical and realtime cryptocurrency OHLCV candles,
-          chart tools, visible price extrema, and configurable technical
-          indicators. Public Binance trade, candle, and Order Book data pass
-          through a server-side pipeline and reach the browser through REST and
-          Socket.IO.
+          Market Trades, a 20-level partial Order Book, chart tools, visible
+          price extrema, and configurable technical indicators. Public Binance
+          trade, candle, and depth data pass through a server-side pipeline and
+          reach the browser through REST and Socket.IO.
         </p>
         <p className="mt-3">
           NexTick does not currently provide accounts, authentication, paid
@@ -57,10 +57,12 @@ export default function TermsPage() {
           Source data may be delayed, incomplete, duplicated, inaccurate,
           corrected, interrupted, or unavailable. NexTick builds candles from
           public trade streams, performs backfills and reconciliation, derives
-          higher timeframes, and calculates indicators in the application.
-          Consequently, NexTick values can differ from an exchange interface or
-          another data provider and may change when new or corrected data is
-          processed.
+          higher timeframes, and calculates indicators in the application. The
+          Order Book is a live partial-depth view of up to 20 bid and ask levels;
+          it is not a complete, durable, or auditable reconstruction of the
+          exchange order book. Consequently, NexTick values can differ from an
+          exchange interface or another data provider and may change when new or
+          corrected data is processed.
         </p>
         <p className="mt-3">
           NexTick does not guarantee the accuracy, completeness, sequence,

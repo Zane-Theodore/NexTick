@@ -38,6 +38,12 @@ export default function PrivacyPage() {
             They are used to restore the chart during the same browser session.
           </li>
           <li>
+            <span className="font-medium text-[#d1d4dc]">Local market-data cache:</span>{' '}
+            recent public Market Trades, the latest partial Order Book snapshot,
+            and the last displayed trade price/direction may be saved in your
+            browser&apos;s local storage for a faster initial display after reload.
+          </li>
+          <li>
             <span className="font-medium text-[#d1d4dc]">Connection and log data:</span>{' '}
             the backend logs candle-query metadata such as symbol, interval, and
             limit, along with timestamps, errors, Socket.IO connection IDs, and
@@ -66,6 +72,17 @@ export default function PrivacyPage() {
           controls.
         </p>
         <p className="mt-3">
+          NexTick also writes symbol-specific public market-data cache entries to{' '}
+          <code className="rounded bg-black/25 px-1.5 py-0.5 text-sm text-[#e5e7eb]">localStorage</code>{' '}
+          using keys prefixed with{' '}
+          <code className="rounded bg-black/25 px-1.5 py-0.5 text-sm text-[#e5e7eb]">nextick:market-trades:v2:</code>{' '}
+          and{' '}
+          <code className="rounded bg-black/25 px-1.5 py-0.5 text-sm text-[#e5e7eb]">nextick:order-book:v2:</code>.
+          The application accepts these cached values only when they are no more
+          than five minutes old. Expired entries may remain in local storage
+          until overwritten or removed by clearing site data.
+        </p>
+        <p className="mt-3">
           The current application does not set or read analytics, advertising,
           authentication, or preference cookies. Its Socket.IO client is
           configured to allow credentials, so cookies already associated with
@@ -80,7 +97,7 @@ export default function PrivacyPage() {
         <p>NexTick processes the data described above to:</p>
         <ul className="mt-2 list-disc space-y-1 pl-6">
           <li>return requested historical candles and deliver realtime updates;</li>
-          <li>render the chart and restore your session-level preferences;</li>
+          <li>render the chart, restore session-level preferences, and warm the public Market Trades and Order Book panels from a short-lived browser cache;</li>
           <li>validate requests, manage realtime subscriptions, and prevent abuse;</li>
           <li>diagnose failures, reconcile missing market data, and maintain reliability; and</li>
           <li>protect the service, its infrastructure, users, and legal rights.</li>
@@ -123,10 +140,13 @@ export default function PrivacyPage() {
         <p>
           Chart preferences remain in session storage until the browser session
           ends, you clear site data, or the preference data is reset or found to
-          be invalid. Server and infrastructure logs are retained according to
-          the configuration and operational needs of the deployment. The current
-          application code does not define a universal log-retention period.
-          Public market candles may be retained to provide historical chart data.
+          be invalid. Public Market Trades and Order Book cache entries are
+          treated as stale after five minutes, but may remain physically stored
+          in local storage until overwritten or site data is cleared. Server and
+          infrastructure logs are retained according to the configuration and
+          operational needs of the deployment. The current application code does
+          not define a universal log-retention period. Public market candles may
+          be retained to provide historical chart data.
         </p>
       </section>
 
