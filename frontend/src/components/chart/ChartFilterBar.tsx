@@ -33,20 +33,20 @@ function FilterDropdown({ label, value, options, widthClass, onChange, formatOpt
         }
       }}
     >
-      <span className="shrink-0 border-r border-[#3f4654] px-3 text-xs font-semibold uppercase tracking-wide text-[#9099aa]">
+      <span className="flex self-stretch shrink-0 items-center border-r border-[#3f4654] px-2.5 text-[11px] font-semibold uppercase tracking-wide text-[#9099aa]">
         {label}
       </span>
 
       <button
         type="button"
         onClick={() => setIsOpen((current) => !current)}
-        className={`relative h-10 ${widthClass} bg-[#151a23] py-0 pl-3 pr-8 text-left text-sm font-semibold text-[#d1d4dc] outline-none transition-colors hover:text-white focus:text-white`}
+        className={`relative h-8 ${widthClass} bg-[#151a23] py-0 pl-2.5 pr-7 text-left text-xs font-semibold text-[#d1d4dc] outline-none transition-colors hover:text-white focus:text-white`}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
       >
         <span className="block truncate">{selectedLabel}</span>
         <span
-          className={`pointer-events-none absolute right-3 top-1/2 h-2 w-2 -translate-y-1/2 rotate-45 border-b-2 border-r-2 border-[#9099aa] transition-transform duration-200 ${
+          className={`pointer-events-none absolute right-2.5 top-1/2 h-1.5 w-1.5 -translate-y-1/2 rotate-45 border-b border-r border-[#9099aa] transition-transform duration-200 ${
             isOpen ? 'mt-1 rotate-225' : ''
           }`}
         />
@@ -99,13 +99,13 @@ export default function ChartFilterBar({
   onOpenIndicatorSettings,
 }: ChartFilterBarProps) {
   return (
-    <div className="shrink-0 border-b border-[#3f4654] bg-[#0b0f16] px-4 py-3">
-      <div className="flex flex-wrap items-center gap-3">
+    <div className="flex h-12 shrink-0 items-center border-b-2 border-[#3f4654] bg-[#0b0f16] px-4">
+      <div className="flex items-center gap-2.5">
         <FilterDropdown
           label="Symbol"
           value={symbol}
           options={supportedSymbols}
-          widthClass="w-[132px]"
+          widthClass="w-[120px]"
           onChange={onSymbolChange}
         />
 
@@ -113,7 +113,7 @@ export default function ChartFilterBar({
           label="Interval"
           value={interval}
           options={supportedIntervals}
-          widthClass="w-[132px]"
+          widthClass="w-[120px]"
           onChange={onIntervalChange}
           formatOptionLabel={formatIntervalLabel}
         />
@@ -121,7 +121,7 @@ export default function ChartFilterBar({
         <button
           type="button"
           onClick={onOpenIndicatorSettings}
-          className="flex h-10 w-10 items-center justify-center rounded border border-[#3f4654] bg-[#151a23] text-[#9099aa] outline-none transition-colors hover:border-[#6b7280] hover:text-white focus:border-[#6b7280] focus:text-white"
+          className="flex h-8 w-8 items-center justify-center rounded border border-[#3f4654] bg-[#151a23] text-[#9099aa] outline-none transition-colors hover:border-[#6b7280] hover:text-white focus:border-[#6b7280] focus:text-white"
           title="Indicator settings"
           aria-label="Indicator settings"
         >

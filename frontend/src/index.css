@@ -23,8 +23,8 @@ body {
   background: linear-gradient(
     to bottom,
     transparent 0,
-    transparent 3px,
-    #3f4654 3px,
+    transparent 4px,
+    #3f4654 4px,
     #3f4654 6px,
     transparent 6px
   ) !important;

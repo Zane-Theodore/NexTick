@@ -296,11 +296,10 @@ function BookViewIcon({ view }: { view: OrderBookView }) {
   return (
     <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       {[2, 5.5, 9, 12.5].map((y, index) => {
-        const isAsk = view === 'both' ? index < 2 : view === 'asks';
-        const visible = view === 'both' || (view === 'asks' ? index < 3 : index > 0);
+        const isAsk = view === 'asks' || (view === 'both' && index < 2);
 
         return (
-          <g key={y} opacity={visible ? 1 : 0.22}>
+          <g key={y}>
             <rect x="1.5" y={y} width="3" height="1.5" rx="0.5" fill={isAsk ? '#f15b6c' : '#24c28f'} />
             <rect x="5.5" y={y} width={index % 2 === 0 ? 8.5 : 6.5} height="1.5" rx="0.5" fill="currentColor" />
           </g>

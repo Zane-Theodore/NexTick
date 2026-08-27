@@ -24,8 +24,8 @@ export const DEFAULT_INDICATOR_SETTINGS: IndicatorSetting[] = [
   },
 ];
 
-export const MAIN_CHART_DEFAULT_STRETCH_FACTOR = 85;
-export const VOLUME_CHART_DEFAULT_STRETCH_FACTOR = 15;
+export const MAIN_CHART_DEFAULT_STRETCH_FACTOR = 70;
+export const VOLUME_CHART_DEFAULT_STRETCH_FACTOR = 30;
 
 export const CHART_UP_COLOR = '#26a69a';
 export const CHART_DOWN_COLOR = '#ef5350';
