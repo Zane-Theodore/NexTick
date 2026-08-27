@@ -1,8 +1,8 @@
 # NexTick Frontend
 
-The frontend is NexTick's browser client. It loads candle history from the NestJS REST API, receives realtime kline updates through Socket.IO, merges both paths into one ordered in-memory history, and renders an interactive multi-pane chart.
+The frontend is NexTick's browser client. It loads candle history from the NestJS REST API, receives realtime kline, raw-trade, and order-book updates through Socket.IO, and renders a chart, Market Trades, and Order Book workspace.
 
-It does not connect directly to Binance, Kafka, or QuestDB. Backend contracts are described in the [backend guide](../backend/README.md); cross-system guarantees and trade-offs are in [System Architecture](../docs/architecture.md).
+It never connects directly to Kafka, QuestDB, or Binance. The Python pipeline owns exchange ingestion and the NestJS backend owns every browser-facing market-data contract. Backend contracts are described in the [backend guide](../backend/README.md); cross-system guarantees and trade-offs are in [System Architecture](../docs/architecture.md).
 
 ## Technology Stack
 
@@ -21,12 +21,17 @@ It does not connect directly to Binance, Kafka, or QuestDB. Backend contracts ar
 ```mermaid
 flowchart TD
   App["App.tsx"] --> Layout["MainLayout"]
-  App --> Chart["TradingChart"]
+  App --> Workspace["TradingWorkspace"]
+  Workspace --> Chart["TradingChart"]
+  Workspace --> Trades["MarketTrades"]
+  Workspace --> Book["OrderBook"]
   Chart --> State["useTradingChartState"]
   Chart --> Setup["useTradingChartSetup"]
   Chart --> MarketData["useMarketData"]
   MarketData --> Api["services/api.ts"]
   MarketData --> Socket["services/socket.ts"]
+  Trades --> TradesHook["useMarketTrades"] --> Socket
+  Book --> BookHook["useOrderBook"] --> Socket
   MarketData --> Indicators["utils/chartIndicators.ts"]
   State --> Preferences["chartPreferences.ts"]
   Setup --> Library["Lightweight Charts"]
@@ -35,12 +40,16 @@ flowchart TD
 | Path | Responsibility |
 | --- | --- |
 | `src/App.tsx` | Selects chart, `/terms`, or `/privacy` from `window.location.pathname` |
+| `src/components/trading/TradingWorkspace.tsx` | Composes the Order Book, chart, and Market Trades columns around one selected symbol |
 | `src/components/chart/TradingChart.tsx` | Composes controls, chart, overlays, tooltip, and indicator legend |
 | `src/components/chart/useTradingChartState.ts` | Owns selected market, refs, indicator settings, UI state, and preference writes |
 | `src/components/chart/useTradingChartSetup.ts` | Creates chart/series, panes, crosshair behavior, resizing, and visible extrema |
 | `src/hooks/useMarketData.ts` | Coordinates REST history, room lifecycle, realtime merge, gap repair, and indicator synchronization |
 | `src/services/api.ts` | Calls `GET {VITE_API_URL}/candles` |
 | `src/services/socket.ts` | Creates the Socket.IO client and reference-counts room subscriptions |
+| `src/hooks/useMarketTrades.ts` | Merges cached and live backend raw trades for the Market Trades panel |
+| `src/hooks/useOrderBook.ts` | Consumes backend order-book snapshots/updates and raw trades for the last price |
+| `src/utils/marketDataCache.ts` | Validates and stores short-lived public trade/depth display caches in `localStorage` |
 | `src/components/indicators/` | Indicator legend and settings UI |
 | `src/utils/indicators.ts` | EMA, MA, volume MA, RSI, and MACD calculations |
 | `src/utils/formatters.ts` | Candle validation/conversion and localized labels |
@@ -118,8 +127,12 @@ Socket events:
 | `join_kline_room` | Client to server | Sent after valid history loads with `{ symbol, interval }` |
 | `leave_kline_room` | Client to server | Sent during hook cleanup when the local reference count reaches zero |
 | `kline_update` | Server to client | Filtered by current symbol/interval, validated, formatted, and merged |
+| `join_market_trades_room` / `leave_market_trades_room` | Client to server | Maintains the raw-trade subscription for the selected symbol |
+| `market_trades_snapshot` / `market_trade` | Server to client | Supplies cached and live normalized raw trades |
+| `join_order_book_room` / `leave_order_book_room` | Client to server | Maintains the order-book subscription for the selected symbol |
+| `order_book_snapshot` / `order_book_update` | Server to client | Supplies cached and live normalized 20-level depth |
 
-The Socket.IO client enables WebSocket and polling, credentials, automatic connection, and five reconnect attempts with delays from one through five seconds. It does not currently re-emit active room joins on a new `connect` event; after a successful transport reconnect, reload or change the market selection to rejoin.
+The Socket.IO client enables WebSocket and polling, credentials, automatic connection, and five reconnect attempts with delays from one through five seconds. Active kline, Market Trades, and Order Book rooms are rejoined on every successful connection.
 
 ## Chart Rendering
 
@@ -152,7 +165,7 @@ The settings window supports visibility, period values, price source where appli
 
 These indicators are visual calculations, not trading signals or advice.
 
-## Preferences and State Persistence
+## Browser Storage and State Persistence
 
 The browser saves these chart preferences in `sessionStorage` under `nextick:trading-chart:preferences:v1`:
 
@@ -161,9 +174,11 @@ The browser saves these chart preferences in `sessionStorage` under `nextick:tra
 - time-axis bar spacing; and
 - main/volume pane stretch factors.
 
-Loaded data is validated and clamped before use. Invalid JSON removes the stored entry. Storage failures are ignored because preferences are non-critical. `Ctrl+F5` invokes the application reset path and restores current defaults.
+Loaded data is validated and clamped before use. Invalid JSON removes the stored entry. Storage failures are ignored because preferences are non-critical. `Ctrl+F5` invokes the chart-preference reset path and restores current indicator/layout defaults.
 
 `sessionStorage` is scoped to the browser tab/session; it is not durable user-profile storage. Selected symbol and interval are not persisted.
+
+The browser also caches public Market Trades and Order Book display data in `localStorage` under symbol-specific keys prefixed with `nextick:market-trades:v2:` and `nextick:order-book:v2:`. These entries contain recent normalized trades or the latest depth snapshot/last displayed trade. A cached entry is accepted only for five minutes, although an expired value can remain physically present until it is overwritten or site data is cleared. This cache is an optional fast-start view and is not an authoritative market-data store.
 
 ## Frontend Design Decisions
 
@@ -172,6 +187,7 @@ Loaded data is validated and clamped before use. Invalid JSON removes the stored
 - **Incremental tail updates, full out-of-order resync.** `update()` keeps the common path small; `setData()` handles delayed inserts safely while retaining viewport position. Frequent out-of-order events would make this more expensive.
 - **Client-side indicators.** Settings take effect immediately without backend contracts or persisted derived series. Every update recalculates indicator history in the browser.
 - **Session-scoped preferences.** Chart layout survives reloads in one tab without accounts or server storage, but does not follow a user between sessions/devices.
+- **Short-lived public market-data cache.** Recent Market Trades and Order Book values can appear immediately after reload while backend snapshots arrive. `localStorage` is validated and treated as stale after five minutes, but it is browser-local and not a durable or authoritative feed.
 
 The choice of Lightweight Charts and the REST/Socket.IO split is discussed in [Architecture Decisions and Trade-offs](../docs/architecture.md#architecture-decisions-and-trade-offs).
 
@@ -215,7 +231,6 @@ High-value future coverage would include unit tests for merge/finality and indic
 ## Current Frontend Limitations
 
 - No automated test runner or browser test suite.
-- Active Socket.IO rooms are not rejoined after transport reconnection.
 - Initial REST failure leaves the chart empty and prevents room join; there is no initial-load retry loop.
 - Same-timestamp updates do not retain or compare `is_final`.
 - Recent gap repair checks only the last 12 candles and makes four attempts.

@@ -20,6 +20,7 @@ It does not expose REST, Socket.IO, or browser UI. Those boundaries belong to th
 | Path | Responsibility |
 | --- | --- |
 | `producer/binance_producer.py` | Binance combined `@trade`/`@depth20` connection, normalization, Kafka publication, reconnect loop |
+| `producer/trade_normalization.py` | Raw-trade validation and normalized Kafka payload construction |
 | `producer/depth_normalization.py` | Partial-depth validation and normalized order-book payload construction |
 | `processor/candle_aggregator.py` | Per-symbol/per-interval active candles, trade-ID filtering, bucket boundaries, finalization, snapshots |
 | `processor/candle_processor.py` | Raw-trade consumption, kline publication, final `1m` writes, retries, offsets, recovery |
@@ -39,12 +40,15 @@ flowchart LR
   Producer -->|"key: symbol"| Trades[("Kafka raw trades")]
   Producer -->|"key: symbol"| Depth[("Kafka market depth")]
   Trades --> Processor
+  Trades --> Backend["NestJS backend"]
+  Depth --> Backend
   BinanceREST["Binance REST 1m klines"] --> Backfill
   Backfill --> QuestDB[("market_candles")]
   Backfill --> Cutover[("cutover state")]
   Cutover --> Processor
   Processor -->|"final 1m"| QuestDB
   Processor -->|"key: symbol_interval"| Klines[("Kafka klines")]
+  Klines --> Backend
   Processor --> Recovery[("processor state")]
 ```
 
@@ -86,7 +90,7 @@ Topic values come from the environment and are created by `kafka-setup` with thr
 
 Symbol keying keeps one symbol's accepted trades in one Kafka partition. Kline keying does the same for one symbol/interval series. There is no global ordering across partitions. Full JSON examples and consumer boundaries are in [Kafka Contracts](../docs/architecture.md#kafka-contracts).
 
-Neither contract is versioned or schema-registry backed. Producer and consumer changes must be coordinated.
+None of these contracts is versioned or schema-registry backed. Producer and consumer changes must be coordinated.
 
 ## Candle Aggregation
 
@@ -181,7 +185,7 @@ Under Compose, cutover and processor files share the `pipeline_state` named volu
 | Operation | Behavior |
 | --- | --- |
 | Kafka Python client creation | Up to 60 attempts with exponential delay capped at 10 seconds |
-| Raw trade enqueue | Four outer attempts around `send`; Kafka client also has five retries; later asynchronous failure is logged |
+| Trade/depth enqueue | Four outer attempts around `send`; Kafka client also has five retries; later asynchronous failure is logged |
 | Kline publication | Waits up to 15 seconds for acknowledgement, makes four attempts, then stores a persisted retry entry |
 | Final `1m` QuestDB upsert | Three attempts, then stores a persisted retry entry |
 | Startup reconciliation | Configured attempt count and exponential delay capped at 60 seconds |
@@ -265,7 +269,7 @@ Useful developer-only reconciler flags are:
 From the repository root:
 
 ```bash
-python -m unittest data_pipeline.tests.test_startup_backfill
+python -m unittest discover -s data_pipeline/tests -p "test_*.py"
 python -m compileall data_pipeline
 ```
 

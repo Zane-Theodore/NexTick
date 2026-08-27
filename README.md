@@ -4,25 +4,26 @@
   <img src="frontend/public/logo.png" alt="NexTick logo" width="96">
 </p>
 
-NexTick is a realtime cryptocurrency market-data pipeline and charting system. It ingests Binance trades, builds OHLCV candles, persists canonical one-minute history, and delivers historical and live data to a browser chart.
+NexTick is a realtime cryptocurrency market-data pipeline and charting system. It ingests Binance trades and partial order-book depth, builds OHLCV candles, persists canonical one-minute history, and delivers historical and live data to a browser chart.
 
 NexTick is not a trading bot: it does not place orders, manage portfolios, or provide financial advice.
 
 ## Preview
 
-A current application screenshot is not committed to this repository. The UI is a dark, multi-pane candlestick chart with volume, configurable indicators, symbol and interval controls, OHLCV details, and visible-range high/low labels.
+A current application screenshot is not committed to this repository. The UI is a dark three-column workspace with a 20-level Order Book, multi-pane candlestick chart, Market Trades feed, volume, configurable indicators, symbol and interval controls, OHLCV details, and visible-range high/low labels.
 
 <!-- Add a screenshot captured from the current UI here when one is available. -->
 
 ## Key Features
 
-- Binance combined `@trade` stream ingestion for configured symbols.
+- Binance combined `@trade` and `@depth20` stream ingestion for configured symbols.
 - OHLCV aggregation for 15 configured intervals, with open updates and final candles.
 - Kafka boundaries between ingestion, candle processing, and browser delivery.
 - Startup reconciliation from Binance REST data, with a deterministic backfill/realtime cutover.
 - Final `1m` candle persistence in a QuestDB WAL/dedup table.
 - Historical aggregation through `GET /candles` and live delivery through Socket.IO rooms.
-- A bounded backend cache that bridges recent Kafka updates into REST responses and new Socket.IO subscriptions.
+- Backend-delivered Market Trades and 20-level Order Book views with no direct browser-to-Binance connection.
+- Bounded backend caches for recent candles, raw trades, and the latest depth snapshot, used by REST responses or new Socket.IO subscriptions as appropriate.
 - Client-side EMA, MA, volume MA, RSI, and MACD indicators with session-scoped preferences.
 - Persisted processor state and retry queues for restart recovery.
 
@@ -30,9 +31,12 @@ A current application screenshot is not committed to this repository. The UI is 
 
 ```mermaid
 flowchart LR
-  Binance["Binance trades"] --> Producer["Python producer"]
+  Binance["Binance trades + depth"] --> Producer["Python producer"]
   Producer --> Trades[("Kafka: market-trades")]
+  Producer --> Depth[("Kafka: market-depth")]
   Trades --> Processor["Python candle processor"]
+  Trades --> Backend
+  Depth --> Backend
   Backfill["Startup backfill"] --> QuestDB[("QuestDB: final 1m candles")]
   Backfill --> Cutover["Cutover state"]
   Cutover --> Processor
@@ -54,10 +58,10 @@ Docker Compose runs Kafka, Kafka UI, QuestDB, and the Python services. The NestJ
 | Charting | Lightweight Charts 5, client-side indicator calculations |
 | Backend | NestJS 11, KafkaJS 2, `pg` 8, Swagger, Socket.IO |
 | Data pipeline | Python 3.10, `kafka-python` 2.0, `psycopg2` 2.9, `websocket-client` 1.6 |
-| Event streaming | Confluent Kafka 7.4 image, two three-partition topics |
+| Event streaming | Confluent Kafka 7.4 image, three three-partition topics |
 | Database | QuestDB through its PostgreSQL wire protocol |
 | Infrastructure | Docker Compose and named volumes |
-| Testing/tooling | Python `unittest`, Jest 30, ESLint 10, TypeScript build checks |
+| Testing/tooling | Python `unittest`, Jest 30 tooling, ESLint 10, TypeScript build checks |
 
 Dependency ranges are declared in the component package files; lockfiles contain the resolved Node dependency versions. The QuestDB and Kafka UI images currently use the unpinned `latest` tag.
 
@@ -65,7 +69,7 @@ Dependency ranges are declared in the component package files; lockfiles contain
 
 **Deterministic startup handoff.** The producer can buffer trades while the one-shot backfill reconciles closed Binance `1m` candles. Backfill records an exclusive cutover; the processor rejects trades, recovered candles, and retry entries before that boundary.
 
-**Explicit ordering boundaries.** Raw trades use `symbol` as their Kafka key, and candle updates use `symbol_interval`. This preserves Kafka partition order for a symbol or series without claiming global ordering across symbols.
+**Explicit ordering boundaries.** Raw trades and market depth use `symbol` as their Kafka key, while candle updates use `symbol_interval`. This preserves Kafka partition order for a symbol or series without claiming global ordering across symbols or topics.
 
 **Replay-tolerant processing.** Processor state is written before consumer offsets are committed. Replayed trade IDs are filtered, failed Kafka and QuestDB side effects enter persisted retry maps, and QuestDB upserts repeated candle keys. These mechanisms reduce replay effects, but they are not an exactly-once transaction.
 
@@ -111,19 +115,19 @@ Open `http://localhost:5173`. Startup backfill intentionally waits for the Binan
 | --- | --- |
 | [Architecture](docs/architecture.md) | Authoritative system design, contracts, reliability semantics, decisions, and limitations |
 | [Setup and operations](docs/setup.md) | Environment configuration, startup, verification, repair, migration, troubleshooting, and reset procedures |
-| [Backend](backend/README.md) | NestJS modules, REST, Kafka consumer, cache, Socket.IO, and tests |
+| [Backend](backend/README.md) | NestJS modules, REST, Kafka consumer, cache, Socket.IO, and current test status |
 | [Frontend](frontend/README.md) | React chart architecture, data synchronization, indicators, preferences, and build status |
 | [Data pipeline](data_pipeline/README.md) | Producer, aggregation, persistence, recovery, reconciliation, and tests |
 
 ## Verification
 
 ```bash
-cd backend && npm test && npm run build
+cd backend && npm run build
 cd ../frontend && npm run lint && npm run build
-cd .. && python -m unittest data_pipeline.tests.test_startup_backfill
+cd .. && python -m unittest discover -s data_pipeline/tests -p "test_*.py"
 ```
 
-The backend lint script runs ESLint with `--fix`; use it deliberately because it can modify TypeScript files. The full command matrix and runtime checks are in the [setup guide](docs/setup.md#verification).
+The backend currently has no committed TypeScript spec files, so its Jest scripts are not validation gates. Its lint script runs ESLint with `--fix`; use it deliberately because it can modify TypeScript files. The full command matrix and runtime checks are in the [setup guide](docs/setup.md#verification).
 
 ## Current Limitations
 
@@ -133,10 +137,10 @@ The backend lint script runs ESLint with `--fix`; use it deliberately because it
 - The backend cache and Socket.IO rooms are process-local. Multiple backend replicas would need a shared fan-out/cache strategy and Socket.IO scaling configuration.
 - The processor's local aggregation state is not designed for consumer-group rebalances across multiple processor replicas.
 - There is no authentication, authorization, rate limiting, TLS termination, metrics backend, alerting, or documented production deployment.
-- Backend tests are mostly module-construction smoke tests plus health behavior; pipeline tests focus on startup cutover logic. The frontend has no automated test command.
+- The backend has Jest tooling but no committed TypeScript spec files, and the frontend has no automated test command. The Python suite covers producer normalization and startup/cutover behavior but not real infrastructure integration.
 - QuestDB and Kafka UI use `latest` image tags, which makes rebuilds less reproducible.
 - The repository has no committed application screenshot, hosted demo, benchmark results, or project license.
 
 ## Future Work
 
-The current boundaries support a focused next set of improvements: pin infrastructure images, add Kafka/QuestDB/Socket.IO integration tests, make room subscriptions reconnect-safe, add shared realtime fan-out for backend replicas, extend reconciliation beyond the trailing eight-hour window, and add production-oriented authentication, transport security, metrics, and deployment guidance.
+The current boundaries support a focused next set of improvements: restore backend unit/e2e coverage, add Kafka/QuestDB/Socket.IO integration tests, add shared realtime fan-out for backend replicas, extend reconciliation beyond the trailing eight-hour window, and add production-oriented authentication, transport security, metrics, and deployment guidance.
