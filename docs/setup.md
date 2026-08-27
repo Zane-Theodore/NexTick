@@ -31,7 +31,7 @@ The checked-in example is the canonical local template. Its default topics, symb
 | Variables | Local behavior |
 | --- | --- |
 | `QUESTDB_HOST`, `QUESTDB_PORT`, `QUESTDB_USER`, `QUESTDB_PASSWORD`, `QUESTDB_DB_NAME` | Required at import time. Use `localhost:8812` on the host; Compose overrides the host to `questdb`. |
-| `KAFKA_BROKER`, `KAFKA_TOPIC_MARKET_TRADES`, `KAFKA_TOPIC_KLINE_STREAM` | Required. Use `localhost:9092` on the host; Compose overrides the broker to `kafka:29092`. Topic values are also consumed by `kafka-setup`. |
+| `KAFKA_BROKER`, `KAFKA_TOPIC_MARKET_TRADES`, `KAFKA_TOPIC_MARKET_DEPTH`, `KAFKA_TOPIC_KLINE_STREAM` | Required. Use `localhost:9092` on the host; Compose overrides the broker to `kafka:29092`. Topic values are also consumed by `kafka-setup`. |
 | `KAFKA_CONSUMER_GROUP_ID` | Processor group; defaults to `candle-processor-group` if missing or blank. |
 | `KAFKA_AUTO_OFFSET_RESET` | `earliest` or `latest`; invalid values fall back to `earliest`. |
 | `BINANCE_SOCKET_URL` | Required WebSocket base URL. The producer appends the combined `streams=` query. |
@@ -65,6 +65,8 @@ QUESTDB_POOL_TIMEOUT=5000
 QUESTDB_POOL_IDLE_TIMEOUT=30000
 
 KAFKA_BROKER=localhost:9092
+KAFKA_TOPIC_MARKET_TRADES=market-trades
+KAFKA_TOPIC_MARKET_DEPTH=market-depth
 KAFKA_TOPIC_KLINE_STREAM=kline-stream
 KAFKA_CLIENT_ID=nextick-backend
 KAFKA_GROUP_ID=nextick-backend-group
@@ -74,7 +76,7 @@ FRONTEND_URL=http://localhost:5173
 BACKEND_URL=http://localhost:3000
 ```
 
-`FRONTEND_URL` is the REST and Socket.IO browser origin. `BACKEND_URL` is used for startup messages and is also allowed by Socket.IO CORS. `KAFKA_TOPIC_KLINE_STREAM` must match the pipeline value.
+`FRONTEND_URL` is the REST and Socket.IO browser origin. `BACKEND_URL` is used for startup messages and is also allowed by Socket.IO CORS. All three Kafka topic values must match the pipeline values.
 
 ### `frontend/.env`
 
@@ -86,7 +88,7 @@ VITE_TRADING_SYMBOLS=BTCUSDT,ETHUSDT
 VITE_CANDLE_INTERVALS=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
 ```
 
-Vite reads these variables when the development server or build starts. Restart Vite after changing them. Keep frontend symbols within `TRADING_SYMBOLS`; keep intervals within both the backend allowlist and pipeline `CANDLE_INTERVALS` if live updates are expected.
+Vite reads these variables when the development server or build starts. Restart Vite after changing them. Market Trades and Order Book depth both come from backend Socket.IO rooms; the frontend has no Binance endpoint configuration. Keep frontend symbols within `TRADING_SYMBOLS`; keep intervals within both the backend allowlist and pipeline `CANDLE_INTERVALS` if live updates are expected.
 
 ## Docker Services
 
@@ -94,9 +96,9 @@ Vite reads these variables when the development server or build starts. Restart 
 | --- | --- | --- | --- |
 | `kafka` | Long-running | Single-node KRaft broker | `9092` |
 | `kafka-ui` | Long-running | Local topic/consumer inspection | `8080` |
-| `kafka-setup` | One-shot | Waits for Kafka and creates both configured topics | None |
+| `kafka-setup` | One-shot | Waits for Kafka and creates all three configured topics | None |
 | `questdb` | Long-running | Candle storage and console | `9000`, `8812`, `9009` |
-| `data-producer` | Long-running | Binance trade ingestion | None |
+| `data-producer` | Long-running | Binance raw-trade and partial-depth ingestion | None |
 | `data-backfill` | One-shot | Startup reconciliation and cutover state | None |
 | `data-processor` | Long-running | Candle aggregation, kline output, and final `1m` persistence | None |
 | `questdb-storage-migrate` | Opt-in `migration` profile | Copies a legacy bind-mounted QuestDB installation into the named volume | None |
@@ -241,12 +243,10 @@ Backend:
 
 ```bash
 cd backend
-npm test
-npm run test:e2e
 npm run build
 ```
 
-`npm run lint` is available, but its script includes `--fix` and may modify TypeScript files.
+The backend package still exposes Jest commands, but the repository currently has no committed TypeScript spec files, so `npm test`, `npm run test:e2e`, and `npm run test:cov` are not working validation gates. `npm run lint` is available, but its script includes `--fix` and may modify TypeScript files.
 
 Frontend:
 
@@ -261,11 +261,11 @@ There is no frontend automated test script or committed frontend test suite.
 Pipeline, from the repository root with its dependencies installed:
 
 ```bash
-python -m unittest data_pipeline.tests.test_startup_backfill
+python -m unittest discover -s data_pipeline/tests -p "test_*.py"
 python -m compileall data_pipeline
 ```
 
-The existing tests do not start real Kafka, QuestDB, Binance, or a browser. See each component README for the exact coverage boundary.
+The Python tests do not start real Kafka, QuestDB, Binance, or a browser. See each component README for the exact coverage boundary.
 
 ## Persistent Storage and Lifecycle Commands
 
@@ -448,7 +448,7 @@ The body identifies `questdb` and `kafka` availability. Confirm the backend uses
 
 ### The chart stops updating after a Socket.IO reconnect
 
-The current frontend reconnects the transport but does not automatically rejoin active rooms. Reload the page or switch the symbol/interval to rerun the room-join effect. This is a documented implementation limitation, not a reason to reset stored data.
+The frontend re-emits every active kline, Market Trades, and Order Book room join after reconnect. If updates do not resume, inspect the backend consumer and the relevant Kafka topic before reloading the page.
 
 ### Kafka topics are missing or mismatched
 
@@ -458,7 +458,7 @@ Check `data_pipeline/.env`, rerun the idempotent setup service, and inspect Kafk
 docker compose up kafka-setup
 ```
 
-The backend kline topic must match `KAFKA_TOPIC_KLINE_STREAM`; the processor raw-trade topic and `kafka-setup` must share `KAFKA_TOPIC_MARKET_TRADES`.
+The backend and pipeline environment files must agree on `KAFKA_TOPIC_KLINE_STREAM`, `KAFKA_TOPIC_MARKET_TRADES`, and `KAFKA_TOPIC_MARKET_DEPTH`; `kafka-setup` must use the same names.
 
 ### QuestDB fails on a Windows bind mount
 
