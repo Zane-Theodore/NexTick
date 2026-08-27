@@ -62,6 +62,7 @@ services:
       bash -ec '
         : "$${KAFKA_BROKER:?KAFKA_BROKER is required}"
         : "$${KAFKA_TOPIC_MARKET_TRADES:?KAFKA_TOPIC_MARKET_TRADES is required}"
+        : "$${KAFKA_TOPIC_MARKET_DEPTH:?KAFKA_TOPIC_MARKET_DEPTH is required}"
         : "$${KAFKA_TOPIC_KLINE_STREAM:?KAFKA_TOPIC_KLINE_STREAM is required}"
 
         for attempt in $$(seq 1 30); do
@@ -79,8 +80,10 @@ services:
         done
 
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_MARKET_TRADES}" --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_MARKET_DEPTH}" --partitions 3 --replication-factor 1
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --create --if-not-exists --topic "$${KAFKA_TOPIC_KLINE_STREAM}" --partitions 3 --replication-factor 1
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_MARKET_TRADES}"
+        kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_MARKET_DEPTH}"
         kafka-topics --bootstrap-server "$${KAFKA_BROKER}" --describe --topic "$${KAFKA_TOPIC_KLINE_STREAM}"
       '
     networks:
