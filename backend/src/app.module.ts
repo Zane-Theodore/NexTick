@@ -7,6 +7,8 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { CandlesModule } from '@modules/candles/candles.module';
 import { DatabaseModule } from '@modules/database/database.module';
 import { KafkaModule } from '@modules/kafka/kafka.module';
+import { MarketTradesModule } from '@modules/market-trades/market-trades.module';
+import { OrderBookModule } from '@modules/order-book/order-book.module';
 
 @Module({
   imports: [
@@ -18,6 +20,8 @@ import { KafkaModule } from '@modules/kafka/kafka.module';
     CandlesModule,
     DatabaseModule,
     KafkaModule,
+    MarketTradesModule,
+    OrderBookModule,
   ],
   controllers: [AppController],
   providers: [AppService],

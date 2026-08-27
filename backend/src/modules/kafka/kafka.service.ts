@@ -7,6 +7,14 @@ import {
   KlineUpdateInput,
   normalizeKlineUpdate,
 } from '../candles/candle-normalization';
+import {
+  MarketTradeInput,
+  normalizeMarketTrade,
+} from '../market-trades/market-trade-normalization';
+import {
+  MarketDepthInput,
+  normalizeMarketDepth,
+} from '../order-book/market-depth-normalization';
 
 const RECONNECT_DELAY_MS = 5_000;
 
@@ -14,7 +22,7 @@ const RECONNECT_DELAY_MS = 5_000;
 export class KafkaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = createLogger(KafkaService.name);
   private kafka: Kafka;
-  private klineStreamConsumer: Consumer;
+  private marketDataConsumer: Consumer;
   private isKafkaAvailable = false;
   private isShuttingDown = false;
   private reconnectPromise?: Promise<void>;
@@ -93,6 +101,63 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     return Promise.resolve();
   }
 
+  private handleMarketTradeMessage(rawValue?: string): Promise<void> {
+    if (!rawValue) {
+      this.logger.warn('Received raw trade message with empty value.');
+      return Promise.resolve();
+    }
+
+    try {
+      const tradeData = JSON.parse(rawValue) as MarketTradeInput;
+      const normalizedTrade = normalizeMarketTrade(tradeData);
+
+      if (!normalizedTrade) {
+        this.logger.warn('Invalid raw trade received from Kafka.', {
+          symbol: tradeData.symbol,
+          trade_id: tradeData.trade_id,
+          timestamp: tradeData.timestamp,
+        });
+        return Promise.resolve();
+      }
+
+      this.eventEmitter.emit('market-trade.update', normalizedTrade);
+    } catch (error) {
+      this.logger.error('Failed to parse raw trade message value.', error, {
+        rawValue,
+      });
+    }
+
+    return Promise.resolve();
+  }
+
+  private handleMarketDepthMessage(rawValue?: string): Promise<void> {
+    if (!rawValue) {
+      this.logger.warn('Received market depth message with empty value.');
+      return Promise.resolve();
+    }
+
+    try {
+      const depthData = JSON.parse(rawValue) as MarketDepthInput;
+      const normalizedDepth = normalizeMarketDepth(depthData);
+
+      if (!normalizedDepth) {
+        this.logger.warn('Invalid market depth received from Kafka.', {
+          symbol: depthData.symbol,
+          last_update_id: depthData.last_update_id,
+        });
+        return Promise.resolve();
+      }
+
+      this.eventEmitter.emit('market-depth.update', normalizedDepth);
+    } catch (error) {
+      this.logger.error('Failed to parse market depth message value.', error, {
+        rawValue,
+      });
+    }
+
+    return Promise.resolve();
+  }
+
   private normalizeKlineUpdate(value: KlineUpdateInput) {
     return normalizeKlineUpdate(value);
   }
@@ -100,27 +165,26 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     this.isShuttingDown = true;
     this.logger.info('Disconnecting Kafka consumers...');
-    if (this.klineStreamConsumer) {
-      await this.klineStreamConsumer.disconnect();
+    if (this.marketDataConsumer) {
+      await this.marketDataConsumer.disconnect();
     }
     this.logger.info('All Kafka consumers disconnected.');
   }
 
   private startReconnectLoop(): void {
-    if (this.isShuttingDown || this.reconnectPromise) {
+    if (this.isShuttingDown || this.reconnectPromise !== undefined) {
       return;
     }
 
-    this.reconnectPromise = this.connectWithRetry()
-      .finally(() => {
-        this.reconnectPromise = undefined;
-      });
+    this.reconnectPromise = this.connectWithRetry().finally(() => {
+      this.reconnectPromise = undefined;
+    });
   }
 
   private async connectWithRetry(): Promise<void> {
     while (!this.isShuttingDown) {
       try {
-        await this.initializeKlineStreamConsumer();
+        await this.initializeMarketDataConsumer();
 
         if (this.isShuttingDown) {
           await this.disconnectConsumer();
@@ -128,7 +192,7 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
         }
 
         this.isKafkaAvailable = true;
-        this.logger.info('Kafka kline stream consumer initialized and running.');
+        this.logger.info('Kafka market-data consumer initialized and running.');
         return;
       } catch (error) {
         this.isKafkaAvailable = false;
@@ -142,30 +206,33 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async initializeKlineStreamConsumer(): Promise<void> {
-    this.klineStreamConsumer = this.kafka.consumer({
+  private async initializeMarketDataConsumer(): Promise<void> {
+    this.marketDataConsumer = this.kafka.consumer({
       groupId: this.configService.get<string>('KAFKA_GROUP_ID'),
       retry: {
         initialRetryTime: 1_000,
         maxRetryTime: 30_000,
         retries: 5,
-        restartOnFailure: async (error) => {
+        restartOnFailure: (error) => {
           this.isKafkaAvailable = false;
 
           if (this.isShuttingDown) {
-            return false;
+            return Promise.resolve(false);
           }
 
-          this.logger.warn('Kafka consumer crashed. Allowing KafkaJS to restart it.', {
-            error: error.message,
-          });
-          return true;
+          this.logger.warn(
+            'Kafka consumer crashed. Allowing KafkaJS to restart it.',
+            {
+              error: error.message,
+            },
+          );
+          return Promise.resolve(true);
         },
       },
     });
 
-    this.klineStreamConsumer.on(
-      this.klineStreamConsumer.events.GROUP_JOIN,
+    this.marketDataConsumer.on(
+      this.marketDataConsumer.events.GROUP_JOIN,
       () => {
         if (this.isShuttingDown) {
           return;
@@ -176,8 +243,8 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       },
     );
 
-    this.klineStreamConsumer.on(
-      this.klineStreamConsumer.events.CRASH,
+    this.marketDataConsumer.on(
+      this.marketDataConsumer.events.CRASH,
       ({ payload }) => {
         this.isKafkaAvailable = false;
 
@@ -195,27 +262,55 @@ export class KafkaService implements OnModuleInit, OnModuleDestroy {
       },
     );
 
-    await this.klineStreamConsumer.connect();
-    await this.klineStreamConsumer.subscribe({
+    await this.marketDataConsumer.connect();
+    await this.marketDataConsumer.subscribe({
       topic: this.configService.get<string>('KAFKA_TOPIC_KLINE_STREAM'),
       fromBeginning: false,
     });
-    await this.klineStreamConsumer.run({
-      eachMessage: ({ message }) =>
-        this.handleKlineMessage(message.value?.toString()),
+    await this.marketDataConsumer.subscribe({
+      topic: this.configService.get<string>('KAFKA_TOPIC_MARKET_TRADES'),
+      fromBeginning: false,
+    });
+    await this.marketDataConsumer.subscribe({
+      topic: this.configService.get<string>('KAFKA_TOPIC_MARKET_DEPTH'),
+      fromBeginning: false,
+    });
+    await this.marketDataConsumer.run({
+      eachMessage: ({ topic, message }) => {
+        const rawValue = message.value?.toString();
+
+        if (
+          topic === this.configService.get<string>('KAFKA_TOPIC_MARKET_TRADES')
+        ) {
+          return this.handleMarketTradeMessage(rawValue);
+        }
+
+        if (
+          topic === this.configService.get<string>('KAFKA_TOPIC_MARKET_DEPTH')
+        ) {
+          return this.handleMarketDepthMessage(rawValue);
+        }
+
+        return this.handleKlineMessage(rawValue);
+      },
     });
   }
 
   private async disconnectConsumer(): Promise<void> {
-    if (!this.klineStreamConsumer) {
+    if (!this.marketDataConsumer) {
       return;
     }
 
     try {
-      await this.klineStreamConsumer.disconnect();
+      await this.marketDataConsumer.disconnect();
     } catch (error) {
       this.logger.warn('Failed to disconnect Kafka consumer before retry.', {
-        error: error instanceof Error ? error.message : String(error),
+        error:
+          error instanceof Error
+            ? error.message
+            : typeof error === 'string'
+              ? error
+              : 'Unknown Kafka disconnect error',
       });
     }
   }
