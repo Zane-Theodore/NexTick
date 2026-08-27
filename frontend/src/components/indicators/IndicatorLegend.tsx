@@ -185,7 +185,7 @@ function PaneIndicatorLegend({
         }`}
       >
         <div
-          className="w-[min(780px,calc(100cqw-28px))] overflow-auto px-1.5 py-1 font-mono text-xs"
+          className="w-[min(780px,calc(100cqw-28px))] overflow-auto px-1.5 py-1 font-mono text-[9px]"
           style={{ maxHeight: Math.max(36, paneLayout.height - (top - paneLayout.top) - 6) }}
         >
           {groups.map(({ group, label, settings: groupSettings }) => (

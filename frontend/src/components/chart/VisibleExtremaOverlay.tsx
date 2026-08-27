@@ -5,7 +5,7 @@ const LABEL_HEIGHT = 18;
 const LABEL_PADDING = 7;
 const LINE_WIDTH = 52;
 const EDGE_PADDING = 8;
-const TEXT_SIZE = 12;
+const TEXT_SIZE = 9;
 
 export default function VisibleExtremaOverlay({ extrema }: { extrema: VisiblePriceExtrema }) {
   return (
@@ -31,7 +31,7 @@ function ExtremeMarker({
 
   return (
     <div
-      className="absolute font-mono text-xs leading-none text-white"
+      className="absolute font-mono text-[9px] leading-none text-white"
       style={{
         left: layout.labelLeft,
         top: layout.labelTop,

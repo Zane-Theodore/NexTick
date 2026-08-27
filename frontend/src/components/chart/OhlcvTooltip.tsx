@@ -70,7 +70,7 @@ export default function OhlcvTooltip({ legendData, onHeightChange }: OhlcvToolti
         }}
       >
         <div className="w-[min(1100px,calc(100cqw-28px))]">
-          <div className="pointer-events-auto flex min-h-7 w-fit max-w-full flex-wrap items-center gap-x-2 rounded-md border border-transparent px-1 font-mono text-xs font-medium leading-6 text-[#d1d4dc] transition-colors hover:border-[#6b7280] sm:text-sm">
+          <div className="pointer-events-auto flex min-h-7 w-fit max-w-full flex-wrap items-center gap-x-2 rounded-md border border-transparent px-1 font-mono text-[9px] font-medium leading-6 text-[#d1d4dc] transition-colors hover:border-[#6b7280]">
             <span className="whitespace-nowrap font-semibold" style={{ color: candleColor }}>
               {formatOhlcvLegendTime(legendData.time)}
             </span>
