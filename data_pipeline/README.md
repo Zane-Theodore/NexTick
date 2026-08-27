@@ -1,6 +1,6 @@
 # NexTick Data Pipeline
 
-`data_pipeline/` is NexTick's ingestion and canonical write path. It converts Binance trades into realtime OHLCV updates, persists final one-minute candles, reconciles a bounded closed-candle window at startup, and records enough local state to resume a single processor after restart.
+`data_pipeline/` is NexTick's exchange-ingestion and canonical write path. It publishes normalized Binance trades and partial order-book depth, converts trades into realtime OHLCV updates, persists final one-minute candles, reconciles a bounded closed-candle window at startup, and records enough local state to resume a single processor after restart.
 
 It does not expose REST, Socket.IO, or browser UI. Those boundaries belong to the [backend](../backend/README.md) and [frontend](../frontend/README.md). System-wide contracts and trade-offs are authoritative in [System Architecture](../docs/architecture.md).
 
@@ -19,7 +19,8 @@ It does not expose REST, Socket.IO, or browser UI. Those boundaries belong to th
 
 | Path | Responsibility |
 | --- | --- |
-| `producer/binance_producer.py` | Binance combined `@trade` connection, trade normalization, Kafka publication, reconnect loop |
+| `producer/binance_producer.py` | Binance combined `@trade`/`@depth20` connection, normalization, Kafka publication, reconnect loop |
+| `producer/depth_normalization.py` | Partial-depth validation and normalized order-book payload construction |
 | `processor/candle_aggregator.py` | Per-symbol/per-interval active candles, trade-ID filtering, bucket boundaries, finalization, snapshots |
 | `processor/candle_processor.py` | Raw-trade consumption, kline publication, final `1m` writes, retries, offsets, recovery |
 | `processor/state.py` | Atomic JSON processor-state reads/writes |
@@ -34,8 +35,9 @@ It does not expose REST, Socket.IO, or browser UI. Those boundaries belong to th
 
 ```mermaid
 flowchart LR
-  BinanceWS["Binance @trade"] --> Producer
+  BinanceWS["Binance @trade + @depth20"] --> Producer
   Producer -->|"key: symbol"| Trades[("Kafka raw trades")]
+  Producer -->|"key: symbol"| Depth[("Kafka market depth")]
   Trades --> Processor
   BinanceREST["Binance REST 1m klines"] --> Backfill
   Backfill --> QuestDB[("market_candles")]
@@ -48,10 +50,10 @@ flowchart LR
 
 ## Producer
 
-`BinanceCombinedTradeProducer` lowercases configured symbols for Binance stream names and builds one combined URL, for example:
+`BinanceCombinedTradeProducer` lowercases configured symbols for Binance stream names and builds one combined URL containing trade and partial-depth subscriptions, for example:
 
 ```text
-wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade
+wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@depth20@100ms/ethusdt@trade/ethusdt@depth20@100ms
 ```
 
 It accepts only Binance events with `e == "trade"`, required identifiers/timestamps, a configured symbol, and positive price and quantity. Valid records contain:
@@ -64,6 +66,9 @@ It accepts only Binance events with `e == "trade"`, required identifiers/timesta
 | `event_time` | integer | Binance event time; retained but not aggregated |
 | `price` | number | OHLC input |
 | `quantity` | number | Volume input |
+| `is_buyer_maker` | boolean | Preserved for backend buy/sell classification in Market Trades |
+
+Partial-depth messages are accepted only for configured symbols and a positive `lastUpdateId`. The producer converts valid bid/ask pairs to numeric `[price, quantity]` arrays and publishes the latest 20-level snapshot without trying to reconstruct order-book state in the browser.
 
 The Kafka producer uses `acks=all`, five client retries, a short linger, and an outer retry around enqueue. Delivery remains best-effort: the application attaches an error logger to the asynchronous future but does not fetch a missed trade again from Binance.
 
@@ -75,7 +80,8 @@ Topic values come from the environment and are created by `kafka-setup` with thr
 
 | Topic variable | Producer | Consumer | Key | Payload |
 | --- | --- | --- | --- | --- |
-| `KAFKA_TOPIC_MARKET_TRADES` | Binance producer | Candle processor | `symbol` | Normalized raw trade fields above |
+| `KAFKA_TOPIC_MARKET_TRADES` | Binance producer | Candle processor and NestJS backend | `symbol` | Normalized raw trade fields above |
+| `KAFKA_TOPIC_MARKET_DEPTH` | Binance producer | NestJS backend | `symbol` | `symbol`, `last_update_id`, and numeric `bids`/`asks` arrays |
 | `KAFKA_TOPIC_KLINE_STREAM` | Candle processor | NestJS backend | `symbol_interval` | `symbol`, `interval`, ISO UTC `timestamp`, OHLCV, `is_final` |
 
 Symbol keying keeps one symbol's accepted trades in one Kafka partition. Kline keying does the same for one symbol/interval series. There is no global ordering across partitions. Full JSON examples and consumer boundaries are in [Kafka Contracts](../docs/architecture.md#kafka-contracts).
@@ -207,7 +213,7 @@ Create `data_pipeline/.env` from `.env.example`. Exact local defaults and operat
 | Group | Variables |
 | --- | --- |
 | QuestDB | `QUESTDB_HOST`, `QUESTDB_PORT`, `QUESTDB_USER`, `QUESTDB_PASSWORD`, `QUESTDB_DB_NAME` |
-| Kafka topics/broker | `KAFKA_BROKER`, `KAFKA_TOPIC_MARKET_TRADES`, `KAFKA_TOPIC_KLINE_STREAM` |
+| Kafka topics/broker | `KAFKA_BROKER`, `KAFKA_TOPIC_MARKET_TRADES`, `KAFKA_TOPIC_MARKET_DEPTH`, `KAFKA_TOPIC_KLINE_STREAM` |
 | Processor consumer | `KAFKA_CONSUMER_GROUP_ID`, `KAFKA_AUTO_OFFSET_RESET` |
 | Binance and markets | `BINANCE_SOCKET_URL`, `TRADING_SYMBOLS`, `CANDLE_INTERVALS` |
 | Startup policy | `STARTUP_RECONCILE_ENABLED`, `STARTUP_RECONCILE_REQUIRED`, `STARTUP_RECONCILE_MAX_ATTEMPTS`, `STARTUP_RECONCILE_RETRY_DELAY_SECONDS` |
@@ -266,6 +272,7 @@ python -m compileall data_pipeline
 The committed regression suite covers:
 
 - Binance-time cutover and configurable close grace;
+- raw-trade and partial-depth producer normalization;
 - independent symbol watermarks and the eight-hour cap;
 - Binance pagination and continuous response validation;
 - dry-run and required-failure state behavior;

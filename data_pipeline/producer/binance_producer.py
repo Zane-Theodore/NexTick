@@ -1,4 +1,4 @@
-"""Publish Binance raw trade events to Kafka."""
+"""Publish normalized Binance trades and partial market depth to Kafka."""
 
 import json
 import signal
@@ -12,11 +12,13 @@ from kafka.errors import KafkaError
 from data_pipeline.common import config
 from data_pipeline.common.logger import get_logger
 from data_pipeline.common.retry import retry_with_backoff
+from data_pipeline.producer.depth_normalization import normalize_binance_depth_record
+from data_pipeline.producer.trade_normalization import normalize_binance_trade_record
 
 logger = get_logger(__name__)
 
 class BinanceCombinedTradeProducer:
-    """Subscribe to Binance ``@trade`` streams and publish normalized raw trades."""
+    """Publish normalized Binance raw trades and partial market depth."""
 
     def __init__(self, symbols: list[str]):
         self.symbols = [symbol.lower() for symbol in symbols if symbol]
@@ -29,13 +31,17 @@ class BinanceCombinedTradeProducer:
         if not self.symbols:
             raise ValueError("At least one trading symbol is required")
 
-        streams = "/".join(f"{symbol}@trade" for symbol in self.symbols)
+        streams = "/".join(
+            stream
+            for symbol in self.symbols
+            for stream in (f"{symbol}@trade", f"{symbol}@depth20@100ms")
+        )
         socket_url = config.BINANCE_SOCKET_URL.rstrip("/")
         query_separator = "&" if "?" in socket_url else "?"
         self.ws_url = f"{socket_url}{query_separator}streams={streams}"
 
         logger.info(
-            "Initializing Binance raw trade producer for "
+            "Initializing Binance market-data producer for "
             f"symbols={', '.join(symbol.upper() for symbol in self.symbols)}"
         )
 
@@ -54,40 +60,21 @@ class BinanceCombinedTradeProducer:
         )
 
     def _normalize_trade_record(self, raw_message: dict) -> dict | None:
-        data = raw_message.get("data", raw_message)
-        if not isinstance(data, dict) or data.get("e") != "trade":
-            return None
+        return normalize_binance_trade_record(raw_message, self.symbols)
 
-        try:
-            record = {
-                "symbol": str(data["s"]).upper(),
-                "trade_id": int(data["t"]),
-                "timestamp": int(data["T"]),
-                "event_time": int(data["E"]),
-                "price": float(data["p"]),
-                "quantity": float(data["q"]),
-            }
-        except (KeyError, TypeError, ValueError) as exc:
-            logger.warning(f"Invalid Binance trade payload: {exc}")
-            return None
+    def _normalize_depth_record(self, raw_message: dict) -> dict | None:
+        return normalize_binance_depth_record(raw_message, self.symbols)
 
-        if (
-            not record["symbol"]
-            or record["symbol"].lower() not in self.symbols
-            or record["trade_id"] < 0
-            or record["timestamp"] <= 0
-            or record["price"] <= 0
-            or record["quantity"] <= 0
-        ):
-            logger.warning(f"Dropped invalid Binance trade record: {record}")
-            return None
-
-        return record
-
-    def _send_to_kafka(self, record: dict) -> None:
+    def _send_to_kafka(
+        self,
+        record: dict,
+        topic: str,
+        record_kind: str,
+        record_id: int,
+    ) -> None:
         def _send():
             return self.producer.send(
-                config.KAFKA_TOPIC_MARKET_TRADES,
+                topic,
                 value=record,
                 key=record["symbol"].encode("utf-8"),
             )
@@ -97,11 +84,12 @@ class BinanceCombinedTradeProducer:
                 _send,
                 max_retries=4,
                 base_delay=0.5,
-                operation_name="Kafka raw trade publish",
+                operation_name=f"Kafka {record_kind} publish",
             )
             future.add_errback(
                 lambda error: logger.error(
-                    f"Kafka delivery failed for raw trade {record['symbol']}#{record['trade_id']}: {error}"
+                    f"Kafka delivery failed for {record_kind} "
+                    f"{record['symbol']}#{record_id}: {error}"
                 )
             )
         except KafkaError:
@@ -111,21 +99,40 @@ class BinanceCombinedTradeProducer:
 
     def on_message(self, ws, message) -> None:
         try:
-            record = self._normalize_trade_record(json.loads(message))
-            if record is not None:
-                self._send_to_kafka(record)
+            raw_message = json.loads(message)
+            trade_record = self._normalize_trade_record(raw_message)
+            if trade_record is not None:
+                self._send_to_kafka(
+                    trade_record,
+                    config.KAFKA_TOPIC_MARKET_TRADES,
+                    "raw trade",
+                    trade_record["trade_id"],
+                )
+                return
+
+            depth_record = self._normalize_depth_record(raw_message)
+            if depth_record is not None:
+                self._send_to_kafka(
+                    depth_record,
+                    config.KAFKA_TOPIC_MARKET_DEPTH,
+                    "market depth",
+                    depth_record["last_update_id"],
+                )
         except (TypeError, ValueError) as exc:
-            logger.warning(f"Invalid Binance trade message: {exc}")
+            logger.warning(f"Invalid Binance market-data message: {exc}")
         except Exception:
-            logger.error("Error processing Binance trade message", exc_info=True)
+            logger.error("Error processing Binance market-data message", exc_info=True)
 
     def on_open(self, ws) -> None:
         self.reconnect_attempt = 0
-        logger.info(f"Connected to Binance combined raw trade stream. Topic={config.KAFKA_TOPIC_MARKET_TRADES}")
+        logger.info(
+            "Connected to Binance combined market-data stream. "
+            f"Topics={config.KAFKA_TOPIC_MARKET_TRADES},{config.KAFKA_TOPIC_MARKET_DEPTH}"
+        )
 
     @staticmethod
     def on_close(ws, close_status_code, close_msg) -> None:
-        logger.info("Disconnected from Binance raw trade stream.")
+        logger.info("Disconnected from Binance market-data stream.")
 
     def on_error(self, ws, error) -> None:
         message = str(error).lower()
@@ -144,7 +151,9 @@ class BinanceCombinedTradeProducer:
         logger.error(f"WebSocket error ({type(error).__name__}): {error}", exc_info=True)
 
     def run(self) -> None:
-        logger.info(f"Producer starting Binance raw trade streams for {len(self.symbols)} symbol(s)")
+        logger.info(
+            f"Producer starting Binance trade/depth streams for {len(self.symbols)} symbol(s)"
+        )
         while self.is_running:
             try:
                 self.ws = websocket.WebSocketApp(
@@ -176,7 +185,7 @@ class BinanceCombinedTradeProducer:
     def shutdown(self) -> None:
         if not self.is_running and self.ws is None:
             return
-        logger.info("Shutting down Binance raw trade producer...")
+        logger.info("Shutting down Binance market-data producer...")
         self.is_running = False
         if self.ws:
             self.ws.close()

@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 # These are read while importing the processor configuration module.
 os.environ.setdefault("KAFKA_BROKER", "localhost:9092")
 os.environ.setdefault("KAFKA_TOPIC_MARKET_TRADES", "market-trades")
+os.environ.setdefault("KAFKA_TOPIC_MARKET_DEPTH", "market-depth")
 os.environ.setdefault("KAFKA_TOPIC_KLINE_STREAM", "kline-stream")
 os.environ.setdefault("QUESTDB_HOST", "localhost")
 os.environ.setdefault("QUESTDB_PORT", "8812")
