@@ -14,6 +14,62 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.trading-workspace {
+  grid-template-areas: "order-book chart market-trades";
+  grid-template-columns:
+    clamp(260px, 20vw, 328px)
+    minmax(0, 1fr)
+    clamp(240px, 18vw, 300px);
+}
+
+[data-panel="order-book"] {
+  grid-area: order-book;
+}
+
+[data-panel="chart"] {
+  grid-area: chart;
+}
+
+[data-panel="market-trades"] {
+  grid-area: market-trades;
+}
+
+@media (max-width: 1099px) {
+  .trading-workspace {
+    grid-template-areas:
+      "chart chart"
+      "order-book market-trades";
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows:
+      minmax(420px, calc(100dvh - 125px))
+      minmax(560px, 72dvh);
+    align-content: start;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+}
+
+@media (max-width: 639px) {
+  .trading-workspace {
+    grid-template-areas:
+      "chart"
+      "order-book"
+      "market-trades";
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows:
+      minmax(400px, calc(100dvh - 125px))
+      minmax(560px, 78dvh)
+      minmax(460px, 70dvh);
+  }
+}
+
+@media (max-width: 379px) {
+  .chart-filter-label {
+    display: none;
+  }
+}
+
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: #0f1117; }
 ::-webkit-scrollbar-thumb { background: #3f4654; border-radius: 4px; }

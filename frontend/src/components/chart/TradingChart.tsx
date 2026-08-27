@@ -113,7 +113,7 @@ export default function TradingChart({ symbol: controlledSymbol, onSymbolChange 
       />
 
       <div className="min-h-0 flex flex-1">
-        <div className="relative min-h-90 flex-1 overflow-hidden bg-[#0b0f16]">
+        <div className="relative min-h-[280px] flex-1 overflow-hidden bg-[#0b0f16] sm:min-h-90">
           {legendData && (
             <OhlcvTooltip
               legendData={legendData}

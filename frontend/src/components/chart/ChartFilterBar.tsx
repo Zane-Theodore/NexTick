@@ -26,14 +26,14 @@ function FilterDropdown({ label, value, options, widthClass, onChange, formatOpt
 
   return (
     <div
-      className="relative flex w-fit items-center rounded border border-[#3f4654] bg-[#151a23]"
+      className="relative flex min-w-0 items-center rounded border border-[#3f4654] bg-[#151a23]"
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setIsOpen(false);
         }
       }}
     >
-      <span className="flex self-stretch shrink-0 items-center border-r border-[#3f4654] px-2.5 text-[11px] font-semibold uppercase tracking-wide text-[#9099aa]">
+      <span className="chart-filter-label flex self-stretch shrink-0 items-center border-r border-[#3f4654] px-2.5 text-[11px] font-semibold uppercase tracking-wide text-[#9099aa]">
         {label}
       </span>
 
@@ -99,13 +99,13 @@ export default function ChartFilterBar({
   onOpenIndicatorSettings,
 }: ChartFilterBarProps) {
   return (
-    <div className="flex h-12 shrink-0 items-center border-b-2 border-[#3f4654] bg-[#0b0f16] px-4">
-      <div className="flex items-center gap-2.5">
+    <div className="flex h-12 shrink-0 items-center border-b-2 border-[#3f4654] bg-[#0b0f16] px-2 sm:px-4">
+      <div className="flex w-full min-w-0 items-center gap-1.5 sm:gap-2.5">
         <FilterDropdown
           label="Symbol"
           value={symbol}
           options={supportedSymbols}
-          widthClass="w-[120px]"
+          widthClass="w-[clamp(72px,19vw,120px)]"
           onChange={onSymbolChange}
         />
 
@@ -113,7 +113,7 @@ export default function ChartFilterBar({
           label="Interval"
           value={interval}
           options={supportedIntervals}
-          widthClass="w-[120px]"
+          widthClass="w-[clamp(72px,19vw,120px)]"
           onChange={onIntervalChange}
           formatOptionLabel={formatIntervalLabel}
         />

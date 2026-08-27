@@ -10,7 +10,7 @@ export default function TradingWorkspace() {
 
   return (
     <div
-      className="grid h-full min-h-0 min-w-[1080px] gap-[5px] overflow-hidden bg-[#05070a] [grid-template-columns:var(--order-book-width,328px)_minmax(0,1fr)_var(--market-trades-width,300px)]"
+      className="trading-workspace grid h-full min-h-0 min-w-0 gap-[5px] overflow-hidden bg-[#05070a]"
       data-workspace="trading"
     >
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-lg bg-[#0b0f16]" data-panel="order-book">
