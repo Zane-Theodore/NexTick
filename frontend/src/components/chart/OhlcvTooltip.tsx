@@ -2,9 +2,10 @@ import { useLayoutEffect, useRef, useState } from 'react';
 
 import { formatChartValue, formatOhlcvLegendTime } from '../../utils/formatters';
 import type { LegendData } from '../../types/chart';
-import { CHART_DOWN_COLOR, CHART_UP_COLOR } from './chartConstants';
 
 const COLLAPSED_TOOLTIP_HEIGHT = 28;
+const OHLCV_UP_COLOR = '#2dd4bf';
+const OHLCV_DOWN_COLOR = '#ff6b6b';
 
 interface OhlcvTooltipProps {
   legendData: LegendData;
@@ -15,7 +16,7 @@ export default function OhlcvTooltip({ legendData, onHeightChange }: OhlcvToolti
   const [isOpen, setIsOpen] = useState(true);
   const [reservesExpandedHeight, setReservesExpandedHeight] = useState(true);
   const tooltipRef = useRef<HTMLDivElement>(null);
-  const candleColor = legendData.close >= legendData.open ? CHART_UP_COLOR : CHART_DOWN_COLOR;
+  const candleColor = legendData.close >= legendData.open ? OHLCV_UP_COLOR : OHLCV_DOWN_COLOR;
   const changePercent = calculatePercent(legendData.close - legendData.open, legendData.open);
   const rangePercent = calculatePercent(legendData.high - legendData.low, legendData.open);
 
@@ -70,7 +71,7 @@ export default function OhlcvTooltip({ legendData, onHeightChange }: OhlcvToolti
         }}
       >
         <div className="w-[min(1100px,calc(100cqw-28px))]">
-          <div className="pointer-events-auto flex min-h-7 w-fit max-w-full flex-wrap items-center gap-x-2 rounded-md border border-transparent px-1 font-mono text-[9px] font-medium leading-6 text-[#d1d4dc] transition-colors hover:border-[#6b7280]">
+          <div className="pointer-events-auto flex min-h-7 w-fit max-w-full flex-wrap items-center gap-x-2 rounded-md border border-transparent px-1 font-mono text-[11px] font-medium leading-6 text-white transition-colors hover:border-[#6b7280]">
             <span className="whitespace-nowrap font-semibold" style={{ color: candleColor }}>
               {formatOhlcvLegendTime(legendData.time)}
             </span>
@@ -115,7 +116,7 @@ function OhlcvLegendValue({
 }) {
   return (
     <span className="inline-flex whitespace-nowrap">
-      <span className="text-[#d1d4dc]">{label}:</span>
+      <span className="text-white">{label}:</span>
       <span className="ml-1 font-semibold" style={{ color }}>{value}</span>
     </span>
   );
