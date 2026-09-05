@@ -3,8 +3,13 @@ import type { RefObject } from 'react';
 import { formatValidCandle, formatValidCandles } from '../utils/formatters';
 import type { FormattedCandle } from '../utils/formatters';
 import { getIndicatorData, getIndicatorValues } from '../utils/chartIndicators';
-import { subscribeToCandles, joinKlineRoom, leaveKlineRoom } from '../services/socket';
-import type { KlineUpdate } from '../services/socket';
+import {
+  subscribeToCandles,
+  subscribeToSocketStatus,
+  joinKlineRoom,
+  leaveKlineRoom,
+} from '../services/socket';
+import type { KlineUpdate, SocketConnectionStatus } from '../services/socket';
 import { getHistoricalCandles } from '../services/api';
 import { createLogger } from '../utils/logger';
 import type { ISeriesApi, IChartApi, CandlestickData, Time } from 'lightweight-charts';
@@ -211,6 +216,10 @@ export const useMarketData = (
     let historyRepairAttempt = 0;
     let historyRepairInFlight = false;
     let scheduledHistoryRepair: ReturnType<typeof setTimeout> | null = null;
+    let initialHistoryFetchInFlight = false;
+    let initialHistoryFetchSucceeded = false;
+    let reconnectRefreshPending = false;
+    let previousSocketStatus: SocketConnectionStatus | null = null;
 
     const syncFullSeries = (history: FormattedCandle[], preserveVisibleRange = true) => {
       const visibleRange = preserveVisibleRange ? chart.timeScale().getVisibleLogicalRange() : null;
@@ -235,6 +244,7 @@ export const useMarketData = (
       if (historyRepairInFlight || isCancelled) return;
 
       historyRepairInFlight = true;
+      let shouldRetry = false;
 
       try {
         const rawCandles = await getHistoricalCandles(symbol, interval, 2000);
@@ -244,6 +254,10 @@ export const useMarketData = (
         const formattedData = formatValidCandles(rawCandles);
 
         if (formattedData.length === 0) {
+          shouldRetry = true;
+          logger.warn(`Recent history refresh returned no valid candles for ${symbol} [${interval}]`, {
+            reason,
+          });
           return;
         }
 
@@ -262,6 +276,7 @@ export const useMarketData = (
         }
       } catch (error) {
         if (!isCancelled) {
+          shouldRetry = true;
           logger.warn(`Recent history repair failed for ${symbol} [${interval}]`, error);
         }
       } finally {
@@ -269,7 +284,7 @@ export const useMarketData = (
 
         if (
           !isCancelled &&
-          hasTailHistoryGap(candleHistoryRef.current, interval) &&
+          (shouldRetry || hasTailHistoryGap(candleHistoryRef.current, interval)) &&
           historyRepairAttempt < RECENT_HISTORY_RETRY_DELAYS_MS.length
         ) {
           scheduleRecentHistoryRepair(reason);
@@ -301,21 +316,33 @@ export const useMarketData = (
       });
     };
 
+    const refreshHistoryAfterReconnect = () => {
+      historyRepairAttempt = 0;
+
+      if (scheduledHistoryRepair) {
+        clearTimeout(scheduledHistoryRepair);
+        scheduledHistoryRepair = null;
+      }
+
+      if (initialHistoryFetchInFlight) {
+        reconnectRefreshPending = true;
+        return;
+      }
+
+      void fetchAndMergeRecentHistory('socket connection restored');
+    };
+
     const fetchHistory = async () => {
+      initialHistoryFetchInFlight = true;
+
       try {
-        resetSeriesData(candlestickSeries, volumeSeries, indicatorSeriesRef);
-        candleHistoryRef.current = [];
-        latestCandleRef.current = null;
-        onCandleHistoryChange?.();
-        onIndicatorValuesChangeRef.current?.([]);
-        volumeByTimeRef.current.clear();
-        
         const rawCandles = await getHistoricalCandles(symbol, interval, 2000);
 
         if (isCancelled) return;
 
         if (!rawCandles || rawCandles.length === 0) {
           logger.warn(`No candle data received from API for symbol: ${symbol}, interval: ${interval}`);
+          scheduleRecentHistoryRepair('initial history load returned no candles');
           return;
         }
 
@@ -323,14 +350,18 @@ export const useMarketData = (
         
         if (formattedData.length === 0) {
           logger.warn(`No valid candle data after formatting for symbol: ${symbol}, interval: ${interval}`);
+          scheduleRecentHistoryRepair('initial history load returned no valid candles');
           return;
         }
 
-        syncFullSeries(formattedData, false);
-        syncRefsAndIndicators(formattedData);
-        logger.info(`Successfully loaded ${formattedData.length} candles for symbol: ${symbol} [${interval}]`);
+        const mergedHistory = mergeCandleHistories(candleHistoryRef.current, formattedData);
+        syncFullSeries(mergedHistory, false);
+        syncRefsAndIndicators(mergedHistory);
+        initialHistoryFetchSucceeded = true;
+        historyRepairAttempt = 0;
+        logger.info(`Successfully loaded ${mergedHistory.length} candles for symbol: ${symbol} [${interval}]`);
 
-        const totalCandles = formattedData.length;
+        const totalCandles = mergedHistory.length;
         const OFFSET_RIGHT = 10;
         const VISIBLE_CANDLES = 30;
         const currentBarSpacing = chart.timeScale().options().barSpacing;
@@ -343,17 +374,29 @@ export const useMarketData = (
         chart.timeScale().applyOptions({
           barSpacing: currentBarSpacing,
         });
-        
-        joinKlineRoom(symbol, interval);
-        logger.info(`Joined kline room: ${symbol}_${interval}`);
-        
       } catch (error) {
         if (isCancelled) return;
         logger.error(`Failed to fetch historical data for symbol: ${symbol}, interval: ${interval}`, error);
+        scheduleRecentHistoryRepair('initial history load failed');
+      } finally {
+        initialHistoryFetchInFlight = false;
+
+        if (!isCancelled && reconnectRefreshPending) {
+          reconnectRefreshPending = false;
+
+          if (!initialHistoryFetchSucceeded) {
+            refreshHistoryAfterReconnect();
+          }
+        }
       }
     };
 
-    fetchHistory();
+    resetSeriesData(candlestickSeries, volumeSeries, indicatorSeriesRef);
+    candleHistoryRef.current = [];
+    latestCandleRef.current = null;
+    onCandleHistoryChange?.();
+    onIndicatorValuesChangeRef.current?.([]);
+    volumeByTimeRef.current.clear();
 
     const handleCandleUpdate = (data: KlineUpdate) => {
       if (data.symbol?.toUpperCase() !== symbol.toUpperCase() || data.interval !== interval) {
@@ -410,6 +453,24 @@ export const useMarketData = (
     };
 
     const unsubscribe = subscribeToCandles(handleCandleUpdate);
+    const unsubscribeSocketStatus = subscribeToSocketStatus((status) => {
+      const didRestoreConnection = (
+        status === 'live'
+        && previousSocketStatus !== null
+        && previousSocketStatus !== 'live'
+      );
+
+      previousSocketStatus = status;
+
+      if (didRestoreConnection) {
+        logger.info(`Socket connection restored; refreshing history for ${symbol} [${interval}]`);
+        refreshHistoryAfterReconnect();
+      }
+    });
+
+    joinKlineRoom(symbol, interval);
+    logger.info(`Joined kline room: ${symbol}_${interval}`);
+    void fetchHistory();
 
     return () => {
       isCancelled = true;
@@ -417,6 +478,7 @@ export const useMarketData = (
         clearTimeout(scheduledHistoryRepair);
       }
       unsubscribe();
+      unsubscribeSocketStatus();
       leaveKlineRoom(symbol, interval);
       logger.info(`Left kline room: ${symbol}_${interval}`);
     };
